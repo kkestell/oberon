@@ -1,0 +1,4 @@
+tests/errors/Duplicate.Mod:4:7: 'K' is already declared
+tests/errors/Duplicate.Mod:5:7: 'Out' is already declared
+tests/errors/Duplicate.Mod:5:15: 'x' is already declared
+Error: 3 error(s)

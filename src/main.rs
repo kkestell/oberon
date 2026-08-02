@@ -1,4 +1,12 @@
+mod ast;
+mod diag;
 mod driver;
+mod lexer;
+mod parser;
+mod qbe;
+mod sema;
+
+use std::path::Path;
 
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
@@ -9,5 +17,9 @@ fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    driver::build()
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: oberon <file.Mod>");
+        std::process::exit(2);
+    };
+    driver::build(Path::new(&path))
 }
