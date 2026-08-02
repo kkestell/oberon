@@ -1,0 +1,2 @@
+tests/errors/IllegalChar.Mod:4:10: illegal character '@'
+Error: 1 error(s)
