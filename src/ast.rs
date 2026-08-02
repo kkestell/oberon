@@ -89,12 +89,31 @@ pub enum Stmt {
         args: Vec<Expr>,
         pos: Pos,
     },
+    If {
+        cond: Expr,
+        then: Vec<Stmt>,
+        elsifs: Vec<(Expr, Vec<Stmt>)>,
+        els: Option<Vec<Stmt>>,
+    },
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+        elsifs: Vec<(Expr, Vec<Stmt>)>,
+    },
+    Repeat {
+        body: Vec<Stmt>,
+        cond: Expr,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int {
         value: i64,
+        pos: Pos,
+    },
+    Bool {
+        value: bool,
         pos: Pos,
     },
     Name(Designator),
@@ -117,6 +136,7 @@ pub enum Expr {
 pub enum UnOp {
     Plus,
     Neg,
+    Not,
 }
 
 // Source operators, not resolved operations. Div is the DIV keyword.
@@ -127,12 +147,23 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
 }
 
 impl Expr {
     pub fn pos(&self) -> Pos {
         match self {
-            Expr::Int { pos, .. } | Expr::Unary { pos, .. } | Expr::Binary { pos, .. } => *pos,
+            Expr::Int { pos, .. }
+            | Expr::Bool { pos, .. }
+            | Expr::Unary { pos, .. }
+            | Expr::Binary { pos, .. } => *pos,
             Expr::Name(d) => d.pos,
         }
     }

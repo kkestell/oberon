@@ -9,7 +9,9 @@ fn eval_const_binary(
     use ast::BinOp;
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-            let (ConstValue::Int(lhs), ConstValue::Int(rhs)) = (lhs, rhs);
+            let (ConstValue::Int(lhs), ConstValue::Int(rhs)) = (lhs, rhs) else {
+                unreachable!("constant expression was type-checked");
+            };
             if rhs == 0 && matches!(op, BinOp::Div | BinOp::Mod) {
                 return Err(Diagnostic::new(pos, "constant DIV or MOD by zero"));
             }
@@ -37,11 +39,34 @@ fn eval_const_binary(
                         }
                     }
                 }
+                _ => unreachable!(),
             };
             value
                 .map(ConstValue::Int)
                 .ok_or_else(|| Diagnostic::new(pos, "constant expression overflows"))
         }
+        BinOp::Eq | BinOp::Ne => {
+            assert_eq!(lhs.ty(), rhs.ty(), "constant expression was type-checked");
+            let equal = lhs == rhs;
+            Ok(ConstValue::Bool(if op == BinOp::Eq {
+                equal
+            } else {
+                !equal
+            }))
+        }
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            let (ConstValue::Int(lhs), ConstValue::Int(rhs)) = (lhs, rhs) else {
+                unreachable!("constant expression was type-checked");
+            };
+            Ok(ConstValue::Bool(match op {
+                BinOp::Lt => lhs < rhs,
+                BinOp::Le => lhs <= rhs,
+                BinOp::Gt => lhs > rhs,
+                BinOp::Ge => lhs >= rhs,
+                _ => unreachable!(),
+            }))
+        }
+        BinOp::And | BinOp::Or => unreachable!("short-circuit operators handled separately"),
     }
 }
 
@@ -56,6 +81,7 @@ impl Analyzer {
                     None
                 }
             },
+            ast::Expr::Bool { .. } => Some(Type::Boolean),
             // A variable is not a constant, but its type still has to be known
             // so the rest of the expression can be checked. eval_const is what
             // reports that it cannot be folded.
@@ -66,6 +92,7 @@ impl Analyzer {
                     (ast::UnOp::Plus, Type::Integer) | (ast::UnOp::Neg, Type::Integer) => {
                         Some(found)
                     }
+                    (ast::UnOp::Not, Type::Boolean) => Some(Type::Boolean),
                     _ => {
                         self.diags.push(unary_type_error(*pos, *op, &found));
                         None
@@ -92,6 +119,38 @@ impl Analyzer {
                         Type::Integer,
                         &mut self.diags,
                     ),
+                    BinOp::And | BinOp::Or => check_binary_types(
+                        *pos,
+                        bin_op_name(*op),
+                        Type::Boolean,
+                        lhs,
+                        rhs,
+                        Type::Boolean,
+                        &mut self.diags,
+                    ),
+                    BinOp::Eq | BinOp::Ne => {
+                        if lhs == rhs && lhs.scalar().is_some() {
+                            Some(Type::Boolean)
+                        } else {
+                            let message = if lhs == rhs {
+                                format!(
+                                    "operator '{}' is not defined for {lhs} operands",
+                                    bin_op_name(*op)
+                                )
+                            } else {
+                                format!(
+                                    "operator '{}' requires operands of the same type, found {lhs} and {rhs}",
+                                    bin_op_name(*op)
+                                )
+                            };
+                            self.diags.push(Diagnostic::new(*pos, message));
+                            None
+                        }
+                    }
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        check_order_types(*pos, *op, lhs, rhs, &mut self.diags)?;
+                        Some(Type::Boolean)
+                    }
                 }
             }
         }
@@ -102,6 +161,7 @@ impl Analyzer {
             ast::Expr::Int { value, pos } => i32::try_from(*value)
                 .map(ConstValue::Int)
                 .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
+            ast::Expr::Bool { value, .. } => Ok(ConstValue::Bool(*value)),
             ast::Expr::Name(designator) => match self.qualident(designator)? {
                 (Symbol::Const(value), []) => Ok(value),
                 _ => Err(Diagnostic::new(
@@ -117,8 +177,30 @@ impl Analyzer {
                         .checked_neg()
                         .map(ConstValue::Int)
                         .ok_or_else(|| Diagnostic::new(*pos, "constant expression overflows")),
+                    (ast::UnOp::Not, ConstValue::Bool(value)) => Ok(ConstValue::Bool(!value)),
+                    _ => unreachable!("constant expression was type-checked"),
                 }
             }
+            ast::Expr::Binary {
+                op: ast::BinOp::And,
+                lhs,
+                rhs,
+                ..
+            } => match self.eval_const(lhs)? {
+                ConstValue::Bool(false) => Ok(ConstValue::Bool(false)),
+                ConstValue::Bool(true) => self.eval_const(rhs),
+                _ => unreachable!("constant expression was type-checked"),
+            },
+            ast::Expr::Binary {
+                op: ast::BinOp::Or,
+                lhs,
+                rhs,
+                ..
+            } => match self.eval_const(lhs)? {
+                ConstValue::Bool(true) => Ok(ConstValue::Bool(true)),
+                ConstValue::Bool(false) => self.eval_const(rhs),
+                _ => unreachable!("constant expression was type-checked"),
+            },
             ast::Expr::Binary { op, lhs, rhs, pos } => {
                 let lhs = self.eval_const(lhs)?;
                 let rhs = self.eval_const(rhs)?;

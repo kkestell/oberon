@@ -81,7 +81,7 @@ fn emit_proc(out: &mut String, proc: &ir::Proc, names: &Names) {
         emit_inst(out, inst, names);
         terminated = matches!(
             inst,
-            ir::Inst::Br { .. } | ir::Inst::Ret(_) | ir::Inst::Trap { .. }
+            ir::Inst::Jmp(_) | ir::Inst::Br { .. } | ir::Inst::Ret(_) | ir::Inst::Trap { .. }
         );
         if matches!(inst, ir::Inst::Label(_)) {
             terminated = false;
@@ -114,6 +114,16 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names) {
             )
             .unwrap();
         }
+        ir::Inst::Copy { dst, ty, src } => {
+            writeln!(
+                out,
+                "\t{} ={} copy {}",
+                temp(*dst),
+                class(*ty),
+                value(src, names)
+            )
+            .unwrap();
+        }
         ir::Inst::Un { dst, op, ty, arg } => match op {
             ir::UnOp::Neg => {
                 writeln!(
@@ -124,6 +134,11 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names) {
                     value(arg, names)
                 )
                 .unwrap();
+            }
+            // QBE has no logical negation, so ~b is b = 0. The operand is
+            // always BOOLEAN, which is already 0 or 1 in a word.
+            ir::UnOp::Not => {
+                writeln!(out, "\t{} =w ceqw {}, 0", temp(*dst), value(arg, names)).unwrap();
             }
         },
         ir::Inst::Bin {
@@ -156,6 +171,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names) {
             write!(out, "call ${}(", names.symbol(symbol)).unwrap();
             writeln!(out, "{})", args(call_args, names)).unwrap();
         }
+        ir::Inst::Jmp(label) => writeln!(out, "\tjmp @{label}").unwrap(),
         ir::Inst::Br { cond, then, els } => {
             writeln!(out, "\tjnz {}, @{then}, @{els}", value(cond, names)).unwrap();
         }
@@ -217,6 +233,7 @@ fn temp(id: usize) -> String {
 fn value(value: &ir::Value, names: &Names) -> String {
     match value {
         ir::Value::Int(value) => value.to_string(),
+        ir::Value::Bool(value) => usize::from(*value).to_string(),
         ir::Value::Symbol(symbol) => format!("${}", names.symbol(symbol)),
         ir::Value::Temp(id) => temp(*id),
     }
@@ -269,5 +286,8 @@ fn bin_op(op: ir::BinOp) -> &'static str {
         ir::BinOp::Eq => "ceqw",
         ir::BinOp::Ne => "cnew",
         ir::BinOp::Lt => "csltw",
+        ir::BinOp::Le => "cslew",
+        ir::BinOp::Gt => "csgtw",
+        ir::BinOp::Ge => "csgew",
     }
 }

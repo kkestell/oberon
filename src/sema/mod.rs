@@ -20,7 +20,7 @@ struct Place {
     ty: Type,
 }
 
-// What the source of an assignment turned out to be.
+// What the source of an assignment or a relation operand turned out to be.
 enum Source {
     Value(ir::Value, Type),
 }
@@ -131,8 +131,9 @@ impl Analyzer {
         }
     }
 
-    // Constants are folded in declaration order, each type-checked before it
-    // is folded.
+    // Constants are folded in declaration order. The separate type walk is
+    // needed because folding short-circuits while unreachable operands still
+    // have to be well-typed.
     fn const_declarations(&mut self, declarations: &[ast::ConstDecl]) {
         for declaration in declarations {
             if self.check_const_expr(&declaration.expr).is_none() {
@@ -210,6 +211,14 @@ impl Analyzer {
                     ));
                 }
             }
+            ast::Stmt::If {
+                cond,
+                then,
+                elsifs,
+                els,
+            } => self.lower_if(cond, then, elsifs, els.as_deref()),
+            ast::Stmt::While { cond, body, elsifs } => self.lower_while(cond, body, elsifs),
+            ast::Stmt::Repeat { body, cond } => self.lower_repeat(body, cond),
         }
     }
 
@@ -252,7 +261,8 @@ impl Analyzer {
         ir::Addr::Global(symbol)
     }
 
-    // The right-hand side of an assignment, evaluated exactly once.
+    // The right-hand side of an assignment or one operand of a relation,
+    // evaluated exactly once.
     fn lower_source(&mut self, expr: &ast::Expr) -> Option<Source> {
         let ast::Expr::Name(designator) = expr else {
             let (value, ty) = self.lower_expr(expr)?;
@@ -283,6 +293,111 @@ impl Analyzer {
         }
     }
 
+    fn lower_if(
+        &mut self,
+        cond: &ast::Expr,
+        then: &[ast::Stmt],
+        elsifs: &[(ast::Expr, Vec<ast::Stmt>)],
+        els: Option<&[ast::Stmt]>,
+    ) {
+        let end = self.label("if.end");
+        self.lower_guarded(cond, then, &end);
+        for (cond, body) in elsifs {
+            self.lower_guarded(cond, body, &end);
+        }
+        if let Some(body) = els {
+            self.lower_stmts(body);
+        }
+        self.emit(ir::Inst::Jmp(end.clone()));
+        self.emit(ir::Inst::Label(end));
+    }
+
+    fn lower_guarded(&mut self, cond: &ast::Expr, body: &[ast::Stmt], end: &str) {
+        let value = self.lower_condition(cond);
+        if let Some(value) = value {
+            let yes = self.label("guard.yes");
+            let no = self.label("guard.no");
+            self.emit(ir::Inst::Br {
+                cond: value,
+                then: yes.clone(),
+                els: no.clone(),
+            });
+            self.emit(ir::Inst::Label(yes));
+            self.lower_stmts(body);
+            self.emit(ir::Inst::Jmp(end.into()));
+            self.emit(ir::Inst::Label(no));
+        } else {
+            self.lower_stmts(body);
+        }
+    }
+
+    fn lower_while(
+        &mut self,
+        cond: &ast::Expr,
+        body: &[ast::Stmt],
+        elsifs: &[(ast::Expr, Vec<ast::Stmt>)],
+    ) {
+        let test = self.label("while.test");
+        let end = self.label("while.end");
+        self.emit(ir::Inst::Jmp(test.clone()));
+        self.emit(ir::Inst::Label(test.clone()));
+
+        self.lower_loop_guard(cond, body, &test);
+        for (cond, body) in elsifs {
+            self.lower_loop_guard(cond, body, &test);
+        }
+        self.emit(ir::Inst::Jmp(end.clone()));
+        self.emit(ir::Inst::Label(end));
+    }
+
+    fn lower_loop_guard(&mut self, cond: &ast::Expr, body: &[ast::Stmt], test: &str) {
+        let value = self.lower_condition(cond);
+        if let Some(value) = value {
+            let yes = self.label("while.body");
+            let no = self.label("while.next");
+            self.emit(ir::Inst::Br {
+                cond: value,
+                then: yes.clone(),
+                els: no.clone(),
+            });
+            self.emit(ir::Inst::Label(yes));
+            self.lower_stmts(body);
+            self.emit(ir::Inst::Jmp(test.into()));
+            self.emit(ir::Inst::Label(no));
+        } else {
+            self.lower_stmts(body);
+        }
+    }
+
+    fn lower_repeat(&mut self, body: &[ast::Stmt], cond: &ast::Expr) {
+        let body_label = self.label("repeat.body");
+        let end = self.label("repeat.end");
+        self.emit(ir::Inst::Jmp(body_label.clone()));
+        self.emit(ir::Inst::Label(body_label.clone()));
+        self.lower_stmts(body);
+        if let Some(value) = self.lower_condition(cond) {
+            self.emit(ir::Inst::Br {
+                cond: value,
+                then: end.clone(),
+                els: body_label,
+            });
+        }
+        self.emit(ir::Inst::Label(end));
+    }
+
+    fn lower_condition(&mut self, expr: &ast::Expr) -> Option<ir::Value> {
+        let (value, ty) = self.lower_expr(expr)?;
+        if ty == Type::Boolean {
+            Some(value)
+        } else {
+            self.diags.push(Diagnostic::new(
+                expr.pos(),
+                format!("condition must be BOOLEAN, found {ty}"),
+            ));
+            None
+        }
+    }
+
     fn lower_expr(&mut self, expr: &ast::Expr) -> Option<(ir::Value, Type)> {
         match expr {
             ast::Expr::Int { value, pos } => match i32::try_from(*value) {
@@ -293,6 +408,7 @@ impl Analyzer {
                     None
                 }
             },
+            ast::Expr::Bool { value, .. } => Some((ir::Value::Bool(*value), Type::Boolean)),
             ast::Expr::Name(_) => {
                 let source = self.lower_source(expr)?;
                 self.source_scalar(source)
@@ -315,14 +431,86 @@ impl Analyzer {
                         });
                         Some((ir::Value::Temp(dst), found))
                     }
+                    (ast::UnOp::Not, Type::Boolean) => {
+                        let dst = self.temp();
+                        self.emit(ir::Inst::Un {
+                            dst,
+                            op: ir::UnOp::Not,
+                            ty: ir::Ty::Bool,
+                            arg,
+                        });
+                        Some((ir::Value::Temp(dst), Type::Boolean))
+                    }
                     _ => {
                         self.diags.push(unary_type_error(*pos, *op, &found));
                         None
                     }
                 }
             }
-            ast::Expr::Binary { op, lhs, rhs, pos } => self.lower_binary(*op, lhs, rhs, *pos),
+            ast::Expr::Binary { op, lhs, rhs, pos } => match op {
+                ast::BinOp::And | ast::BinOp::Or => self.lower_logical(*op, lhs, rhs, *pos),
+                _ => self.lower_binary(*op, lhs, rhs, *pos),
+            },
         }
+    }
+
+    fn lower_logical(
+        &mut self,
+        op: ast::BinOp,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        pos: Pos,
+    ) -> Option<(ir::Value, Type)> {
+        let lhs = self.lower_expr(lhs);
+        let Some((lhs_value, lhs_ty)) = lhs else {
+            let _ = self.lower_expr(rhs);
+            return None;
+        };
+
+        let rhs_label = self.label("logic.rhs");
+        let short_label = self.label("logic.short");
+        let end = self.label("logic.end");
+        let result = self.temp();
+        let (then, els, short) = match op {
+            ast::BinOp::And => (rhs_label.clone(), short_label.clone(), false),
+            ast::BinOp::Or => (short_label.clone(), rhs_label.clone(), true),
+            _ => unreachable!(),
+        };
+        self.emit(ir::Inst::Br {
+            cond: lhs_value,
+            then,
+            els,
+        });
+        self.emit(ir::Inst::Label(short_label));
+        self.emit(ir::Inst::Copy {
+            dst: result,
+            ty: ir::Ty::Bool,
+            src: ir::Value::Bool(short),
+        });
+        self.emit(ir::Inst::Jmp(end.clone()));
+        self.emit(ir::Inst::Label(rhs_label));
+        let rhs = self.lower_expr(rhs);
+        if let Some((value, _)) = &rhs {
+            self.emit(ir::Inst::Copy {
+                dst: result,
+                ty: ir::Ty::Bool,
+                src: value.clone(),
+            });
+        }
+        self.emit(ir::Inst::Jmp(end.clone()));
+        self.emit(ir::Inst::Label(end));
+
+        let (_, rhs_ty) = rhs?;
+        check_binary_types(
+            pos,
+            bin_op_name(op),
+            Type::Boolean,
+            lhs_ty,
+            rhs_ty,
+            Type::Boolean,
+            &mut self.diags,
+        )?;
+        Some((ir::Value::Temp(result), Type::Boolean))
     }
 
     fn lower_binary(
@@ -333,6 +521,9 @@ impl Analyzer {
         pos: Pos,
     ) -> Option<(ir::Value, Type)> {
         use ast::BinOp;
+        if let BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge = op {
+            return self.lower_relation(op, lhs, rhs, pos);
+        }
         let lhs = self.lower_expr(lhs);
         let rhs_value = self.lower_expr(rhs);
         let (Some((lhs, lhs_ty)), Some((rhs_ir, rhs_ty))) = (lhs, rhs_value) else {
@@ -340,7 +531,7 @@ impl Analyzer {
         };
 
         // The operand type selects the machine operation, and it is the
-        // result type too.
+        // result type too: a relation never reaches here.
         let (operand_ty, result_ty) = match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul => {
                 let ty = check_arith_types(pos, op, lhs_ty, rhs_ty, &mut self.diags)?;
@@ -358,6 +549,14 @@ impl Analyzer {
                 )?;
                 (Type::Integer, Type::Integer)
             }
+            BinOp::Eq
+            | BinOp::Ne
+            | BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge
+            | BinOp::And
+            | BinOp::Or => unreachable!(),
         };
 
         let value = match op {
@@ -387,6 +586,52 @@ impl Analyzer {
             ),
         };
         Some((value, result_ty))
+    }
+
+    // Report 8.2.4. The relations order INTEGER, and compare BOOLEAN for
+    // equality.
+    fn lower_relation(
+        &mut self,
+        op: ast::BinOp,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        pos: Pos,
+    ) -> Option<(ir::Value, Type)> {
+        use ast::BinOp;
+        // Both operands are resolved left to right and each exactly once.
+        let lhs_src = self.lower_source(lhs);
+        let rhs_src = self.lower_source(rhs);
+        let (Some(lhs_src), Some(rhs_src)) = (lhs_src, rhs_src) else {
+            return None;
+        };
+
+        let lhs_value = self.source_scalar(lhs_src);
+        let rhs_value = self.source_scalar(rhs_src);
+        let (Some((lhs_value, lhs_ty)), Some((rhs_value, rhs_ty))) = (lhs_value, rhs_value) else {
+            return None;
+        };
+        let operand_ty = match op {
+            BinOp::Eq | BinOp::Ne => {
+                if lhs_ty == rhs_ty && lhs_ty.scalar().is_some() {
+                    lhs_ty
+                } else {
+                    self.diags.push(Diagnostic::new(
+                        pos,
+                        format!(
+                            "operator '{}' requires operands of the same type, found {lhs_ty} and {rhs_ty}",
+                            bin_op_name(op)
+                        ),
+                    ));
+                    return None;
+                }
+            }
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                check_order_types(pos, op, lhs_ty, rhs_ty, &mut self.diags)?
+            }
+            _ => unreachable!("only a relation reaches lower_relation"),
+        };
+        let value = self.bin(relation_ir(op), operand_ty.ir(), lhs_value, rhs_value);
+        Some((value, Type::Boolean))
     }
 
     fn div_zero_check(&mut self, divisor: ir::Value, pos: Pos) {
@@ -725,6 +970,18 @@ impl ProcBuilder {
     }
 }
 
+fn relation_ir(op: ast::BinOp) -> ir::BinOp {
+    match op {
+        ast::BinOp::Eq => ir::BinOp::Eq,
+        ast::BinOp::Ne => ir::BinOp::Ne,
+        ast::BinOp::Lt => ir::BinOp::Lt,
+        ast::BinOp::Le => ir::BinOp::Le,
+        ast::BinOp::Gt => ir::BinOp::Gt,
+        ast::BinOp::Ge => ir::BinOp::Ge,
+        _ => unreachable!("not a relation"),
+    }
+}
+
 // A selector on something that cannot carry one. Reaching this means the
 // context wanted a name — a type, a procedure, a constant — so the message
 // says the selector is out of place rather than guessing at the intent. A
@@ -751,6 +1008,7 @@ fn unary_type_error(pos: Pos, op: ast::UnOp, found: &Type) -> Diagnostic {
     let (name, expected) = match op {
         ast::UnOp::Plus => ("+", "INTEGER"),
         ast::UnOp::Neg => ("-", "INTEGER"),
+        ast::UnOp::Not => ("~", "BOOLEAN"),
     };
     Diagnostic::new(
         pos,

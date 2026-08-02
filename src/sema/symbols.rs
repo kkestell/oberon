@@ -10,18 +10,21 @@ pub(super) type Scope = HashMap<String, Symbol>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
     Int(i32),
+    Bool(bool),
 }
 
 impl ConstValue {
     pub(super) fn ty(&self) -> Type {
         match self {
             ConstValue::Int(_) => Type::Integer,
+            ConstValue::Bool(_) => Type::Boolean,
         }
     }
 
     pub(super) fn ir(&self) -> ir::Value {
         match self {
             ConstValue::Int(v) => ir::Value::Int(*v),
+            ConstValue::Bool(v) => ir::Value::Bool(*v),
         }
     }
 }
@@ -61,6 +64,7 @@ impl Member {
 pub(super) fn universe_scope() -> Scope {
     let mut scope = Scope::new();
     scope.insert("INTEGER".into(), Symbol::TypeName(Type::Integer));
+    scope.insert("BOOLEAN".into(), Symbol::TypeName(Type::Boolean));
     scope
 }
 

@@ -12,6 +12,14 @@ pub(super) fn bin_op_name(op: ast::BinOp) -> &'static str {
         ast::BinOp::Mul => "*",
         ast::BinOp::Div => "DIV",
         ast::BinOp::Mod => "MOD",
+        ast::BinOp::Eq => "=",
+        ast::BinOp::Ne => "#",
+        ast::BinOp::Lt => "<",
+        ast::BinOp::Le => "<=",
+        ast::BinOp::Gt => ">",
+        ast::BinOp::Ge => ">=",
+        ast::BinOp::And => "&",
+        ast::BinOp::Or => "OR",
     }
 }
 
@@ -33,6 +41,19 @@ pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
 // Report 8.2: "+", "-", and "*" take two INTEGERs.
 
 pub(super) fn check_arith_types(
+    pos: Pos,
+    op: ast::BinOp,
+    lhs: Type,
+    rhs: Type,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    check_operand_types(pos, op, &[Type::Integer], lhs, rhs, diags)
+}
+
+// Report 8.2.4 orders INTEGER; BOOLEAN has equality and inequality only. The
+// operand type is returned rather than BOOLEAN, because the comparison
+// instruction is chosen from it.
+pub(super) fn check_order_types(
     pos: Pos,
     op: ast::BinOp,
     lhs: Type,
@@ -96,6 +117,7 @@ pub(super) fn check_binary_types(
 #[derive(Debug, Clone)]
 pub enum Type {
     Integer,
+    Boolean,
     // A procedure's signature. No source names it, so it has no value and no
     // storage.
     Procedure(Rc<ProcedureType>),
@@ -118,6 +140,7 @@ impl Type {
     pub(super) fn scalar(&self) -> Option<ir::Ty> {
         match self {
             Type::Integer => Some(ir::Ty::Int),
+            Type::Boolean => Some(ir::Ty::Bool),
             Type::Procedure(_) => None,
         }
     }
@@ -142,7 +165,7 @@ impl Type {
 impl PartialEq for Type {
     fn eq(&self, other: &Type) -> bool {
         match (self, other) {
-            (Type::Integer, Type::Integer) => true,
+            (Type::Integer, Type::Integer) | (Type::Boolean, Type::Boolean) => true,
             (Type::Procedure(a), Type::Procedure(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
@@ -153,6 +176,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Integer => write!(f, "INTEGER"),
+            Type::Boolean => write!(f, "BOOLEAN"),
             Type::Procedure(procedure) => {
                 write!(f, "PROCEDURE")?;
                 if !procedure.params.is_empty() || procedure.ret.is_some() {

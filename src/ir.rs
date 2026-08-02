@@ -105,6 +105,7 @@ pub enum Ty {
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i32),
+    Bool(bool),
     Symbol(String),
     Temp(usize),
 }
@@ -126,6 +127,11 @@ pub enum Inst {
         ty: Ty,
         val: Value,
         addr: Addr,
+    },
+    Copy {
+        dst: usize,
+        ty: Ty,
+        src: Value,
     },
     // `ty` is the operand type, which is also the result type.
     Un {
@@ -150,6 +156,7 @@ pub enum Inst {
         symbol: String,
         args: Vec<Arg>,
     },
+    Jmp(String),
     Br {
         cond: Value,
         then: String,
@@ -172,6 +179,7 @@ pub enum Arg {
 #[derive(Debug, Clone, Copy)]
 pub enum UnOp {
     Neg,
+    Not,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,12 +192,18 @@ pub enum BinOp {
     Eq,
     Ne,
     Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 impl BinOp {
     // A comparison returns BOOLEAN whatever its operands are; every other
     // binary operation returns the operand type.
     pub fn is_comparison(self) -> bool {
-        matches!(self, BinOp::Eq | BinOp::Ne | BinOp::Lt)
+        matches!(
+            self,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        )
     }
 }

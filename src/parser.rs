@@ -207,6 +207,9 @@ impl Parser {
         loop {
             match self.peek() {
                 Tok::Ident(_) => stmts.push(self.statement()?),
+                Tok::If => stmts.push(self.if_statement()?),
+                Tok::While => stmts.push(self.while_statement()?),
+                Tok::Repeat => stmts.push(self.repeat_statement()?),
                 _ => {} // empty statement is legal
             }
             if *self.peek() == Tok::Semi {
@@ -216,6 +219,57 @@ impl Parser {
             }
         }
         Ok(stmts)
+    }
+
+    fn if_statement(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::If, "'IF'")?;
+        let cond = self.expression()?;
+        self.expect(Tok::Then, "'THEN'")?;
+        let then = self.stmt_seq()?;
+        let mut elsifs = Vec::new();
+        while *self.peek() == Tok::Elsif {
+            self.advance();
+            let cond = self.expression()?;
+            self.expect(Tok::Then, "'THEN'")?;
+            elsifs.push((cond, self.stmt_seq()?));
+        }
+        let els = if *self.peek() == Tok::Else {
+            self.advance();
+            Some(self.stmt_seq()?)
+        } else {
+            None
+        };
+        self.expect(Tok::End, "'END'")?;
+        Ok(Stmt::If {
+            cond,
+            then,
+            elsifs,
+            els,
+        })
+    }
+
+    fn while_statement(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::While, "'WHILE'")?;
+        let cond = self.expression()?;
+        self.expect(Tok::Do, "'DO'")?;
+        let body = self.stmt_seq()?;
+        let mut elsifs = Vec::new();
+        while *self.peek() == Tok::Elsif {
+            self.advance();
+            let cond = self.expression()?;
+            self.expect(Tok::Do, "'DO'")?;
+            elsifs.push((cond, self.stmt_seq()?));
+        }
+        self.expect(Tok::End, "'END'")?;
+        Ok(Stmt::While { cond, body, elsifs })
+    }
+
+    fn repeat_statement(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::Repeat, "'REPEAT'")?;
+        let body = self.stmt_seq()?;
+        self.expect(Tok::Until, "'UNTIL'")?;
+        let cond = self.expression()?;
+        Ok(Stmt::Repeat { body, cond })
     }
 
     fn statement(&mut self) -> PResult<Stmt> {
@@ -274,9 +328,27 @@ impl Parser {
         })
     }
 
-    // expression = SimpleExpression
+    // expression = SimpleExpression [relation SimpleExpression]
     fn expression(&mut self) -> PResult<Expr> {
-        self.simple_expression()
+        let lhs = self.simple_expression()?;
+        let op = match self.peek() {
+            Tok::Eq => BinOp::Eq,
+            Tok::Hash => BinOp::Ne,
+            Tok::Lt => BinOp::Lt,
+            Tok::Le => BinOp::Le,
+            Tok::Gt => BinOp::Gt,
+            Tok::Ge => BinOp::Ge,
+            _ => return Ok(lhs),
+        };
+        let pos = self.pos();
+        self.advance();
+        let rhs = self.simple_expression()?;
+        Ok(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+            pos,
+        })
     }
 
     // SimpleExpression = ["+" | "-"] term {AddOperator term}
@@ -314,6 +386,7 @@ impl Parser {
             let op = match self.peek() {
                 Tok::Plus => BinOp::Add,
                 Tok::Minus => BinOp::Sub,
+                Tok::Or => BinOp::Or,
                 _ => break,
             };
             let pos = self.pos();
@@ -337,6 +410,7 @@ impl Parser {
                 Tok::Star => BinOp::Mul,
                 Tok::Div => BinOp::Div,
                 Tok::Mod => BinOp::Mod,
+                Tok::Amp => BinOp::And,
                 _ => break,
             };
             let pos = self.pos();
@@ -359,6 +433,21 @@ impl Parser {
                 let pos = self.pos();
                 self.advance();
                 Ok(Expr::Int { value, pos })
+            }
+            Tok::True | Tok::False => {
+                let value = *self.peek() == Tok::True;
+                let pos = self.pos();
+                self.advance();
+                Ok(Expr::Bool { value, pos })
+            }
+            Tok::Tilde => {
+                let pos = self.pos();
+                self.advance();
+                Ok(Expr::Unary {
+                    op: UnOp::Not,
+                    expr: Box::new(self.factor()?),
+                    pos,
+                })
             }
             Tok::Ident(_) => Ok(Expr::Name(self.designator()?)),
             Tok::LParen => {
