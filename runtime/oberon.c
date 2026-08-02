@@ -26,3 +26,23 @@ void oberon_div_by_zero(const char *module, int32_t line, int32_t col)
 {
     oberon_fail("DIV or MOD by zero", module, line, col);
 }
+
+void oberon_assert_failed(const char *module, int32_t line, int32_t col)
+{
+    oberon_fail("assertion failed", module, line, col);
+}
+
+void oberon_abs_overflow(const char *module, int32_t line, int32_t col)
+{
+    oberon_fail("ABS overflows INTEGER", module, line, col);
+}
+
+void oberon_case_no_match(const char *module, int32_t line, int32_t col)
+{
+    oberon_fail("CASE without matching label", module, line, col);
+}
+
+void oberon_shift_range(const char *module, int32_t line, int32_t col)
+{
+    oberon_fail("shift count out of range", module, line, col);
+}

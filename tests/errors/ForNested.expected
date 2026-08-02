@@ -1,0 +1,3 @@
+tests/errors/ForNested.Mod:8:9: cannot assign to 'i': it is read-only
+tests/errors/ForNested.Mod:9:5: cannot assign to 'i': it is read-only
+Error: 2 error(s)

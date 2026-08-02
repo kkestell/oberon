@@ -1,0 +1,2 @@
+tests/errors/CaseNegativeLabel.Mod:6:13: expected case label, found Minus
+Error: 1 error(s)

@@ -9,7 +9,7 @@ mod constant;
 mod symbols;
 mod types;
 
-use symbols::{ConstValue, Scope, Symbol, universe_scope};
+use symbols::{Builtin, ConstValue, Scope, Symbol, builtin_signature, type_list, universe_scope};
 pub use symbols::{Interface, out_interface};
 use types::*;
 
@@ -18,12 +18,14 @@ use types::*;
 // module scope is innermost".
 const MODULE_SCOPE: usize = 1;
 
-// Where a variable's storage is and what type it has there. Report 8.1 builds
-// this by applying selectors to a variable, and every writable context —
-// assignment and a VAR actual — uses the one that comes out.
+// Where a variable's storage is, what type it has there, and whether it may be
+// written. Report 8.1 builds this by applying selectors to a variable, and
+// every writable context — assignment, a VAR actual, INC and its relatives —
+// uses the one that comes out.
 struct Place {
     addr: ir::Addr,
     ty: Type,
+    read_only: bool,
 }
 
 type ResolvedFormal = (bool, String, Pos, Type);
@@ -72,8 +74,8 @@ impl Analyzer {
         Self {
             module: module.into(),
             // Report 4: the predefined identifiers are not declared in any
-            // module, so a module may declare its own INTEGER and shadow this
-            // one rather than colliding with it. ORB.Init builds the same
+            // module, so a module may declare its own ABS and shadow this one
+            // rather than colliding with it. ORB.Init builds the same
             // universe scope and opens the module scope inside it.
             scopes: vec![universe_scope(), Scope::new()],
             diags: Vec::new(),
@@ -199,6 +201,7 @@ impl Analyzer {
                     Symbol::Var {
                         ty: ty.clone(),
                         addr,
+                        read_only: false,
                     },
                 ) {
                     self.globals.push(ir::Global {
@@ -255,6 +258,7 @@ impl Analyzer {
                 Symbol::Var {
                     ty: ty.clone(),
                     addr: addr.clone(),
+                    read_only: false,
                 },
             ) && !by_ref
             {
@@ -295,6 +299,7 @@ impl Analyzer {
                     Symbol::Var {
                         ty: ty.clone(),
                         addr,
+                        read_only: false,
                     },
                 ) {
                     self.reserve_slot(&id.name, &ty);
@@ -387,6 +392,14 @@ impl Analyzer {
             } => self.lower_if(cond, then, elsifs, els.as_deref()),
             ast::Stmt::While { cond, body, elsifs } => self.lower_while(cond, body, elsifs),
             ast::Stmt::Repeat { body, cond } => self.lower_repeat(body, cond),
+            ast::Stmt::For {
+                var,
+                start,
+                limit,
+                step,
+                body,
+            } => self.lower_for(var, start, limit, step.as_ref(), body),
+            ast::Stmt::Case { expr, arms } => self.lower_case(expr, arms),
         }
     }
 
@@ -552,6 +565,264 @@ impl Analyzer {
             });
         }
         self.emit(ir::Inst::Label(end));
+    }
+
+    // Report 9.8 defines the statement by rewriting it as a WHILE whose
+    // condition contains the limit expression, so the limit is recomputed
+    // before every test, including the final failing one. ORP.StatSequence
+    // and OJP.StatSequence both record the loop top before parsing the limit,
+    // and OBNC puts it in a C for-condition, so all three do the same.
+    fn lower_for(
+        &mut self,
+        var: &ast::Designator,
+        start: &ast::Expr,
+        limit: &ast::Expr,
+        step: Option<&ast::Expr>,
+        body: &[ast::Stmt],
+    ) {
+        let control = match self.assign_target(var) {
+            Some(place) if place.ty == Type::Integer => Some(place.addr),
+            Some(place) => {
+                self.diags.push(Diagnostic::new(
+                    var.pos,
+                    format!(
+                        "control variable '{}' must be INTEGER, found {}",
+                        var.ident, place.ty
+                    ),
+                ));
+                None
+            }
+            None => None,
+        };
+        let step = self.for_step(step);
+
+        let start = self.lower_int(start, "FOR start value");
+        if let (Some(addr), Some(value)) = (control.clone(), start) {
+            self.emit(ir::Inst::Store {
+                ty: ir::Ty::Int,
+                val: value,
+                addr,
+            });
+        }
+
+        let test = self.label("for.test");
+        let end = self.label("for.end");
+        self.emit(ir::Inst::Jmp(test.clone()));
+        self.emit(ir::Inst::Label(test.clone()));
+
+        let limit = self.lower_int(limit, "FOR limit");
+        if let (Some(addr), Some(limit)) = (control.clone(), limit) {
+            let current = self.load(addr, ir::Ty::Int);
+            // The direction is decided here, from the sign of the folded
+            // step, so nothing tests the step at run time.
+            let op = if step < 0 {
+                ir::BinOp::Ge
+            } else {
+                ir::BinOp::Le
+            };
+            let cond = self.bin(op, ir::Ty::Int, current, limit);
+            let yes = self.label("for.body");
+            self.emit(ir::Inst::Br {
+                cond,
+                then: yes.clone(),
+                els: end.clone(),
+            });
+            self.emit(ir::Inst::Label(yes));
+        }
+
+        let previous = self.set_read_only(&var.ident, true);
+        self.lower_stmts(body);
+        self.set_read_only(&var.ident, previous);
+
+        if let Some(addr) = control {
+            let current = self.load(addr.clone(), ir::Ty::Int);
+            let next = self.bin(ir::BinOp::Add, ir::Ty::Int, current, ir::Value::Int(step));
+            self.emit(ir::Inst::Store {
+                ty: ir::Ty::Int,
+                val: next,
+                addr,
+            });
+        }
+        self.emit(ir::Inst::Jmp(test));
+        self.emit(ir::Inst::Label(end));
+    }
+
+    // BY takes a ConstExpression, and a step of zero cannot terminate:
+    // ORP reports "zero increment" and this compiler does the same rather
+    // than emitting an infinite loop. One is the recovery value so the body
+    // still gets lowered and diagnosed.
+    fn for_step(&mut self, step: Option<&ast::Expr>) -> i32 {
+        let Some(expr) = step else { return 1 };
+        if self.check_const_expr(expr).is_none() {
+            return 1;
+        }
+        match self.eval_const(expr) {
+            Ok(ConstValue::Int(0)) => {
+                self.diags
+                    .push(Diagnostic::new(expr.pos(), "FOR step must not be zero"));
+                1
+            }
+            Ok(ConstValue::Int(value)) => value,
+            Ok(other) => {
+                self.diags.push(Diagnostic::new(
+                    expr.pos(),
+                    format!("FOR step must be INTEGER, found {}", other.ty()),
+                ));
+                1
+            }
+            Err(diag) => {
+                self.diags.push(diag);
+                1
+            }
+        }
+    }
+
+    // Report 9.5. The INTEGER form compares the selector against its labels.
+    fn lower_case(&mut self, expr: &ast::Expr, arms: &[ast::CaseArm]) {
+        // "First the case expression is evaluated": once, into a temporary
+        // that every arm's test then compares against.
+        let selector = match self.lower_expr(expr) {
+            Some((value, Type::Integer)) => Some(value),
+            Some((_, ty)) => {
+                self.diags.push(Diagnostic::new(
+                    expr.pos(),
+                    format!("CASE expression must be INTEGER, found {ty}"),
+                ));
+                None
+            }
+            None => None,
+        };
+
+        // One label table for the whole statement, as in oberonc: labels must
+        // be distinct across alternatives, not just within one.
+        let mut covered: Vec<(i32, i32)> = Vec::new();
+        let mut arm_ranges = Vec::new();
+        for arm in arms {
+            let mut ranges = Vec::new();
+            for range in &arm.labels {
+                let low = self.case_label(&range.low);
+                let high = match &range.high {
+                    Some(expr) => self.case_label(expr),
+                    None => low,
+                };
+                let (Some(low), Some(high)) = (low, high) else {
+                    continue;
+                };
+                if low > high {
+                    self.diags.push(Diagnostic::new(
+                        range.low.pos(),
+                        format!("case label range {low}..{high} is reversed"),
+                    ));
+                    continue;
+                }
+                if covered.iter().any(|(a, b)| low <= *b && *a <= high) {
+                    self.diags.push(Diagnostic::new(
+                        range.low.pos(),
+                        format!(
+                            "{} already covered by an earlier alternative",
+                            label_text(low, high)
+                        ),
+                    ));
+                    continue;
+                }
+                covered.push((low, high));
+                ranges.push((low, high));
+            }
+            arm_ranges.push(ranges);
+        }
+
+        let Some(selector) = selector else {
+            for arm in arms {
+                self.lower_stmts(&arm.body);
+            }
+            return;
+        };
+
+        let end = self.label("case.end");
+        for (arm, ranges) in arms.iter().zip(&arm_ranges) {
+            if ranges.is_empty() {
+                self.lower_stmts(&arm.body);
+                continue;
+            }
+            let body = self.label("case.arm");
+            let next = self.label("case.next");
+            for (low, high) in ranges {
+                let cond = if low == high {
+                    self.bin(
+                        ir::BinOp::Eq,
+                        ir::Ty::Int,
+                        selector.clone(),
+                        ir::Value::Int(*low),
+                    )
+                } else {
+                    // Comparisons yield 0 or 1, so a bitwise and is the
+                    // conjunction of the two bounds tests.
+                    let above = self.bin(
+                        ir::BinOp::Ge,
+                        ir::Ty::Int,
+                        selector.clone(),
+                        ir::Value::Int(*low),
+                    );
+                    let below = self.bin(
+                        ir::BinOp::Le,
+                        ir::Ty::Int,
+                        selector.clone(),
+                        ir::Value::Int(*high),
+                    );
+                    self.bin(ir::BinOp::BitAnd, ir::Ty::Bool, above, below)
+                };
+                let miss = self.label("case.test");
+                self.emit(ir::Inst::Br {
+                    cond,
+                    then: body.clone(),
+                    els: miss.clone(),
+                });
+                self.emit(ir::Inst::Label(miss));
+            }
+            self.emit(ir::Inst::Jmp(next.clone()));
+            self.emit(ir::Inst::Label(body));
+            self.lower_stmts(&arm.body);
+            self.emit(ir::Inst::Jmp(end.clone()));
+            self.emit(ir::Inst::Label(next));
+        }
+        // Oberon-07 has no ELSE in a case statement, so a selector matching
+        // no label has to mean something. oberonc traps and OBNC raises; both
+        // beat quietly doing nothing when a label has a typo in it.
+        self.trap("oberon_case_no_match", expr.pos());
+        self.emit(ir::Inst::Label(end));
+    }
+
+    // Report 9.5: under an INTEGER selector every label is an integer.
+    fn case_label(&mut self, expr: &ast::Expr) -> Option<i32> {
+        match self.eval_const(expr) {
+            Ok(value) => match value {
+                ConstValue::Int(value) => Some(value),
+                other => {
+                    self.diags.push(Diagnostic::new(
+                        expr.pos(),
+                        format!("case label must be INTEGER, found {}", other.ty()),
+                    ));
+                    None
+                }
+            },
+            Err(diag) => {
+                self.diags.push(diag);
+                None
+            }
+        }
+    }
+
+    fn lower_int(&mut self, expr: &ast::Expr, what: &str) -> Option<ir::Value> {
+        let (value, ty) = self.lower_expr(expr)?;
+        if ty == Type::Integer {
+            Some(value)
+        } else {
+            self.diags.push(Diagnostic::new(
+                expr.pos(),
+                format!("{what} must be INTEGER, found {ty}"),
+            ));
+            None
+        }
     }
 
     fn lower_condition(&mut self, expr: &ast::Expr) -> Option<ir::Value> {
@@ -854,6 +1125,9 @@ impl Analyzer {
         pos: Pos,
     ) -> Option<(Option<ir::Value>, Option<Type>)> {
         let callable = match self.qualident(callee) {
+            Ok((Symbol::Builtin(builtin), [])) => {
+                return self.lower_builtin(builtin, actuals, pos);
+            }
             Ok((Symbol::Proc { symbol, ty }, [])) => Some((symbol, ty)),
             Ok(_) => {
                 self.diags.push(Diagnostic::new(
@@ -903,7 +1177,9 @@ impl Analyzer {
             // A VAR formal takes the address of its actual, so the actual must
             // be a designator of the identical type: Report 10.1's rule.
             if var {
-                match self.ref_actual(actual, i + 1) {
+                // A VAR actual will be written, so a read-only designator may
+                // not be passed.
+                match self.ref_actual(actual, i + 1, var) {
                     Some(place) => {
                         if place.ty == expected {
                             args.push(ir::Arg::Ref(place.addr.clone()));
@@ -949,8 +1225,309 @@ impl Analyzer {
         Some((dst.map(|(temp, _)| ir::Value::Temp(temp)), ret))
     }
 
+    fn lower_builtin(
+        &mut self,
+        builtin: Builtin,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        match builtin {
+            Builtin::Inc | Builtin::Dec => return self.lower_inc_dec(builtin, actuals, pos),
+            Builtin::Assert => return self.lower_assert(actuals, pos),
+            _ => {}
+        }
+
+        let (params, result) = builtin_signature(builtin).expect("function-like builtin");
+        if !self.builtin_arity(actuals, params.len(), pos) {
+            return None;
+        }
+        let mut args = Vec::new();
+        let mut ok = true;
+        for (i, (actual, expected)) in actuals.iter().zip(params).enumerate() {
+            // Every argument is lowered even after one of them fails, so a
+            // call reports all of its type errors rather than only the first.
+            match self.builtin_arg(actual, i + 1, expected) {
+                Some(arg) => args.push(arg),
+                None => ok = false,
+            }
+        }
+        if !ok {
+            return None;
+        }
+
+        let value = match builtin {
+            Builtin::Abs => self.lower_abs_int(args[0].0.clone(), pos),
+            // Truncating remainder, so the test must be against zero and not
+            // against one: -3 rem 2 is -1. This agrees with the Report's
+            // "x MOD 2 = 1" under the floored MOD the compiler implements.
+            Builtin::Odd => {
+                let rem = self.bin(
+                    ir::BinOp::Rem,
+                    ir::Ty::Int,
+                    args[0].0.clone(),
+                    ir::Value::Int(2),
+                );
+                self.bin(ir::BinOp::Ne, ir::Ty::Int, rem, ir::Value::Int(0))
+            }
+            // BOOLEAN is already 0 or 1 in a word, so the value passes through
+            // with only its type changed. cf. Project Oberon, where ORD lowers
+            // to nothing.
+            Builtin::Ord => args[0].0.clone(),
+            Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
+                self.lower_shift(builtin, args[0].0.clone(), args[1].0.clone(), &actuals[1])?
+            }
+            Builtin::Inc | Builtin::Dec | Builtin::Assert => unreachable!("handled above"),
+        };
+        Some((Some(value), Some(result.ty(args[0].1.clone()))))
+    }
+
+    // MIN(INTEGER) has no absolute value. Folding rejects it, so the runtime
+    // form must not quietly wrap the way unary minus still does.
+    fn lower_abs_int(&mut self, arg: ir::Value, pos: Pos) -> ir::Value {
+        let overflows = self.bin(
+            ir::BinOp::Eq,
+            ir::Ty::Int,
+            arg.clone(),
+            ir::Value::Int(i32::MIN),
+        );
+        let bad = self.label("abs.bad");
+        let ok = self.label("abs.ok");
+        self.emit(ir::Inst::Br {
+            cond: overflows,
+            then: bad.clone(),
+            els: ok.clone(),
+        });
+        self.emit(ir::Inst::Label(bad));
+        self.trap("oberon_abs_overflow", pos);
+        self.emit(ir::Inst::Label(ok));
+
+        let negative = self.bin(ir::BinOp::Lt, ir::Ty::Int, arg.clone(), ir::Value::Int(0));
+        let negate = self.label("abs.neg");
+        let keep = self.label("abs.pos");
+        let end = self.label("abs.end");
+        let result = self.temp();
+        self.emit(ir::Inst::Br {
+            cond: negative,
+            then: negate.clone(),
+            els: keep.clone(),
+        });
+        self.emit(ir::Inst::Label(negate));
+        let negated = self.temp();
+        self.emit(ir::Inst::Un {
+            dst: negated,
+            op: ir::UnOp::Neg,
+            ty: ir::Ty::Int,
+            arg: arg.clone(),
+        });
+        self.emit(ir::Inst::Copy {
+            dst: result,
+            ty: ir::Ty::Int,
+            src: ir::Value::Temp(negated),
+        });
+        self.emit(ir::Inst::Jmp(end.clone()));
+        self.emit(ir::Inst::Label(keep));
+        self.emit(ir::Inst::Copy {
+            dst: result,
+            ty: ir::Ty::Int,
+            src: arg,
+        });
+        self.emit(ir::Inst::Jmp(end.clone()));
+        self.emit(ir::Inst::Label(end));
+        ir::Value::Temp(result)
+    }
+
+    // The Report does not constrain the count, and QBE reduces it modulo the
+    // result width, which would silently turn LSL(x, 32) into x. Diagnose a
+    // count the lowering already knows and check the rest at run time, which
+    // is the rule Slice 8 commits to for dynamic array indices.
+    fn lower_shift(
+        &mut self,
+        builtin: Builtin,
+        value: ir::Value,
+        count: ir::Value,
+        count_expr: &ast::Expr,
+    ) -> Option<ir::Value> {
+        match &count {
+            ir::Value::Int(n) => {
+                if !(0..=31).contains(n) {
+                    self.diags.push(shift_range_error(count_expr.pos(), *n));
+                    return None;
+                }
+            }
+            _ => {
+                let low = self.bin(ir::BinOp::Lt, ir::Ty::Int, count.clone(), ir::Value::Int(0));
+                let high = self.bin(
+                    ir::BinOp::Gt,
+                    ir::Ty::Int,
+                    count.clone(),
+                    ir::Value::Int(31),
+                );
+                let bad = self.bin(ir::BinOp::BitOr, ir::Ty::Bool, low, high);
+                let trap = self.label("shift.bad");
+                let ok = self.label("shift.ok");
+                self.emit(ir::Inst::Br {
+                    cond: bad,
+                    then: trap.clone(),
+                    els: ok.clone(),
+                });
+                self.emit(ir::Inst::Label(trap));
+                self.trap("oberon_shift_range", count_expr.pos());
+                self.emit(ir::Inst::Label(ok));
+            }
+        }
+        Some(match builtin {
+            Builtin::Lsl => self.bin(ir::BinOp::Shl, ir::Ty::Int, value, count),
+            Builtin::Asr => self.bin(ir::BinOp::Sar, ir::Ty::Int, value, count),
+            // A logical right shift merged with the bits that fall off the
+            // bottom. The mask makes a rotation by zero the identity instead
+            // of a shift by the word width.
+            Builtin::Ror => {
+                let right = self.bin(ir::BinOp::Shr, ir::Ty::Int, value.clone(), count.clone());
+                let complement = self.bin(ir::BinOp::Sub, ir::Ty::Int, ir::Value::Int(32), count);
+                let left_count = self.bin(
+                    ir::BinOp::BitAnd,
+                    ir::Ty::Int,
+                    complement,
+                    ir::Value::Int(31),
+                );
+                let left = self.bin(ir::BinOp::Shl, ir::Ty::Int, value, left_count);
+                self.bin(ir::BinOp::BitOr, ir::Ty::Int, right, left)
+            }
+            _ => unreachable!("not a shift"),
+        })
+    }
+
+    fn lower_inc_dec(
+        &mut self,
+        builtin: Builtin,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        if actuals.is_empty() || actuals.len() > 2 {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "wrong number of arguments: expected 1 or 2, found {}",
+                    actuals.len()
+                ),
+            ));
+            for actual in actuals {
+                let _ = self.lower_expr(actual);
+            }
+            return None;
+        }
+        // The argument is an integer variable.
+        let target = match self.var_actual(&actuals[0], 1) {
+            Some((addr, ty @ Type::Integer)) => Some((addr, ty)),
+            Some((_, found)) => {
+                self.diags.push(Diagnostic::new(
+                    actuals[0].pos(),
+                    format!("argument 1 has type {found}, expected INTEGER"),
+                ));
+                None
+            }
+            None => None,
+        };
+        let step = match actuals.get(1) {
+            Some(actual) => self
+                .builtin_arg(actual, 2, &[Type::Integer])
+                .map(|(value, _)| value),
+            None => Some(ir::Value::Int(1)),
+        };
+        if let (Some((addr, ty)), Some(step)) = (target, step) {
+            let scalar = ty.ir();
+            let current = self.load(addr.clone(), scalar);
+            let op = if builtin == Builtin::Inc {
+                ir::BinOp::Add
+            } else {
+                ir::BinOp::Sub
+            };
+            let next = self.bin(op, ir::Ty::Int, current, step);
+            self.emit(ir::Inst::Store {
+                ty: scalar,
+                val: next,
+                addr,
+            });
+        }
+        Some((None, None))
+    }
+
+    fn lower_assert(
+        &mut self,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        if !self.builtin_arity(actuals, 1, pos) {
+            return None;
+        }
+        // No constant special case: ASSERT(FALSE) emits the test like any
+        // other condition and QBE folds it.
+        if let Some((cond, _)) = self.builtin_arg(&actuals[0], 1, &[Type::Boolean]) {
+            let bad = self.label("assert.bad");
+            let ok = self.label("assert.ok");
+            self.emit(ir::Inst::Br {
+                cond,
+                then: ok.clone(),
+                els: bad.clone(),
+            });
+            self.emit(ir::Inst::Label(bad));
+            self.trap("oberon_assert_failed", pos);
+            self.emit(ir::Inst::Label(ok));
+        }
+        Some((None, None))
+    }
+
+    fn builtin_arity(&mut self, actuals: &[ast::Expr], count: usize, pos: Pos) -> bool {
+        if actuals.len() == count {
+            return true;
+        }
+        self.diags.push(Diagnostic::new(
+            pos,
+            format!(
+                "wrong number of arguments: expected {count}, found {}",
+                actuals.len()
+            ),
+        ));
+        for actual in actuals {
+            let _ = self.lower_expr(actual);
+        }
+        false
+    }
+
+    // The found type comes back with the value because ABS is generic: its
+    // result is whichever of the accepted types the argument turned out to be.
+    fn builtin_arg(
+        &mut self,
+        actual: &ast::Expr,
+        number: usize,
+        expected: &[Type],
+    ) -> Option<(ir::Value, Type)> {
+        let (value, found) = self.lower_expr(actual)?;
+        if expected.contains(&found) {
+            Some((value, found))
+        } else {
+            self.diags.push(Diagnostic::new(
+                actual.pos(),
+                format!(
+                    "argument {number} has type {found}, expected {}",
+                    type_list(expected)
+                ),
+            ));
+            None
+        }
+    }
+
+    // Report 9.2: the selectors of a VAR actual are evaluated when the
+    // parameter is substituted, which is exactly once, before the call. That
+    // is what resolving the designator to an address here already does, so a
+    // selected element reaches a VAR parameter with no extra machinery.
+    fn var_actual(&mut self, actual: &ast::Expr, number: usize) -> Option<(ir::Addr, Type)> {
+        self.ref_actual(actual, number, true)
+            .map(|place| (place.addr, place.ty))
+    }
+
     // The address an actual supplies to a reference formal.
-    fn ref_actual(&mut self, actual: &ast::Expr, number: usize) -> Option<Place> {
+    fn ref_actual(&mut self, actual: &ast::Expr, number: usize, writable: bool) -> Option<Place> {
         let place = match actual {
             ast::Expr::Name(designator) => {
                 self.place(designator, format!("argument {number} must be a variable"))
@@ -964,6 +1541,13 @@ impl Analyzer {
                 return None;
             }
         }?;
+        if writable && place.read_only {
+            self.diags.push(Diagnostic::new(
+                actual.pos(),
+                format!("argument {number} is read-only"),
+            ));
+            return None;
+        }
         Some(place)
     }
 
@@ -1007,12 +1591,21 @@ impl Analyzer {
                 return None;
             }
         };
-        let Symbol::Var { ty, addr } = symbol else {
+        let Symbol::Var {
+            ty,
+            addr,
+            read_only,
+        } = symbol
+        else {
             self.diags
                 .push(Diagnostic::new(designator.pos, not_a_variable));
             return None;
         };
-        let mut place = Place { addr, ty };
+        let mut place = Place {
+            addr,
+            ty,
+            read_only,
+        };
         for selector in rest {
             match selector {
                 // Report 8.1: if r designates a record, r.f denotes the field
@@ -1037,10 +1630,18 @@ impl Analyzer {
     }
 
     fn assign_target(&mut self, designator: &ast::Designator) -> Option<Place> {
-        self.place(
+        let place = self.place(
             designator,
             format!("cannot assign to '{}'", designator.name()),
-        )
+        )?;
+        if place.read_only {
+            self.diags.push(Diagnostic::new(
+                designator.pos,
+                format!("cannot assign to '{}': it is read-only", designator.name()),
+            ));
+            return None;
+        }
+        Some(place)
     }
 
     fn resolve_type(&mut self, source: &ast::TypeExpr) -> Option<Type> {
@@ -1250,6 +1851,21 @@ impl Analyzer {
         ir::Value::Temp(dst)
     }
 
+    // Sets the flag on the innermost binding of `name` and returns what it
+    // was, so a FOR statement can restore it rather than clearing it: a
+    // nested FOR over the same variable must leave the outer one read-only.
+    fn set_read_only(&mut self, name: &str, value: bool) -> bool {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(symbol) = scope.get_mut(name) {
+                return match symbol {
+                    Symbol::Var { read_only, .. } => std::mem::replace(read_only, value),
+                    _ => false,
+                };
+            }
+        }
+        false
+    }
+
     // A trap that ends the process: the check that guards it has already
     // branched here, so nothing follows it.
     fn trap(&mut self, symbol: &str, pos: Pos) {
@@ -1346,6 +1962,21 @@ fn argument_type_error(pos: Pos, number: usize, expected: &Type, found: &Type) -
         pos,
         format!("argument {number} has type {found}, expected {expected}"),
     )
+}
+
+fn shift_range_error(pos: Pos, count: i32) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!("shift count {count} is out of range: must be between 0 and 31"),
+    )
+}
+
+fn label_text(low: i32, high: i32) -> String {
+    if low == high {
+        format!("case label {low}")
+    } else {
+        format!("case labels {low}..{high}")
+    }
 }
 
 fn unary_type_error(pos: Pos, op: ast::UnOp, found: &Type) -> Diagnostic {
