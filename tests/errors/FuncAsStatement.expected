@@ -1,0 +1,2 @@
+tests/errors/FuncAsStatement.Mod:6:3: function 'F' cannot be called as a statement
+Error: 1 error(s)

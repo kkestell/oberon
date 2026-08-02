@@ -1,0 +1,7 @@
+MODULE ProcAsValue;
+VAR x: INTEGER;
+PROCEDURE P;
+END P;
+BEGIN
+  x := P
+END ProcAsValue.

@@ -2,11 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// Two corpora, one test. Failures are collected so one broken module doesn't
+// Three corpora, one test. Failures are collected so one broken module doesn't
 // hide the rest.
 //
 //   tests/corpus/X.Mod  must compile and run; X.expected is the program's stdout.
 //   tests/errors/X.Mod  must fail to compile; X.expected is the compiler's stderr.
+//   tests/failures/X.Mod must compile and fail at runtime; X.expected is stderr.
 //
 // Everything runs from the repo root, which pins the driver's relative
 // runtime/oberon.c and build/ paths and keeps the source paths the compiler
@@ -57,6 +58,36 @@ fn corpus() {
                 "{stem}: expected stderr {:?}, got {:?}",
                 String::from_utf8_lossy(&expected),
                 String::from_utf8_lossy(&compile.stderr)
+            ));
+        }
+    }
+
+    for source in modules(root, "tests/failures") {
+        let stem = stem(&source);
+        let compile = compile(root, &source);
+        if !compile.status.success() {
+            failures.push(format!(
+                "{stem}: compile failed ({}):\n{}",
+                compile.status,
+                String::from_utf8_lossy(&compile.stderr)
+            ));
+            continue;
+        }
+
+        let run = Command::new(root.join("build").join(&stem))
+            .output()
+            .expect("running compiled module");
+        if run.status.success() {
+            failures.push(format!(
+                "{stem}: expected runtime failure, but it exited successfully"
+            ));
+        }
+        let expected = expected(root, &source);
+        if run.stderr != expected {
+            failures.push(format!(
+                "{stem}: expected stderr {:?}, got {:?}",
+                String::from_utf8_lossy(&expected),
+                String::from_utf8_lossy(&run.stderr)
             ));
         }
     }

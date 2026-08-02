@@ -29,10 +29,13 @@ pub fn build(source: &Path) -> Result<()> {
     };
     tracing::debug!("{module:#?}");
 
-    let (scope, diags) = sema::analyze(&module);
-    report(source, &diags)?;
+    let program = match sema::analyze(&module) {
+        Ok(program) => program,
+        Err(diags) => return report(source, &diags),
+    };
+    tracing::debug!("{program:#?}");
 
-    let il = qbe::emit(&module, scope);
+    let il = qbe::emit(&program);
 
     let build_dir = Path::new(BUILD_DIR);
     fs::create_dir_all(build_dir).context("creating build directory")?;

@@ -1,0 +1,2 @@
+tests/errors/ReturnMismatch.Mod:3:8: RETURN expression has type BOOLEAN, expected INTEGER
+Error: 1 error(s)

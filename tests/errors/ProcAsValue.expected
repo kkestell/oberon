@@ -1,0 +1,2 @@
+tests/errors/ProcAsValue.Mod:6:8: 'P' cannot be used as a value
+Error: 1 error(s)

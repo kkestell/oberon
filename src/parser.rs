@@ -84,29 +84,10 @@ impl Parser {
             Vec::new()
         };
 
-        // DeclarationSequence allows at most one CONST and one VAR section, in
-        // that order. This loop accepts them repeated and interleaved; sema
-        // catches the redeclarations that leniency could otherwise let through.
-        let mut consts = Vec::new();
-        let mut vars = Vec::new();
-        loop {
-            match self.peek() {
-                Tok::Const => {
-                    self.advance();
-                    while matches!(self.peek(), Tok::Ident(_)) {
-                        consts.push(self.const_decl()?);
-                    }
-                }
-                Tok::Var => {
-                    self.advance();
-                    while matches!(self.peek(), Tok::Ident(_)) {
-                        vars.push(self.var_decl()?);
-                    }
-                }
-                Tok::Type => return self.unsupported("TYPE declarations"),
-                Tok::Procedure => return self.unsupported("PROCEDURE declarations"),
-                _ => break,
-            }
+        let (consts, vars) = self.const_var_declarations()?;
+        let mut procs = Vec::new();
+        while *self.peek() == Tok::Procedure {
+            procs.push(self.proc_declaration()?);
         }
 
         let body = if *self.peek() == Tok::Begin {
@@ -132,6 +113,7 @@ impl Parser {
             imports,
             consts,
             vars,
+            procs,
             body,
         })
     }
@@ -187,6 +169,122 @@ impl Parser {
         let ty = self.designator()?; // TODO: structured types
         self.expect(Tok::Semi, "';'")?;
         Ok(VarDecl { names, ty })
+    }
+
+    // DeclarationSequence allows at most one CONST and one VAR section, in
+    // that order. This accepts them repeated and interleaved; sema diagnoses
+    // any redeclarations introduced by that leniency.
+    fn const_var_declarations(&mut self) -> PResult<(Vec<ConstDecl>, Vec<VarDecl>)> {
+        let mut consts = Vec::new();
+        let mut vars = Vec::new();
+        loop {
+            match self.peek() {
+                Tok::Const => {
+                    self.advance();
+                    while matches!(self.peek(), Tok::Ident(_)) {
+                        consts.push(self.const_decl()?);
+                    }
+                }
+                Tok::Var => {
+                    self.advance();
+                    while matches!(self.peek(), Tok::Ident(_)) {
+                        vars.push(self.var_decl()?);
+                    }
+                }
+                Tok::Type => return self.unsupported("TYPE declarations"),
+                _ => break,
+            }
+        }
+        Ok((consts, vars))
+    }
+
+    fn proc_declaration(&mut self) -> PResult<ProcDecl> {
+        self.expect(Tok::Procedure, "'PROCEDURE'")?;
+        let (name, pos) = self.identdef("procedure name")?;
+        let params = if *self.peek() == Tok::LParen {
+            self.formal_parameters()?
+        } else {
+            Vec::new()
+        };
+        let ret = if *self.peek() == Tok::Colon {
+            self.advance();
+            Some(self.designator()?)
+        } else {
+            None
+        };
+        self.expect(Tok::Semi, "';'")?;
+
+        let (consts, vars) = self.const_var_declarations()?;
+        if *self.peek() == Tok::Procedure {
+            return self.unsupported("nested procedures");
+        }
+
+        let body = if *self.peek() == Tok::Begin {
+            self.advance();
+            self.stmt_seq()?
+        } else {
+            Vec::new()
+        };
+        let ret_val = if *self.peek() == Tok::Return {
+            self.advance();
+            Some(self.expression()?)
+        } else {
+            None
+        };
+
+        self.expect(Tok::End, "'END'")?;
+        let (end_name, end_pos) = self.expect_ident("procedure name after END")?;
+        if end_name != name {
+            return Err(Diagnostic::new(
+                end_pos,
+                format!("procedure is '{name}' but END says '{end_name}'"),
+            ));
+        }
+        self.expect(Tok::Semi, "';'")?;
+
+        Ok(ProcDecl {
+            name,
+            pos,
+            params,
+            ret,
+            consts,
+            vars,
+            body,
+            ret_val,
+        })
+    }
+
+    // FormalParameters = "(" [FPSection {";" FPSection}] ")"
+    fn formal_parameters(&mut self) -> PResult<Vec<FpSection>> {
+        self.expect(Tok::LParen, "'('")?;
+        let mut sections = Vec::new();
+        if *self.peek() != Tok::RParen {
+            loop {
+                let var = if *self.peek() == Tok::Var {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                let mut names = vec![self.expect_ident("parameter name")?];
+                while *self.peek() == Tok::Comma {
+                    self.advance();
+                    names.push(self.expect_ident("parameter name")?);
+                }
+                self.expect(Tok::Colon, "':'")?;
+                if *self.peek() == Tok::Array {
+                    return self.unsupported("ARRAY OF formal types");
+                }
+                let ty = self.designator()?;
+                sections.push(FpSection { var, names, ty });
+                if *self.peek() != Tok::Semi {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        self.expect(Tok::RParen, "')'")?;
+        Ok(sections)
     }
 
     fn stmt_seq(&mut self) -> PResult<Vec<Stmt>> {
@@ -270,16 +368,7 @@ impl Parser {
                 Ok(Stmt::Assign { lhs: d, rhs, pos })
             }
             Tok::LParen => {
-                self.advance();
-                let mut args = Vec::new();
-                if *self.peek() != Tok::RParen {
-                    args.push(self.expression()?);
-                    while *self.peek() == Tok::Comma {
-                        self.advance();
-                        args.push(self.expression()?);
-                    }
-                }
-                self.expect(Tok::RParen, "')'")?;
+                let args = self.actual_parameters()?;
                 Ok(Stmt::Call { proc: d, args, pos })
             }
             _ => Ok(Stmt::Call {
@@ -288,6 +377,20 @@ impl Parser {
                 pos,
             }),
         }
+    }
+
+    fn actual_parameters(&mut self) -> PResult<Vec<Expr>> {
+        self.expect(Tok::LParen, "'('")?;
+        let mut args = Vec::new();
+        if *self.peek() != Tok::RParen {
+            args.push(self.expression()?);
+            while *self.peek() == Tok::Comma {
+                self.advance();
+                args.push(self.expression()?);
+            }
+        }
+        self.expect(Tok::RParen, "')'")?;
+        Ok(args)
     }
 
     fn designator(&mut self) -> PResult<Designator> {
@@ -432,7 +535,12 @@ impl Parser {
             Tok::Ident(_) => {
                 let d = self.designator()?;
                 if *self.peek() == Tok::LParen {
-                    return self.unsupported("function calls in expressions");
+                    let pos = d.pos;
+                    return Ok(Expr::Call {
+                        callee: d,
+                        args: self.actual_parameters()?,
+                        pos,
+                    });
                 }
                 Ok(Expr::Name(d))
             }

@@ -1,6 +1,7 @@
 mod ast;
 mod diag;
 mod driver;
+mod ir;
 mod lexer;
 mod parser;
 mod qbe;
