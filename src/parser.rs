@@ -215,8 +215,9 @@ impl Parser {
         self.expect(Tok::Semi, "';'")?;
 
         let (consts, vars) = self.const_var_declarations()?;
-        if *self.peek() == Tok::Procedure {
-            return self.unsupported("nested procedures");
+        let mut procs = Vec::new();
+        while *self.peek() == Tok::Procedure {
+            procs.push(self.proc_declaration()?);
         }
 
         let body = if *self.peek() == Tok::Begin {
@@ -249,6 +250,7 @@ impl Parser {
             ret,
             consts,
             vars,
+            procs,
             body,
             ret_val,
         })

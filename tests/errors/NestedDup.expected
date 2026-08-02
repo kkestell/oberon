@@ -1,0 +1,3 @@
+tests/errors/NestedDup.Mod:4:7: 'x' is already declared
+tests/errors/NestedDup.Mod:8:13: 'x' is already declared
+Error: 2 error(s)

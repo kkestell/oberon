@@ -102,8 +102,9 @@ impl Analyzer {
         self.const_declarations(&module.consts);
         self.global_declarations(&module.vars);
 
+        let prefix = self.module.clone();
         for proc in &module.procs {
-            self.procedure(proc);
+            self.procedure(proc, &prefix);
         }
 
         self.current = Some(ProcBuilder::new(format!(".{}.init", self.module), None));
@@ -176,7 +177,7 @@ impl Analyzer {
         }
     }
 
-    fn procedure(&mut self, declaration: &ast::ProcDecl) {
+    fn procedure(&mut self, declaration: &ast::ProcDecl, prefix: &str) {
         let mut formals = Vec::new();
         let mut params_ok = true;
         for section in &declaration.params {
@@ -196,7 +197,7 @@ impl Analyzer {
             },
             None => (None, true),
         };
-        let symbol = format!("{}.{}", self.module, declaration.name);
+        let symbol = format!("{prefix}.{}", declaration.name);
         if params_ok && ret_ok {
             self.declare(
                 &declaration.name,
@@ -210,7 +211,8 @@ impl Analyzer {
         }
 
         self.scopes.push(Scope::new());
-        self.current = Some(ProcBuilder::new(symbol, ret));
+        let enclosing = self.current.take();
+        self.current = Some(ProcBuilder::new(symbol.clone(), ret));
 
         for (var, name, pos, ty) in formals {
             let temp = self.builder().temp();
@@ -247,11 +249,15 @@ impl Analyzer {
 
         self.const_declarations(&declaration.consts);
         self.local_declarations(&declaration.vars);
+        for proc in &declaration.procs {
+            self.procedure(proc, &symbol);
+        }
         self.lower_stmts(&declaration.body);
         self.lower_return(declaration, ret);
 
         self.procs
             .push(self.current.take().expect("procedure exists").finish());
+        self.current = enclosing;
         self.scopes.pop().expect("procedure scope exists");
     }
 
@@ -1099,18 +1105,47 @@ impl Analyzer {
     }
 
     fn resolve(&self, designator: &ast::Designator) -> Result<Symbol, Diagnostic> {
-        let mut symbol = self
+        let (scope_index, mut symbol) = self
             .scopes
             .iter()
+            .enumerate()
             .rev()
-            .find_map(|scope| scope.get(&designator.ident))
-            .cloned()
+            .find_map(|(index, scope)| {
+                scope
+                    .get(&designator.ident)
+                    .cloned()
+                    .map(|symbol| (index, symbol))
+            })
             .ok_or_else(|| {
                 Diagnostic::new(
                     designator.pos,
                     format!("undeclared identifier '{}'", designator.ident),
                 )
             })?;
+        // Report 10: a procedure body sees its formals, its own locals, and
+        // the module's objects. An enclosing procedure's variables are absent
+        // from that list, so Oberon-07 needs no static link. Constants and
+        // procedures stay visible at every level, following ORG.MakeItem and
+        // OJB.thisObj; OBNC hides intermediate constants too, and we don't.
+        //
+        // "Enclosing" is read off the stack position rather than a level
+        // stored on the symbol, which holds only because a procedure body is
+        // the one thing that pushes a scope: the stack is always
+        // [module, outermost proc, ..., current proc]. A slice that pushes a
+        // scope for anything else must record the level on the symbol
+        // instead, or this test quietly starts letting those variables in.
+        if scope_index != 0
+            && scope_index + 1 != self.scopes.len()
+            && matches!(symbol, Symbol::Var { .. })
+        {
+            return Err(Diagnostic::new(
+                designator.pos,
+                format!(
+                    "'{}' is not accessible: a nested procedure cannot use the variables or parameters of an enclosing procedure",
+                    designator.ident
+                ),
+            ));
+        }
         for selector in &designator.selectors {
             match (symbol, selector) {
                 (Symbol::Module(members), ast::Selector::Field(name, pos)) => {

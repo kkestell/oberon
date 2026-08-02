@@ -40,6 +40,7 @@ pub struct ProcDecl {
     pub ret: Option<Designator>,
     pub consts: Vec<ConstDecl>,
     pub vars: Vec<VarDecl>,
+    pub procs: Vec<ProcDecl>,
     pub body: Vec<Stmt>,
     pub ret_val: Option<Expr>,
 }
