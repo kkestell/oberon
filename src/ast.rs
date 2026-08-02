@@ -110,6 +110,34 @@ pub enum Stmt {
         body: Vec<Stmt>,
         cond: Expr,
     },
+    For {
+        // The grammar spells the control variable as a bare ident; it is a
+        // Designator so sema can resolve it with the same code as everything
+        // else. The selector list is always empty.
+        var: Designator,
+        start: Expr,
+        limit: Expr,
+        step: Option<Expr>,
+        body: Vec<Stmt>,
+    },
+    Case {
+        expr: Expr,
+        arms: Vec<CaseArm>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct CaseArm {
+    pub labels: Vec<LabelRange>,
+    pub body: Vec<Stmt>,
+}
+
+// label = integer | string | qualident, so the parser puts only Int and Name
+// expressions here. It is an Expr because sema folds it like any constant.
+#[derive(Debug, Clone)]
+pub struct LabelRange {
+    pub low: Expr,
+    pub high: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,7 @@
+tests/errors/CaseBad.Mod:8:8: CASE expression must be INTEGER, found BOOLEAN
+tests/errors/CaseBad.Mod:9:13: 'v' is not a constant
+tests/errors/CaseBad.Mod:10:13: case label must be INTEGER, found BOOLEAN
+tests/errors/CaseBad.Mod:11:13: case label range 5..1 is reversed
+tests/errors/CaseBad.Mod:12:21: case labels 3..6 already covered by an earlier alternative
+tests/errors/CaseBad.Mod:13:23: case label 7 already covered by an earlier alternative
+Error: 6 error(s)

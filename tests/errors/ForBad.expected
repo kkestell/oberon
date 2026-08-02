@@ -1,0 +1,9 @@
+tests/errors/ForBad.Mod:19:7: control variable 'b' must be INTEGER, found BOOLEAN
+tests/errors/ForBad.Mod:20:7: cannot assign to 'C'
+tests/errors/ForBad.Mod:21:17: FOR limit must be INTEGER, found BOOLEAN
+tests/errors/ForBad.Mod:22:22: constant expression contains a procedure call
+tests/errors/ForBad.Mod:23:22: FOR step must not be zero
+tests/errors/ForBad.Mod:24:22: cannot assign to 'i': it is read-only
+tests/errors/ForBad.Mod:25:26: argument 1 is read-only
+tests/errors/ForBad.Mod:26:27: argument 1 is read-only
+Error: 8 error(s)

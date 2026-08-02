@@ -1,0 +1,2 @@
+tests/errors/CaseLabelExpression.Mod:8:17: expected ':', found Minus
+Error: 1 error(s)

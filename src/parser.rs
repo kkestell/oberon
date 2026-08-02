@@ -297,7 +297,8 @@ impl Parser {
                 Tok::If => stmts.push(self.if_statement()?),
                 Tok::While => stmts.push(self.while_statement()?),
                 Tok::Repeat => stmts.push(self.repeat_statement()?),
-                Tok::For | Tok::Case => return self.unsupported("FOR and CASE statements"),
+                Tok::For => stmts.push(self.for_statement()?),
+                Tok::Case => stmts.push(self.case_statement()?),
                 _ => {} // empty statement is legal
             }
             if *self.peek() == Tok::Semi {
@@ -358,6 +359,104 @@ impl Parser {
         self.expect(Tok::Until, "'UNTIL'")?;
         let cond = self.expression()?;
         Ok(Stmt::Repeat { body, cond })
+    }
+
+    // ForStatement = FOR ident ":=" expression TO expression
+    //     [BY ConstExpression] DO StatementSequence END.
+    fn for_statement(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::For, "'FOR'")?;
+        let (ident, pos) = self.expect_ident("control variable")?;
+        self.expect(Tok::Assign, "':='")?;
+        let start = self.expression()?;
+        self.expect(Tok::To, "'TO'")?;
+        let limit = self.expression()?;
+        let step = if *self.peek() == Tok::By {
+            self.advance();
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        self.expect(Tok::Do, "'DO'")?;
+        let body = self.stmt_seq()?;
+        self.expect(Tok::End, "'END'")?;
+        Ok(Stmt::For {
+            var: Designator {
+                ident,
+                selectors: Vec::new(),
+                pos,
+            },
+            start,
+            limit,
+            step,
+            body,
+        })
+    }
+
+    // CaseStatement = CASE expression OF case {"|" case} END.
+    fn case_statement(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::Case, "'CASE'")?;
+        let expr = self.expression()?;
+        self.expect(Tok::Of, "'OF'")?;
+        let mut arms = Vec::new();
+        loop {
+            if let Some(arm) = self.case_arm()? {
+                arms.push(arm);
+            }
+            if *self.peek() == Tok::Bar {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(Tok::End, "'END'")?;
+        Ok(Stmt::Case { expr, arms })
+    }
+
+    // case = [CaseLabelList ":" StatementSequence].
+    // An alternative with no labels is legal and contributes no arm, so
+    // `CASE k OF | 1: x := 1 END` parses. That is not the same as a labelled
+    // arm whose statement sequence is empty, which does become an arm.
+    fn case_arm(&mut self) -> PResult<Option<CaseArm>> {
+        if matches!(self.peek(), Tok::Bar | Tok::End) {
+            return Ok(None);
+        }
+        let mut labels = vec![self.label_range()?];
+        while *self.peek() == Tok::Comma {
+            self.advance();
+            labels.push(self.label_range()?);
+        }
+        self.expect(Tok::Colon, "':'")?;
+        let body = self.stmt_seq()?;
+        Ok(Some(CaseArm { labels, body }))
+    }
+
+    // LabelRange = label [".." label].
+    fn label_range(&mut self) -> PResult<LabelRange> {
+        let low = self.label()?;
+        let high = if *self.peek() == Tok::DotDot {
+            self.advance();
+            Some(self.label()?)
+        } else {
+            None
+        };
+        Ok(LabelRange { low, high })
+    }
+
+    // label = integer | string | qualident. Deliberately not `expression`:
+    // oberonc accepts `Max - 1` here, but that is an extension to the
+    // normative grammar and this compiler does not adopt it.
+    fn label(&mut self) -> PResult<Expr> {
+        match self.peek() {
+            Tok::Int(value) => {
+                let value = *value;
+                let pos = self.pos();
+                self.advance();
+                Ok(Expr::Int { value, pos })
+            }
+            Tok::Ident(_) => Ok(Expr::Name(self.designator()?)),
+            Tok::Str(_) | Tok::Char(_) => self.unsupported("string case labels"),
+            other => Err(self.error(format!("expected case label, found {other:?}"))),
+        }
     }
 
     fn statement(&mut self) -> PResult<Stmt> {

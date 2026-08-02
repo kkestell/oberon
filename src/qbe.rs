@@ -193,5 +193,10 @@ fn bin_op(op: ir::BinOp) -> &'static str {
         ir::BinOp::Le => "cslew",
         ir::BinOp::Gt => "csgtw",
         ir::BinOp::Ge => "csgew",
+        ir::BinOp::Shl => "shl",
+        ir::BinOp::Shr => "shr",
+        ir::BinOp::Sar => "sar",
+        ir::BinOp::BitAnd => "and",
+        ir::BinOp::BitOr => "or",
     }
 }

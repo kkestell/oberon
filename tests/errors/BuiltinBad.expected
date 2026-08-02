@@ -1,0 +1,12 @@
+tests/errors/BuiltinBad.Mod:5:36: constant expression overflows
+tests/errors/BuiltinBad.Mod:8:12: argument 1 has type BOOLEAN, expected INTEGER
+tests/errors/BuiltinBad.Mod:9:12: argument 1 has type BOOLEAN, expected INTEGER
+tests/errors/BuiltinBad.Mod:10:15: shift count -1 is out of range: must be between 0 and 31
+tests/errors/BuiltinBad.Mod:11:15: shift count 32 is out of range: must be between 0 and 31
+tests/errors/BuiltinBad.Mod:12:15: shift count 32 is out of range: must be between 0 and 31
+tests/errors/BuiltinBad.Mod:13:10: argument 1 has type INTEGER, expected BOOLEAN
+tests/errors/BuiltinBad.Mod:14:7: argument 1 must be a variable
+tests/errors/BuiltinBad.Mod:15:3: wrong number of arguments: expected 1 or 2, found 3
+tests/errors/BuiltinBad.Mod:16:8: 'INC' cannot be used as a value
+tests/errors/BuiltinBad.Mod:17:3: function 'ABS' cannot be called as a statement
+Error: 11 error(s)

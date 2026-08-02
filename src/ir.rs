@@ -120,4 +120,9 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    Shl,
+    Shr,
+    Sar,
+    BitAnd,
+    BitOr,
 }
