@@ -105,26 +105,29 @@ called as a statement. A runtime test must pin division by zero.
 Slice 4 is complete when all existing programs pass through the typed IR. No
 direct lowering from the AST to QBE may remain.
 
-## Slice 5: Nested procedures and lexical scope
+## Slice 5: Nested procedures
 
 This slice completes procedure nesting for the scalar language. It adds local
-procedure declarations at arbitrary depth, lexical shadowing, captures of
-outer locals and parameters, and recursive nested procedures.
+procedure declarations at arbitrary depth, lexical shadowing, and direct
+recursion by a nested procedure.
 
-Use a hidden static link or an equally small explicit mechanism for captured
-storage. Keep the mechanism visible in the IR and calling convention. Do not
-introduce closures because Oberon procedure values cannot refer to local
-procedures.
+Report 10 defines a procedure's visible environment as its formal parameters,
+the objects declared in its own body, and the objects declared in the module
+scope. The procedure identifier is also visible in its body for direct
+recursion.
 
-Semantic analysis must enforce textual scope. A declaration becomes visible at
-its declaration point and remains visible to the end of its block. A procedure
-must see itself for recursion. It must not see a later sibling declaration.
+Semantic analysis must keep a separate local scope for each procedure. Name
+lookup searches that local scope and the module scope. The declaration sequence
+adds each local procedure to its owner's scope before the owner's statement
+sequence is analyzed.
 
-The gate must compile a program that mutates an outer local from two nesting
-levels. It must also test shadowing and nested recursion. Negative tests should
-cover duplicate local declarations and an illegal reference to a later sibling.
-The IL review must verify that captured addresses remain valid for the duration
-of every permitted call.
+The gate must compile procedures nested at least three levels deep. Each
+procedure must use its own parameters and locals. Each must also access the
+same module variable. An outer procedure must call its local child. A nested
+procedure must recurse directly. Negative tests must diagnose references to a
+variable, parameter, constant, or procedure declared in a different procedure
+body. The IL review must verify the path-mangled names and declared parameter
+lists of the generated functions.
 
 ## Slice 6: Remaining scalar control and predefined operations
 
@@ -361,7 +364,7 @@ failure for calling a `NIL` procedure value.
 The gate must include callbacks, a function procedure variable, and a procedure
 value imported from another module. It must cover equality with `NIL` and
 passing an open-array procedure signature. Negative tests must cover signature
-mismatches and attempts to capture nested or predefined procedures.
+mismatches and attempts to store nested or predefined procedures.
 
 After this slice, every core grammar production has an implementation.
 
