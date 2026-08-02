@@ -3,20 +3,23 @@
 ## Starting point
 
 The compiler already accepts useful INTEGER and BOOLEAN programs. It supports
-constants, module variables, assignments, calls to the built-in `Out` module,
-relations, short-circuit Boolean operators, `IF`, `WHILE`, and `REPEAT`. It
-compiles those programs through QBE and links native executables against the C
-runtime and BDWGC.
+constants, module and procedure variables, assignments, relations,
+short-circuit Boolean operators, `IF`, `WHILE`, and `REPEAT`. It supports
+module-level and nested procedures, basic value and `VAR` parameters, function
+results, and direct recursion. Calls to the built-in `Out` module make program
+behavior observable.
 
-The test harness compiles and runs positive corpus modules. It also compares
-compiler diagnostics for negative modules. The current baseline passes
+Semantic analysis lowers the AST to a typed IR. The QBE emitter prints that IR
+without resolving names or making type decisions. Module variables use static
+storage. Variables declared in procedures use activation records. `DIV` and
+`MOD` have explicit zero checks. The compiler links the generated native code
+against the C runtime and BDWGC.
+
+The test harness compiles and runs positive corpus modules. It compares
+compiler diagnostics for negative modules. It also checks stable diagnostics
+and nonzero status for expected runtime failures. The current baseline passes
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
 `cargo test`.
-
-The largest architectural debt is the direct path from the AST to QBE. The
-next slice must introduce the typed IR described in the project architecture.
-Procedures provide the first language feature that needs the IR to distinguish
-addresses, values, storage, calls, and returns.
 
 ## Completion target
 
@@ -51,8 +54,8 @@ Oberon remains unsupported after the slice. Review the completed slice in
 
 Every slice has the following common gate:
 
-- Add at least one positive module that compiles, links, runs, and has its
-  stdout compared byte for byte.
+- Add at least one positive module that compiles, links, exits with status zero,
+  writes no stderr, and has its stdout compared byte for byte.
 - Add negative modules for the main new static errors. Compare their
   diagnostics exactly.
 - Add runtime-failure modules when the slice introduces a dynamic check.
@@ -70,10 +73,9 @@ Every slice has the following common gate:
 - Confirm that newly supported correct source cannot reach an unsupported
   diagnostic or an internal panic.
 
-The corpus harness should gain a third class for expected runtime failures in
-Slice 4. These tests must check a nonzero exit status and stable stderr. Later
-slices should reuse that class for bounds, nil, assertion, and type-guard
-failures.
+Slice 4 added a third corpus class for expected runtime failures. These tests
+check a nonzero exit status and stable stderr. Later slices reuse that class for
+bounds, nil, assertion, and type-guard failures.
 
 ## Slice 4: Typed IR and scalar procedures
 
@@ -111,23 +113,27 @@ This slice completes procedure nesting for the scalar language. It adds local
 procedure declarations at arbitrary depth, lexical shadowing, and direct
 recursion by a nested procedure.
 
-Report 10 defines a procedure's visible environment as its formal parameters,
-the objects declared in its own body, and the objects declared in the module
-scope. The procedure identifier is also visible in its body for direct
-recursion.
+The Report's textual-scope rule and its procedure visibility paragraph leave
+access through an intervening procedure scope unclear. Follow Project Oberon
+and oberonc. A nested procedure may use constants, type names, and procedures
+from enclosing procedure scopes. It may not use their variables or parameters.
+It may also use objects declared in the module scope. The procedure identifier
+is visible in its own body for direct recursion.
 
 Semantic analysis must keep a separate local scope for each procedure. Name
-lookup searches that local scope and the module scope. The declaration sequence
-adds each local procedure to its owner's scope before the owner's statement
-sequence is analyzed.
+lookup searches those scopes in order. It rejects a variable or parameter
+found in an intervening procedure scope. A declaration becomes visible at its
+declaration point, so a later sibling procedure is not visible to an earlier
+one.
 
 The gate must compile procedures nested at least three levels deep. Each
 procedure must use its own parameters and locals. Each must also access the
 same module variable. An outer procedure must call its local child. A nested
-procedure must recurse directly. Negative tests must diagnose references to a
-variable, parameter, constant, or procedure declared in a different procedure
-body. The IL review must verify the path-mangled names and declared parameter
-lists of the generated functions.
+procedure must recurse directly. A nested procedure must use an enclosing
+constant and call an enclosing procedure. Negative tests must cover attempts to
+use an enclosing variable or parameter, a reference to a later sibling, and
+duplicate local declarations. The IL review must verify the path-mangled names
+and declared parameter lists of the generated functions.
 
 ## Slice 6: Remaining scalar control and predefined operations
 
@@ -219,9 +225,14 @@ conversion arguments.
 ## Slice 10: Fixed arrays and checked indexing
 
 This slice introduces type declarations, fixed array types, inline array types,
-multidimensional arrays, and index selectors. Array lengths are positive
+multidimensional arrays, and index selectors. Array lengths are non-negative
 constant INTEGER expressions. A declaration with several dimensions is
 represented as nested arrays, as required by Report 6.2.
+
+Extend the module interface from Slice 7 to carry exported named types. A
+client must be able to use an exported type through a qualified identifier. A
+private type must remain inaccessible. Preserve type identity across the
+module boundary.
 
 Define array size, alignment, and element address calculation in semantic
 types and the IR. Support arrays in module storage and procedure-local storage.
@@ -234,9 +245,13 @@ once.
 
 The gate should include a sieve or another program that makes substantial use
 of indexed storage. Add a multidimensional program and a whole-array copy test
-that proves the destination does not alias the source. Runtime tests must cover
-negative and upper-bound indices. Negative tests must cover invalid lengths,
-non-INTEGER indices, incompatible array assignment, and indexing a non-array.
+that proves the destination does not alias the source. Cover `LEN` and
+assignment for a zero-length array. Runtime tests must cover negative and
+upper-bound indices, including a dynamic index into a zero-length array.
+Negative tests must cover negative and nonconstant lengths, non-INTEGER
+indices, incompatible array assignment, indexing a non-array, and access to a
+private type from another module. A cross-module test must use an exported
+named array type.
 
 ## Slice 11: CHAR, BYTE, strings, and character arrays
 
@@ -244,10 +259,11 @@ This slice adds the `CHAR` and `BYTE` basic types. It also adds string literals,
 string constants, and the special compatibility rules between strings, CHAR,
 and character arrays.
 
-Store character arrays with the terminating null character required by Report
-9.1. Implement assignment from a fitting string and reject a string that is too
-long. Add character and character-array comparisons. Extend scalar `CASE` to
-CHAR labels and ranges.
+When a string is assigned to a character array, append the null character
+required by Report 9.1 within the array's declared length. Reject a string
+whose characters and terminator do not fit. An ordinary character array has no
+implicit terminator or hidden extra element. Bound character-array comparisons
+by the declared array lengths. Extend scalar `CASE` to CHAR labels and ranges.
 
 Implement the compatibility between BYTE and INTEGER. Decide and document how
 dynamic values are checked when stored in BYTE. Add the CHAR form of `ORD` and
@@ -257,8 +273,9 @@ observe exact values.
 The gate must cover hexadecimal single-character strings, quoted one-character
 strings, embedded character arrays, lexical character-array ordering, and
 boundary BYTE values. It must distinguish a string assignment from an array
-alias. Runtime tests must cover any chosen BYTE range check. Negative tests
-must cover an oversized string and incompatible string use.
+alias. It must compare character arrays that fill every element and contain no
+null character. Runtime tests must cover any chosen BYTE range check. Negative
+tests must cover an oversized string and incompatible string use.
 
 ## Slice 12: Records and structured parameters
 
@@ -281,9 +298,10 @@ module boundary.
 
 The gate must include nested field selection, record and array copies, and both
 value and `VAR` structured parameters. A copy test must prove that later source
-mutation does not change the assigned destination. Negative tests must cover
-unknown or private fields, assignment through a structured value parameter,
-and incompatible record types.
+mutation does not change the assigned destination. A record must contain a
+zero-length array without gaining storage for an element. Negative tests must
+cover unknown or private fields, assignment through a structured value
+parameter, and incompatible record types.
 
 ## Slice 13: Pointers, NIL, and garbage-collected allocation
 
@@ -315,14 +333,19 @@ depend on backend guesses.
 
 Support fixed arrays and compatible open arrays as actual parameters. Support
 both value and `VAR` open arrays. Value open arrays remain read-only. Implement
-the open-array assignment rule for equal base types. Allow strings where the
-Report's character-array compatibility rules permit them.
+the open-array assignment rule for equal base types. Before copying, compare
+the source length with the destination capacity and fail at runtime if the
+source is longer. Include the appended null character in this check for a
+string source. Allow strings where the Report's character-array compatibility
+rules permit them.
 
 The gate must include sum, mutation, and search procedures over arrays of
 several lengths. Add a multidimensional procedure that observes each length and
 checks each dimension. Include a string-processing procedure over an open
 character array. Runtime tests must prove that bounds checks use the actual
-length. Negative tests must cover rank, base-type, and mutability mismatches.
+length. They must also pin an oversized open-array assignment and an oversized
+string assignment through a `VAR` open character array. Negative tests must
+cover rank, base-type, and mutability mismatches.
 
 ## Slice 15: Record extension and dynamic type operations
 
