@@ -1,0 +1,2 @@
+tests/errors/CondNotBool.Mod:4:6: condition must be BOOLEAN, found INTEGER
+Error: 1 error(s)

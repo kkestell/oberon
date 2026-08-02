@@ -1,0 +1,5 @@
+MODULE OrderOnBool;
+BEGIN
+  IF TRUE < FALSE THEN
+  END
+END OrderOnBool.

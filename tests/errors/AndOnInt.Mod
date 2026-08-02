@@ -1,0 +1,5 @@
+MODULE AndOnInt;
+BEGIN
+  IF 1 & 2 THEN
+  END
+END AndOnInt.

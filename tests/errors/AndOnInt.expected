@@ -1,0 +1,2 @@
+tests/errors/AndOnInt.Mod:3:8: operator '&' requires BOOLEAN and BOOLEAN, found INTEGER and INTEGER
+Error: 1 error(s)

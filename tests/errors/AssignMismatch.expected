@@ -1,0 +1,2 @@
+tests/errors/AssignMismatch.Mod:4:8: cannot assign INTEGER to BOOLEAN
+Error: 1 error(s)

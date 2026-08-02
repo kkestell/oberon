@@ -1,0 +1,2 @@
+tests/errors/BadArgType.Mod:4:11: argument 1 has type BOOLEAN, expected INTEGER
+Error: 1 error(s)

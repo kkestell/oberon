@@ -1,22 +1,57 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::ast;
 use crate::diag::{Diagnostic, Pos};
 
 pub type Scope = HashMap<String, Symbol>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Type {
+    Integer,
+    Boolean,
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Integer => write!(f, "INTEGER"),
+            Type::Boolean => write!(f, "BOOLEAN"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Value {
+    Int(i32),
+    Bool(bool),
+}
+
+impl Value {
+    fn ty(self) -> Type {
+        match self {
+            Value::Int(_) => Type::Integer,
+            Value::Bool(_) => Type::Boolean,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Symbol {
-    Const(i32),                                  // folded at declaration
-    Var,                                         // INTEGER-only this slice
-    Proc { runtime_name: String, arity: usize }, // e.g. "oberon_out_int"
-    Module(HashMap<String, Symbol>),             // "Out" pseudo-scope
-    TypeName,                                    // pre-seeded "INTEGER"
+    Const(Value),
+    Var(Type),
+    Proc {
+        runtime_name: String,
+        params: Vec<Type>,
+    },
+    Module(HashMap<String, Symbol>), // "Out" pseudo-scope
+    TypeName(Type),
 }
 
 pub fn analyze(module: &ast::Module) -> (Scope, Vec<Diagnostic>) {
     let mut scope: Scope = HashMap::new();
-    scope.insert("INTEGER".into(), Symbol::TypeName);
+    scope.insert("INTEGER".into(), Symbol::TypeName(Type::Integer));
+    scope.insert("BOOLEAN".into(), Symbol::TypeName(Type::Boolean));
     let mut diags = Vec::new();
 
     for import in &module.imports {
@@ -39,6 +74,11 @@ pub fn analyze(module: &ast::Module) -> (Scope, Vec<Diagnostic>) {
 
     // Folded in declaration order, so CONST A = 2; B = A * 3 works.
     for c in &module.consts {
+        // Type-check the whole expression before folding it. Folding still
+        // short-circuits, but an unreachable right operand must be well-typed.
+        if check_expr(&c.expr, &scope, &mut diags).is_none() {
+            continue;
+        }
         match eval_const(&c.expr, &scope) {
             Ok(v) => declare(&mut scope, &c.name, c.pos, Symbol::Const(v), &mut diags),
             Err(d) => diags.push(d),
@@ -46,16 +86,24 @@ pub fn analyze(module: &ast::Module) -> (Scope, Vec<Diagnostic>) {
     }
 
     for v in &module.vars {
-        match resolve(&scope, &v.ty) {
-            Ok(Symbol::TypeName) => {}
-            Ok(_) => diags.push(Diagnostic::new(
-                v.ty.pos,
-                format!("'{}' is not a type", v.ty.name()),
-            )),
-            Err(d) => diags.push(d),
-        }
-        for (name, pos) in &v.names {
-            declare(&mut scope, name, *pos, Symbol::Var, &mut diags);
+        let ty = match resolve(&scope, &v.ty) {
+            Ok(Symbol::TypeName(ty)) => Some(*ty),
+            Ok(_) => {
+                diags.push(Diagnostic::new(
+                    v.ty.pos,
+                    format!("'{}' is not a type", v.ty.name()),
+                ));
+                None
+            }
+            Err(d) => {
+                diags.push(d);
+                None
+            }
+        };
+        if let Some(ty) = ty {
+            for (name, pos) in &v.names {
+                declare(&mut scope, name, *pos, Symbol::Var(ty), &mut diags);
+            }
         }
     }
 
@@ -88,14 +136,14 @@ fn out_scope() -> HashMap<String, Symbol> {
             "Int".into(),
             Symbol::Proc {
                 runtime_name: "oberon_out_int".into(),
-                arity: 2,
+                params: vec![Type::Integer, Type::Integer],
             },
         ),
         (
             "Ln".into(),
             Symbol::Proc {
                 runtime_name: "oberon_out_ln".into(),
-                arity: 0,
+                params: Vec::new(),
             },
         ),
     ])
@@ -132,11 +180,12 @@ pub fn resolve<'a>(scope: &'a Scope, d: &ast::Designator) -> Result<&'a Symbol, 
     Ok(sym)
 }
 
-fn eval_const(e: &ast::Expr, scope: &Scope) -> Result<i32, Diagnostic> {
+fn eval_const(e: &ast::Expr, scope: &Scope) -> Result<Value, Diagnostic> {
     match e {
-        ast::Expr::Int { value, pos } => {
-            i32::try_from(*value).map_err(|_| Diagnostic::new(*pos, "integer literal out of range"))
-        }
+        ast::Expr::Int { value, pos } => i32::try_from(*value)
+            .map(Value::Int)
+            .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
+        ast::Expr::Bool { value, .. } => Ok(Value::Bool(*value)),
         ast::Expr::Name(d) => match resolve(scope, d)? {
             Symbol::Const(v) => Ok(*v),
             _ => Err(Diagnostic::new(
@@ -144,108 +193,363 @@ fn eval_const(e: &ast::Expr, scope: &Scope) -> Result<i32, Diagnostic> {
                 format!("'{}' is not a constant", d.name()),
             )),
         },
-        ast::Expr::Unary {
-            op: ast::UnOp::Neg,
-            expr,
-            pos,
-        } => {
+        // Type errors can't happen past here: analyze() runs check_expr on the
+        // whole constant expression before folding it, so a Value of the wrong
+        // shape is a compiler bug, not a user error.
+        ast::Expr::Unary { op, expr, pos } => {
             let v = eval_const(expr, scope)?;
-            v.checked_neg()
-                .ok_or_else(|| Diagnostic::new(*pos, "constant expression overflows"))
+            match (op, v) {
+                (ast::UnOp::Neg, Value::Int(v)) => v
+                    .checked_neg()
+                    .map(Value::Int)
+                    .ok_or_else(|| Diagnostic::new(*pos, "constant expression overflows")),
+                (ast::UnOp::Not, Value::Bool(v)) => Ok(Value::Bool(!v)),
+                _ => unreachable!("type-checked before folding"),
+            }
         }
-        ast::Expr::Binary { op, lhs, rhs, .. } => {
+        ast::Expr::Binary {
+            op: ast::BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } => match eval_const(lhs, scope)? {
+            Value::Bool(false) => Ok(Value::Bool(false)),
+            Value::Bool(true) => eval_const(rhs, scope),
+            Value::Int(_) => unreachable!("type-checked before folding"),
+        },
+        ast::Expr::Binary {
+            op: ast::BinOp::Or,
+            lhs,
+            rhs,
+            ..
+        } => match eval_const(lhs, scope)? {
+            Value::Bool(true) => Ok(Value::Bool(true)),
+            Value::Bool(false) => eval_const(rhs, scope),
+            Value::Int(_) => unreachable!("type-checked before folding"),
+        },
+        ast::Expr::Binary { op, lhs, rhs, pos } => {
             let l = eval_const(lhs, scope)?;
             let r = eval_const(rhs, scope)?;
-            if r == 0 && matches!(op, ast::BinOp::Div | ast::BinOp::Mod) {
-                return Err(Diagnostic::new(e.pos(), "constant DIV or MOD by zero"));
+            eval_const_binary(*op, l, r, *pos)
+        }
+    }
+}
+
+fn eval_const_binary(op: ast::BinOp, l: Value, r: Value, pos: Pos) -> Result<Value, Diagnostic> {
+    use ast::BinOp;
+    match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+            let (Value::Int(l), Value::Int(r)) = (l, r) else {
+                unreachable!("type-checked before folding");
+            };
+            if r == 0 && matches!(op, BinOp::Div | BinOp::Mod) {
+                return Err(Diagnostic::new(pos, "constant DIV or MOD by zero"));
             }
             let v = match op {
-                ast::BinOp::Add => l.checked_add(r),
-                ast::BinOp::Sub => l.checked_sub(r),
-                ast::BinOp::Mul => l.checked_mul(r),
+                BinOp::Add => l.checked_add(r),
+                BinOp::Sub => l.checked_sub(r),
+                BinOp::Mul => l.checked_mul(r),
                 // Report 8.2.2 requires 0 <= x MOD y < y, so DIV floors instead
                 // of truncating toward zero. This is deliberately the same
                 // ((x REM y) + y) REM y that qbe.rs emits, spelled out here so a
                 // folded constant and the same expression computed at runtime
                 // can never disagree. cf. obnc lib/obnc/OBNC.h OBNC_MOD.
-                ast::BinOp::Div | ast::BinOp::Mod => {
+                BinOp::Div | BinOp::Mod => {
                     let m = l
                         .checked_rem(r)
                         .and_then(|m| m.checked_add(r))
                         .and_then(|m| m.checked_rem(r));
                     match op {
-                        ast::BinOp::Mod => m,
+                        BinOp::Mod => m,
                         _ => m
                             .and_then(|m| l.checked_sub(m))
                             .and_then(|n| n.checked_div(r)),
                     }
                 }
+                _ => unreachable!(),
             };
-            v.ok_or_else(|| Diagnostic::new(e.pos(), "constant expression overflows"))
+            v.map(Value::Int)
+                .ok_or_else(|| Diagnostic::new(pos, "constant expression overflows"))
         }
+        BinOp::Eq | BinOp::Ne => {
+            assert_eq!(l.ty(), r.ty(), "type-checked before folding");
+            let equal = l == r;
+            Ok(Value::Bool(if op == BinOp::Eq { equal } else { !equal }))
+        }
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            let (Value::Int(l), Value::Int(r)) = (l, r) else {
+                unreachable!("type-checked before folding");
+            };
+            Ok(Value::Bool(match op {
+                BinOp::Lt => l < r,
+                BinOp::Le => l <= r,
+                BinOp::Gt => l > r,
+                BinOp::Ge => l >= r,
+                _ => unreachable!(),
+            }))
+        }
+        BinOp::And | BinOp::Or => unreachable!("short-circuit operators handled by eval_const"),
     }
 }
 
 fn check_stmt(stmt: &ast::Stmt, scope: &Scope, diags: &mut Vec<Diagnostic>) {
     match stmt {
         ast::Stmt::Assign { lhs, rhs, .. } => {
-            match resolve(scope, lhs) {
-                Ok(Symbol::Var) => {}
-                Ok(_) => diags.push(Diagnostic::new(
-                    lhs.pos,
-                    format!("cannot assign to '{}'", lhs.name()),
-                )),
-                Err(d) => diags.push(d),
+            let lhs_ty = match resolve(scope, lhs) {
+                Ok(Symbol::Var(ty)) => Some(*ty),
+                Ok(_) => {
+                    diags.push(Diagnostic::new(
+                        lhs.pos,
+                        format!("cannot assign to '{}'", lhs.name()),
+                    ));
+                    None
+                }
+                Err(d) => {
+                    diags.push(d);
+                    None
+                }
+            };
+            let rhs_ty = check_expr(rhs, scope, diags);
+            if let (Some(lhs_ty), Some(rhs_ty)) = (lhs_ty, rhs_ty)
+                && lhs_ty != rhs_ty
+            {
+                diags.push(Diagnostic::new(
+                    rhs.pos(),
+                    format!("cannot assign {rhs_ty} to {lhs_ty}"),
+                ));
             }
-            check_expr(rhs, scope, diags);
         }
         ast::Stmt::Call { proc, args, pos } => {
-            match resolve(scope, proc) {
-                Ok(Symbol::Proc { arity, .. }) => {
-                    if args.len() != *arity {
+            let params = match resolve(scope, proc) {
+                Ok(Symbol::Proc { params, .. }) => Some(params.clone()),
+                Ok(_) => {
+                    diags.push(Diagnostic::new(
+                        *pos,
+                        format!("'{}' is not a procedure", proc.name()),
+                    ));
+                    None
+                }
+                Err(d) => {
+                    diags.push(d);
+                    None
+                }
+            };
+            if let Some(params) = &params
+                && args.len() != params.len()
+            {
+                diags.push(Diagnostic::new(
+                    *pos,
+                    format!(
+                        "wrong number of arguments: expected {}, found {}",
+                        params.len(),
+                        args.len()
+                    ),
+                ));
+            }
+            for (i, arg) in args.iter().enumerate() {
+                let actual = check_expr(arg, scope, diags);
+                let expected = params.as_ref().and_then(|params| params.get(i)).copied();
+                if let (Some(actual), Some(expected)) = (actual, expected)
+                    && actual != expected
+                {
+                    diags.push(Diagnostic::new(
+                        arg.pos(),
+                        format!("argument {} has type {actual}, expected {expected}", i + 1),
+                    ));
+                }
+            }
+        }
+        ast::Stmt::If {
+            cond,
+            then,
+            elsifs,
+            els,
+        } => {
+            check_condition(cond, scope, diags);
+            check_stmts(then, scope, diags);
+            for (cond, body) in elsifs {
+                check_condition(cond, scope, diags);
+                check_stmts(body, scope, diags);
+            }
+            if let Some(body) = els {
+                check_stmts(body, scope, diags);
+            }
+        }
+        ast::Stmt::While { cond, body, elsifs } => {
+            check_condition(cond, scope, diags);
+            check_stmts(body, scope, diags);
+            for (cond, body) in elsifs {
+                check_condition(cond, scope, diags);
+                check_stmts(body, scope, diags);
+            }
+        }
+        ast::Stmt::Repeat { body, cond } => {
+            check_stmts(body, scope, diags);
+            check_condition(cond, scope, diags);
+        }
+    }
+}
+
+fn check_stmts(stmts: &[ast::Stmt], scope: &Scope, diags: &mut Vec<Diagnostic>) {
+    for stmt in stmts {
+        check_stmt(stmt, scope, diags);
+    }
+}
+
+fn check_condition(e: &ast::Expr, scope: &Scope, diags: &mut Vec<Diagnostic>) {
+    if let Some(ty) = check_expr(e, scope, diags)
+        && ty != Type::Boolean
+    {
+        diags.push(Diagnostic::new(
+            e.pos(),
+            format!("condition must be BOOLEAN, found {ty}"),
+        ));
+    }
+}
+
+fn check_expr(e: &ast::Expr, scope: &Scope, diags: &mut Vec<Diagnostic>) -> Option<Type> {
+    match e {
+        ast::Expr::Int { value, pos } => match i32::try_from(*value) {
+            Ok(_) => Some(Type::Integer),
+            Err(_) => {
+                diags.push(Diagnostic::new(*pos, "integer literal out of range"));
+                None
+            }
+        },
+        ast::Expr::Bool { .. } => Some(Type::Boolean),
+        ast::Expr::Name(d) => match resolve(scope, d) {
+            Ok(Symbol::Var(ty)) => Some(*ty),
+            Ok(Symbol::Const(v)) => Some(v.ty()),
+            Ok(_) => {
+                diags.push(Diagnostic::new(
+                    d.pos,
+                    format!("'{}' cannot be used as a value", d.name()),
+                ));
+                None
+            }
+            Err(diag) => {
+                diags.push(diag);
+                None
+            }
+        },
+        ast::Expr::Unary { op, expr, pos } => {
+            let found = check_expr(expr, scope, diags)?;
+            let expected = match op {
+                ast::UnOp::Neg => Type::Integer,
+                ast::UnOp::Not => Type::Boolean,
+            };
+            if found == expected {
+                Some(expected)
+            } else {
+                diags.push(unary_type_error(
+                    *pos,
+                    match op {
+                        ast::UnOp::Neg => "-",
+                        ast::UnOp::Not => "~",
+                    },
+                    expected,
+                    found,
+                ));
+                None
+            }
+        }
+        ast::Expr::Binary { op, lhs, rhs, pos } => {
+            let lhs_ty = check_expr(lhs, scope, diags);
+            let rhs_ty = check_expr(rhs, scope, diags);
+            let (Some(lhs_ty), Some(rhs_ty)) = (lhs_ty, rhs_ty) else {
+                return None;
+            };
+            use ast::BinOp;
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                    check_binary_types(
+                        *pos,
+                        bin_op_name(*op),
+                        Type::Integer,
+                        lhs_ty,
+                        rhs_ty,
+                        Type::Integer,
+                        diags,
+                    )
+                }
+                BinOp::And | BinOp::Or => check_binary_types(
+                    *pos,
+                    bin_op_name(*op),
+                    Type::Boolean,
+                    lhs_ty,
+                    rhs_ty,
+                    Type::Boolean,
+                    diags,
+                ),
+                BinOp::Eq | BinOp::Ne => {
+                    if lhs_ty == rhs_ty {
+                        Some(Type::Boolean)
+                    } else {
                         diags.push(Diagnostic::new(
                             *pos,
                             format!(
-                                "wrong number of arguments: expected {arity}, found {}",
-                                args.len()
+                                "operator '{}' requires operands of the same type, found {lhs_ty} and {rhs_ty}",
+                                bin_op_name(*op)
                             ),
                         ));
+                        None
                     }
                 }
-                Ok(_) => diags.push(Diagnostic::new(
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => check_binary_types(
                     *pos,
-                    format!("'{}' is not a procedure", proc.name()),
-                )),
-                Err(d) => diags.push(d),
-            }
-            for arg in args {
-                check_expr(arg, scope, diags);
+                    bin_op_name(*op),
+                    Type::Integer,
+                    lhs_ty,
+                    rhs_ty,
+                    Type::Boolean,
+                    diags,
+                ),
             }
         }
     }
 }
 
-// Everything is INTEGER this slice, so "type checking" is only about symbols
-// used as values and literal ranges.
-fn check_expr(e: &ast::Expr, scope: &Scope, diags: &mut Vec<Diagnostic>) {
-    match e {
-        ast::Expr::Int { value, pos } => {
-            if i32::try_from(*value).is_err() {
-                diags.push(Diagnostic::new(*pos, "integer literal out of range"));
-            }
-        }
-        ast::Expr::Name(d) => match resolve(scope, d) {
-            Ok(Symbol::Var | Symbol::Const(_)) => {}
-            Ok(_) => diags.push(Diagnostic::new(
-                d.pos,
-                format!("'{}' cannot be used as a value", d.name()),
-            )),
-            Err(diag) => diags.push(diag),
-        },
-        ast::Expr::Unary { expr, .. } => check_expr(expr, scope, diags),
-        ast::Expr::Binary { lhs, rhs, .. } => {
-            check_expr(lhs, scope, diags);
-            check_expr(rhs, scope, diags);
-        }
+fn check_binary_types(
+    pos: Pos,
+    op: &str,
+    expected: Type,
+    lhs: Type,
+    rhs: Type,
+    result: Type,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    if lhs == expected && rhs == expected {
+        Some(result)
+    } else {
+        diags.push(Diagnostic::new(
+            pos,
+            format!("operator '{op}' requires {expected} and {expected}, found {lhs} and {rhs}"),
+        ));
+        None
+    }
+}
+
+fn unary_type_error(pos: Pos, op: &str, expected: Type, found: Type) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!("operator '{op}' requires {expected}, found {found}"),
+    )
+}
+
+fn bin_op_name(op: ast::BinOp) -> &'static str {
+    match op {
+        ast::BinOp::Add => "+",
+        ast::BinOp::Sub => "-",
+        ast::BinOp::Mul => "*",
+        ast::BinOp::Div => "DIV",
+        ast::BinOp::Mod => "MOD",
+        ast::BinOp::Eq => "=",
+        ast::BinOp::Ne => "#",
+        ast::BinOp::Lt => "<",
+        ast::BinOp::Le => "<=",
+        ast::BinOp::Gt => ">",
+        ast::BinOp::Ge => ">=",
+        ast::BinOp::And => "&",
+        ast::BinOp::Or => "OR",
     }
 }

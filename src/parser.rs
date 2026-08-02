@@ -194,9 +194,10 @@ impl Parser {
         loop {
             match self.peek() {
                 Tok::Ident(_) => stmts.push(self.statement()?),
-                Tok::If | Tok::While | Tok::Repeat | Tok::For | Tok::Case => {
-                    return self.unsupported("structured statements");
-                }
+                Tok::If => stmts.push(self.if_statement()?),
+                Tok::While => stmts.push(self.while_statement()?),
+                Tok::Repeat => stmts.push(self.repeat_statement()?),
+                Tok::For | Tok::Case => return self.unsupported("FOR and CASE statements"),
                 _ => {} // empty statement is legal
             }
             if *self.peek() == Tok::Semi {
@@ -206,6 +207,57 @@ impl Parser {
             }
         }
         Ok(stmts)
+    }
+
+    fn if_statement(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::If, "'IF'")?;
+        let cond = self.expression()?;
+        self.expect(Tok::Then, "'THEN'")?;
+        let then = self.stmt_seq()?;
+        let mut elsifs = Vec::new();
+        while *self.peek() == Tok::Elsif {
+            self.advance();
+            let cond = self.expression()?;
+            self.expect(Tok::Then, "'THEN'")?;
+            elsifs.push((cond, self.stmt_seq()?));
+        }
+        let els = if *self.peek() == Tok::Else {
+            self.advance();
+            Some(self.stmt_seq()?)
+        } else {
+            None
+        };
+        self.expect(Tok::End, "'END'")?;
+        Ok(Stmt::If {
+            cond,
+            then,
+            elsifs,
+            els,
+        })
+    }
+
+    fn while_statement(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::While, "'WHILE'")?;
+        let cond = self.expression()?;
+        self.expect(Tok::Do, "'DO'")?;
+        let body = self.stmt_seq()?;
+        let mut elsifs = Vec::new();
+        while *self.peek() == Tok::Elsif {
+            self.advance();
+            let cond = self.expression()?;
+            self.expect(Tok::Do, "'DO'")?;
+            elsifs.push((cond, self.stmt_seq()?));
+        }
+        self.expect(Tok::End, "'END'")?;
+        Ok(Stmt::While { cond, body, elsifs })
+    }
+
+    fn repeat_statement(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::Repeat, "'REPEAT'")?;
+        let body = self.stmt_seq()?;
+        self.expect(Tok::Until, "'UNTIL'")?;
+        let cond = self.expression()?;
+        Ok(Stmt::Repeat { body, cond })
     }
 
     fn statement(&mut self) -> PResult<Stmt> {
@@ -263,13 +315,26 @@ impl Parser {
 
     // expression = SimpleExpression [relation SimpleExpression]
     fn expression(&mut self) -> PResult<Expr> {
-        let e = self.simple_expression()?;
-        match self.peek() {
-            Tok::Eq | Tok::Hash | Tok::Lt | Tok::Le | Tok::Gt | Tok::Ge | Tok::In | Tok::Is => {
-                self.unsupported("relations")
-            }
-            _ => Ok(e),
-        }
+        let lhs = self.simple_expression()?;
+        let op = match self.peek() {
+            Tok::Eq => BinOp::Eq,
+            Tok::Hash => BinOp::Ne,
+            Tok::Lt => BinOp::Lt,
+            Tok::Le => BinOp::Le,
+            Tok::Gt => BinOp::Gt,
+            Tok::Ge => BinOp::Ge,
+            Tok::In | Tok::Is => return self.unsupported("IN and IS relations"),
+            _ => return Ok(lhs),
+        };
+        let pos = self.pos();
+        self.advance();
+        let rhs = self.simple_expression()?;
+        Ok(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+            pos,
+        })
     }
 
     // SimpleExpression = ["+" | "-"] term {AddOperator term}
@@ -300,7 +365,7 @@ impl Parser {
             let op = match self.peek() {
                 Tok::Plus => BinOp::Add,
                 Tok::Minus => BinOp::Sub,
-                Tok::Or => return self.unsupported("OR"),
+                Tok::Or => BinOp::Or,
                 _ => break,
             };
             let pos = self.pos();
@@ -325,7 +390,7 @@ impl Parser {
                 Tok::Div => BinOp::Div,
                 Tok::Mod => BinOp::Mod,
                 Tok::Slash => return self.unsupported("real division"),
-                Tok::Amp => return self.unsupported("'&'"),
+                Tok::Amp => BinOp::And,
                 _ => break,
             };
             let pos = self.pos();
@@ -349,6 +414,21 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Int { value, pos })
             }
+            Tok::True | Tok::False => {
+                let value = *self.peek() == Tok::True;
+                let pos = self.pos();
+                self.advance();
+                Ok(Expr::Bool { value, pos })
+            }
+            Tok::Tilde => {
+                let pos = self.pos();
+                self.advance();
+                Ok(Expr::Unary {
+                    op: UnOp::Not,
+                    expr: Box::new(self.factor()?),
+                    pos,
+                })
+            }
             Tok::Ident(_) => {
                 let d = self.designator()?;
                 if *self.peek() == Tok::LParen {
@@ -362,14 +442,9 @@ impl Parser {
                 self.expect(Tok::RParen, "')'")?;
                 Ok(e)
             }
-            Tok::Real(_)
-            | Tok::Char(_)
-            | Tok::Str(_)
-            | Tok::Nil
-            | Tok::True
-            | Tok::False
-            | Tok::LBrace
-            | Tok::Tilde => self.unsupported("non-INTEGER factors"),
+            Tok::Real(_) | Tok::Char(_) | Tok::Str(_) | Tok::Nil | Tok::LBrace => {
+                self.unsupported("other literal factors")
+            }
             other => Err(self.error(format!("expected expression, found {other:?}"))),
         }
     }
