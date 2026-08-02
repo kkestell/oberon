@@ -13,6 +13,11 @@ use symbols::{ConstValue, Scope, Symbol, universe_scope};
 pub use symbols::{Interface, out_interface};
 use types::*;
 
+// The scope stack is always [universe, module, outermost proc, ..., current
+// proc], so this index names the module scope and its length names "the
+// module scope is innermost".
+const MODULE_SCOPE: usize = 1;
+
 // Where a variable's storage is and what type it has there. Report 8.1 builds
 // this by applying selectors to a variable, and every writable context —
 // assignment and a VAR actual — uses the one that comes out.
@@ -96,8 +101,9 @@ impl Analyzer {
         self.type_declarations(&module.types);
         self.global_declarations(&module.vars);
 
+        let prefix = self.module.clone();
         for proc in &module.procs {
-            self.procedure(proc);
+            self.procedure(proc, &prefix);
         }
 
         self.current = Some(ProcBuilder::new(format!(".{}.init", self.module), None));
@@ -204,10 +210,10 @@ impl Analyzer {
         }
     }
 
-    fn procedure(&mut self, declaration: &ast::ProcDecl) {
+    fn procedure(&mut self, declaration: &ast::ProcDecl, prefix: &str) {
         let (proc_ty, formals, ret) =
             self.resolve_procedure_signature(&declaration.params, declaration.ret.as_ref());
-        let symbol = format!("{}.{}", self.module, declaration.id.name);
+        let symbol = format!("{prefix}.{}", declaration.id.name);
         if let Some(proc_ty) = proc_ty {
             self.declare(
                 &declaration.id.name,
@@ -220,6 +226,7 @@ impl Analyzer {
         }
 
         self.scopes.push(Scope::new());
+        let enclosing = self.current.take();
         self.current = Some(ProcBuilder::new(symbol.clone(), ret.clone()));
 
         let mut declared_formals = HashSet::new();
@@ -263,11 +270,15 @@ impl Analyzer {
         self.const_declarations(&declaration.consts);
         self.type_declarations(&declaration.types);
         self.local_declarations(&declaration.vars);
+        for proc in &declaration.procs {
+            self.procedure(proc, &symbol);
+        }
         self.lower_stmts(&declaration.body);
         self.lower_return(declaration, ret);
 
         self.procs
             .push(self.current.take().expect("procedure exists").finish());
+        self.current = enclosing;
         self.scopes.pop().expect("procedure scope exists");
     }
 
@@ -1125,18 +1136,48 @@ impl Analyzer {
         &self,
         designator: &'a ast::Designator,
     ) -> Result<(Symbol, &'a [ast::Selector]), Diagnostic> {
-        let symbol = self
+        let (scope_index, symbol) = self
             .scopes
             .iter()
+            .enumerate()
             .rev()
-            .find_map(|scope| scope.get(&designator.ident))
-            .cloned()
+            .find_map(|(index, scope)| {
+                scope
+                    .get(&designator.ident)
+                    .cloned()
+                    .map(|symbol| (index, symbol))
+            })
             .ok_or_else(|| {
                 Diagnostic::new(
                     designator.pos,
                     format!("undeclared identifier '{}'", designator.ident),
                 )
             })?;
+        // Report 10: a procedure body sees its formals, its own locals, and
+        // the module's objects. An enclosing procedure's variables are absent
+        // from that list, so Oberon-07 needs no static link. Constants and
+        // procedures stay visible at every level, following ORG.MakeItem and
+        // OJB.thisObj; OBNC hides intermediate constants too, and we don't.
+        //
+        // "Enclosing" is read off the stack position rather than a level
+        // stored on the symbol, which holds only because a procedure body is
+        // the one thing that pushes a scope; see MODULE_SCOPE. A slice that
+        // pushes a scope for anything else must record the level on the
+        // symbol instead, or this test quietly starts letting those variables
+        // in. The universe scope holds no variables, so index 0 never reaches
+        // the check.
+        if scope_index != MODULE_SCOPE
+            && scope_index + 1 != self.scopes.len()
+            && matches!(symbol, Symbol::Var { .. })
+        {
+            return Err(Diagnostic::new(
+                designator.pos,
+                format!(
+                    "'{}' is not accessible: a nested procedure cannot use the variables or parameters of an enclosing procedure",
+                    designator.ident
+                ),
+            ));
+        }
         // Report 11: the qualifier of an imported object is not a selector on
         // a value, so it is consumed here and only here. Everything after it
         // belongs to the object it named.

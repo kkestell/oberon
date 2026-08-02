@@ -1,0 +1,6 @@
+tests/errors/NotAccessible.Mod:13:13: 'local' is not accessible: a nested procedure cannot use the variables or parameters of an enclosing procedure
+tests/errors/NotAccessible.Mod:17:5: 'local' is not accessible: a nested procedure cannot use the variables or parameters of an enclosing procedure
+tests/errors/NotAccessible.Mod:21:10: 'local' is not accessible: a nested procedure cannot use the variables or parameters of an enclosing procedure
+tests/errors/NotAccessible.Mod:26:15: 'param' is not accessible: a nested procedure cannot use the variables or parameters of an enclosing procedure
+tests/errors/NotAccessible.Mod:38:13: 'ref' is not accessible: a nested procedure cannot use the variables or parameters of an enclosing procedure
+Error: 5 error(s)

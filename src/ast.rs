@@ -57,6 +57,7 @@ pub struct ProcDecl {
     pub consts: Vec<ConstDecl>,
     pub types: Vec<TypeDecl>,
     pub vars: Vec<VarDecl>,
+    pub procs: Vec<ProcDecl>,
     pub body: Vec<Stmt>,
     pub ret_val: Option<Expr>,
 }

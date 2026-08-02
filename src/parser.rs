@@ -218,6 +218,10 @@ impl Parser {
         self.expect(Tok::Semi, "';'")?;
 
         let (consts, types, vars) = self.declarations()?;
+        let mut procs = Vec::new();
+        while *self.peek() == Tok::Procedure {
+            procs.push(self.proc_declaration()?);
+        }
 
         let body = if *self.peek() == Tok::Begin {
             self.advance();
@@ -249,6 +253,7 @@ impl Parser {
             consts,
             types,
             vars,
+            procs,
             body,
             ret_val,
         })
