@@ -25,3 +25,5 @@ Both are ordinary prose documents, so the rules in [English, Please](../../AGENT
 * Reviews pin the state they were written against — a commit, or the fact that the tree was uncommitted. Findings outlive line numbers, so name functions rather than citing line numbers that will rot.
 * A finding confirmed by compiling and running something records the program and its actual output. That is what makes it checkable a year later.
 * Record what was deliberately declined and why, in plans and reviews alike. The rejected option is often the more useful half of the document.
+
+After writing a plan, use a subagent to conduct a review of it. Ensure that the plan is complete and accurately reflects the Oberon-07 language as defined in the [reference documents](references.md).

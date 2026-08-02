@@ -46,4 +46,4 @@ The rule is "Just Enough" Rust: this is an experiment, so optimize for code that
 
 Development happens in slices. Every slice gets a plan written before the work starts, in [docs/dev/plans/](docs/dev/plans/), and every review gets a document written as it is delivered, in [docs/dev/reviews/](docs/dev/reviews/). Do this automatically, without being asked. See [docs/dev/plans-and-reviews.md](docs/dev/plans-and-reviews.md) for the file naming scheme and what each kind of document should contain.
 
-Only write plans and do reviews for major slices of work. Not for small tasks, documentation updates, or minor bug fixes.
+Only write plans and do reviews for major slices of work. Not for small tasks, documentation updates, or minor bug fixes. If asked to review a plan, do not write a review. Just give feedback on the plan.
