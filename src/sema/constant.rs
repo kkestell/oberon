@@ -86,6 +86,7 @@ impl Analyzer {
             // so the rest of the expression can be checked. eval_const is what
             // reports that it cannot be folded.
             ast::Expr::Name(designator) => self.check_const_designator_type(designator),
+            ast::Expr::Apply { callee, args, pos } => self.check_const_call(callee, args, *pos),
             ast::Expr::Unary { op, expr, pos } => {
                 let found = self.check_const_expr(expr)?;
                 match (op, &found) {
@@ -156,6 +157,88 @@ impl Analyzer {
         }
     }
 
+    fn check_const_call(
+        &mut self,
+        callee: &ast::Designator,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<Type> {
+        let proc = match self.resolve(callee) {
+            Ok(Symbol::Proc { ty, .. }) => ty.procedure().cloned(),
+            Ok(_) => match self.designator_type(callee) {
+                Ok(ty) => match ty.procedure().cloned() {
+                    Some(procedure) => Some(procedure),
+                    None => {
+                        self.diags.push(Diagnostic::new(
+                            pos,
+                            format!("'{}' has type {ty} and is not a procedure", callee.name()),
+                        ));
+                        None
+                    }
+                },
+                Err(diag) => {
+                    self.diags.push(diag);
+                    None
+                }
+            },
+            Err(diag) => match self.designator_type(callee) {
+                Ok(ty) => ty.procedure().cloned(),
+                Err(_) => {
+                    self.diags.push(diag);
+                    None
+                }
+            },
+        };
+        let Some(procedure) = proc else {
+            for actual in actuals {
+                let _ = self.check_const_expr(actual);
+            }
+            return None;
+        };
+        if actuals.len() != procedure.params.len() {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "wrong number of arguments: expected {}, found {}",
+                    procedure.params.len(),
+                    actuals.len()
+                ),
+            ));
+        }
+        for (i, actual) in actuals.iter().enumerate() {
+            let found = self.check_const_expr(actual);
+            if let (Some(found), Some(formal)) = (found, procedure.params.get(i))
+                // The same identical-type rule as the executable path for
+                // reference formals, so the constant precheck cannot accept
+                // what lowering rejects.
+                && if formal.var {
+                    found != formal.ty
+                } else {
+                    assign_kind(&formal.ty, &found).is_none()
+                }
+            {
+                self.diags.push(Diagnostic::new(
+                    actual.pos(),
+                    format!(
+                        "argument {} has type {found}, expected {}",
+                        i + 1,
+                        formal.ty
+                    ),
+                ));
+            }
+        }
+        match procedure.ret.clone() {
+            Some(ty) => Some(ty),
+            None => {
+                self.diags.push(Diagnostic::new(
+                    pos,
+                    format!("'{}' cannot be used as a value", callee.name()),
+                ));
+                None
+            }
+        }
+    }
+
     pub(super) fn eval_const(&self, expr: &ast::Expr) -> Result<ConstValue, Diagnostic> {
         match expr {
             ast::Expr::Int { value, pos } => i32::try_from(*value)
@@ -169,6 +252,10 @@ impl Analyzer {
                     format!("'{}' is not a constant", designator.name()),
                 )),
             },
+            ast::Expr::Apply { pos, .. } => Err(Diagnostic::new(
+                *pos,
+                "constant expression contains a procedure call",
+            )),
             ast::Expr::Unary { op, expr, pos } => {
                 let value = self.eval_const(expr)?;
                 match (op, value) {

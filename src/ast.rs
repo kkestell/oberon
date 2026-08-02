@@ -8,6 +8,7 @@ pub struct Module {
     pub consts: Vec<ConstDecl>,
     pub types: Vec<TypeDecl>,
     pub vars: Vec<VarDecl>,
+    pub procs: Vec<ProcDecl>,
     pub body: Vec<Stmt>,
 }
 
@@ -46,6 +47,25 @@ pub struct VarDecl {
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     Named(Designator),
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcDecl {
+    pub id: IdentDef,
+    pub params: Vec<FpSection>,
+    pub ret: Option<TypeExpr>,
+    pub consts: Vec<ConstDecl>,
+    pub types: Vec<TypeDecl>,
+    pub vars: Vec<VarDecl>,
+    pub body: Vec<Stmt>,
+    pub ret_val: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FpSection {
+    pub var: bool,
+    pub names: Vec<(String, Pos)>,
+    pub ty: TypeExpr,
 }
 
 // `Out.Int` parses as base "Out" + Field("Int"): the parser cannot tell module
@@ -117,6 +137,11 @@ pub enum Expr {
         pos: Pos,
     },
     Name(Designator),
+    Apply {
+        callee: Designator,
+        args: Vec<Expr>,
+        pos: Pos,
+    },
     Unary {
         op: UnOp,
         expr: Box<Expr>,
@@ -162,6 +187,7 @@ impl Expr {
         match self {
             Expr::Int { pos, .. }
             | Expr::Bool { pos, .. }
+            | Expr::Apply { pos, .. }
             | Expr::Unary { pos, .. }
             | Expr::Binary { pos, .. } => *pos,
             Expr::Name(d) => d.pos,

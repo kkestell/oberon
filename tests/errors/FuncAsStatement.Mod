@@ -1,0 +1,7 @@
+MODULE FuncAsStatement;
+PROCEDURE F(): INTEGER;
+RETURN 1
+END F;
+BEGIN
+  F()
+END FuncAsStatement.

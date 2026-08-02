@@ -62,11 +62,13 @@ pub struct Global {
 #[derive(Debug)]
 pub struct Proc {
     pub symbol: String,
+    pub params: Vec<Param>,
     pub ret: Option<Ty>,
+    pub slots: Vec<(String, Storage)>,
     pub insts: Vec<Inst>,
 }
 
-// What a global reserves. Values still travel as a scalar `Ty`; this
+// What a global or a slot reserves. Values still travel as a scalar `Ty`; this
 // is the shape of the storage they live in.
 #[derive(Debug, Clone)]
 pub enum Storage {
@@ -94,6 +96,18 @@ pub fn scalar_size(ty: Ty) -> i64 {
     }
 }
 
+#[derive(Debug)]
+pub struct Param {
+    pub temp: usize,
+    pub pass: ParamPass,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ParamPass {
+    Value(Ty),
+    Ref,
+}
+
 // Int and Bool are four bytes and travel in a QBE word.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ty {
@@ -113,6 +127,8 @@ pub enum Value {
 #[derive(Debug, Clone)]
 pub enum Addr {
     Global(String),
+    Slot(String),
+    Temp(usize),
 }
 
 #[derive(Debug)]
@@ -174,6 +190,7 @@ pub enum Inst {
 #[derive(Debug)]
 pub enum Arg {
     Val(Ty, Value),
+    Ref(Addr),
 }
 
 #[derive(Debug, Clone, Copy)]

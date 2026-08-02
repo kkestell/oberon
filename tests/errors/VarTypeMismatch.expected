@@ -1,0 +1,2 @@
+tests/errors/VarTypeMismatch.Mod:8:7: argument 1 has type BOOLEAN, expected INTEGER
+Error: 1 error(s)

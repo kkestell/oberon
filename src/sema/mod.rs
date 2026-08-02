@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ast;
 use crate::diag::{Diagnostic, Pos};
@@ -13,12 +14,15 @@ pub use symbols::{Interface, out_interface};
 use types::*;
 
 // Where a variable's storage is and what type it has there. Report 8.1 builds
-// this by applying selectors to a variable, and assignment uses the one that
-// comes out.
+// this by applying selectors to a variable, and every writable context —
+// assignment and a VAR actual — uses the one that comes out.
 struct Place {
     addr: ir::Addr,
     ty: Type,
 }
+
+type ResolvedFormal = (bool, String, Pos, Type);
+type ResolvedProcedure = (Option<Type>, Vec<ResolvedFormal>, Option<Type>);
 
 // What the source of an assignment or a relation operand turned out to be.
 enum Source {
@@ -83,12 +87,18 @@ impl Analyzer {
         resolved: &HashMap<String, Interface>,
     ) -> Result<(ir::Module, Interface), Vec<Diagnostic>> {
         let name = self.module.clone().into_bytes();
-        let ir::Addr::Global(symbol) = self.literal(&name);
+        let ir::Addr::Global(symbol) = self.literal(&name) else {
+            unreachable!("a literal is a global")
+        };
         self.site_module = symbol;
         self.imports(&module.imports, resolved);
         self.const_declarations(&module.consts);
         self.type_declarations(&module.types);
         self.global_declarations(&module.vars);
+
+        for proc in &module.procs {
+            self.procedure(proc);
+        }
 
         self.current = Some(ProcBuilder::new(format!(".{}.init", self.module), None));
         self.lower_stmts(&module.body);
@@ -194,6 +204,153 @@ impl Analyzer {
         }
     }
 
+    fn procedure(&mut self, declaration: &ast::ProcDecl) {
+        let (proc_ty, formals, ret) =
+            self.resolve_procedure_signature(&declaration.params, declaration.ret.as_ref());
+        let symbol = format!("{}.{}", self.module, declaration.id.name);
+        if let Some(proc_ty) = proc_ty {
+            self.declare(
+                &declaration.id.name,
+                declaration.id.pos,
+                Symbol::Proc {
+                    symbol: symbol.clone(),
+                    ty: proc_ty,
+                },
+            );
+        }
+
+        self.scopes.push(Scope::new());
+        self.current = Some(ProcBuilder::new(symbol.clone(), ret.clone()));
+
+        let mut declared_formals = HashSet::new();
+        for (var, name, pos, ty) in formals {
+            if !declared_formals.insert(name.clone()) {
+                continue;
+            }
+            let by_ref = var;
+            let temp = self.builder().temp();
+            self.builder().proc.params.push(ir::Param {
+                temp,
+                pass: if by_ref {
+                    ir::ParamPass::Ref
+                } else {
+                    ir::ParamPass::Value(ty.ir())
+                },
+            });
+            let addr = if by_ref {
+                ir::Addr::Temp(temp)
+            } else {
+                ir::Addr::Slot(name.clone())
+            };
+            if self.declare(
+                &name,
+                pos,
+                Symbol::Var {
+                    ty: ty.clone(),
+                    addr: addr.clone(),
+                },
+            ) && !by_ref
+            {
+                self.reserve_slot(&name, &ty);
+                self.emit(ir::Inst::Store {
+                    ty: ty.ir(),
+                    val: ir::Value::Temp(temp),
+                    addr,
+                });
+            }
+        }
+
+        self.const_declarations(&declaration.consts);
+        self.type_declarations(&declaration.types);
+        self.local_declarations(&declaration.vars);
+        self.lower_stmts(&declaration.body);
+        self.lower_return(declaration, ret);
+
+        self.procs
+            .push(self.current.take().expect("procedure exists").finish());
+        self.scopes.pop().expect("procedure scope exists");
+    }
+
+    fn local_declarations(&mut self, declarations: &[ast::VarDecl]) {
+        for declaration in declarations {
+            let Some(ty) = self.resolve_type(&declaration.ty) else {
+                continue;
+            };
+            for id in &declaration.names {
+                let addr = ir::Addr::Slot(id.name.clone());
+                if self.declare(
+                    &id.name,
+                    id.pos,
+                    Symbol::Var {
+                        ty: ty.clone(),
+                        addr,
+                    },
+                ) {
+                    self.reserve_slot(&id.name, &ty);
+                }
+            }
+        }
+    }
+
+    // One local's storage.
+    fn reserve_slot(&mut self, name: &str, ty: &Type) {
+        self.builder()
+            .proc
+            .slots
+            .push((name.to_string(), ty.storage()));
+    }
+
+    fn lower_return(&mut self, declaration: &ast::ProcDecl, ret: Option<Type>) {
+        match (&declaration.ret, ret, &declaration.ret_val) {
+            (Some(_), Some(expected), Some(expr)) => {
+                // RETURN asks the same compatibility function as assignment.
+                let value = self.lower_expr(expr);
+                if let Some((value, found)) = value {
+                    let value = match assign_kind(&expected, &found) {
+                        Some(AssignKind::Store) => Some(value),
+                        _ => {
+                            self.diags.push(Diagnostic::new(
+                                expr.pos(),
+                                format!("RETURN expression has type {found}, expected {expected}"),
+                            ));
+                            Some(value)
+                        }
+                    };
+                    self.emit(ir::Inst::Ret(value));
+                } else {
+                    self.emit(ir::Inst::Ret(None));
+                }
+            }
+            (Some(_), Some(_), None) => {
+                self.diags.push(Diagnostic::new(
+                    declaration.id.pos,
+                    format!(
+                        "function procedure '{}' must end with RETURN",
+                        declaration.id.name
+                    ),
+                ));
+                self.emit(ir::Inst::Ret(None));
+            }
+            (Some(_), None, Some(expr)) => {
+                let _ = self.lower_expr(expr);
+                self.emit(ir::Inst::Ret(None));
+            }
+            (Some(_), None, None) => self.emit(ir::Inst::Ret(None)),
+            (None, _, Some(expr)) => {
+                let _ = self.lower_expr(expr);
+                self.diags.push(Diagnostic::new(
+                    expr.pos(),
+                    format!(
+                        "proper procedure '{}' cannot RETURN a value",
+                        declaration.id.name
+                    ),
+                ));
+                self.emit(ir::Inst::Ret(None));
+            }
+            (None, _, None) => self.emit(ir::Inst::Ret(None)),
+        }
+    }
+
     fn lower_stmts(&mut self, stmts: &[ast::Stmt]) {
         for stmt in stmts {
             self.lower_stmt(stmt);
@@ -223,7 +380,8 @@ impl Analyzer {
     }
 
     // Report 9.1. A scalar assignment stores one value. assign_kind names the
-    // outcomes, and the value parameter asks the same function.
+    // outcomes, and the value parameter and the RETURN expression ask the same
+    // function.
     fn lower_assign(&mut self, lhs: &ast::Designator, rhs: &ast::Expr) {
         // The destination designator is resolved first and the source second,
         // each exactly once.
@@ -413,6 +571,18 @@ impl Analyzer {
                 let source = self.lower_source(expr)?;
                 self.source_scalar(source)
             }
+            ast::Expr::Apply { callee, args, pos } => match self.lower_call(callee, args, *pos) {
+                Some((Some(value), Some(ty))) => Some((value, ty)),
+                Some((None, None)) => {
+                    self.diags.push(Diagnostic::new(
+                        *pos,
+                        format!("'{}' cannot be used as a value", callee.name()),
+                    ));
+                    None
+                }
+                Some(_) => unreachable!("call result and return type agree"),
+                None => None,
+            },
             ast::Expr::Unary { op, expr, pos } => {
                 let (arg, found) = self.lower_expr(expr)?;
                 match (op, &found) {
@@ -717,23 +887,45 @@ impl Analyzer {
                 let _ = self.lower_expr(actual);
                 continue;
             };
+            let var = formal.var;
             let expected = formal.ty.clone();
-            // The value parameter asks the same compatibility function as
-            // assignment.
-            match self.lower_expr(actual) {
-                Some((value, found)) => match assign_kind(&expected, &found) {
-                    Some(AssignKind::Store) => {
-                        args.push(ir::Arg::Val(expected.ir(), value));
+            // A VAR formal takes the address of its actual, so the actual must
+            // be a designator of the identical type: Report 10.1's rule.
+            if var {
+                match self.ref_actual(actual, i + 1) {
+                    Some(place) => {
+                        if place.ty == expected {
+                            args.push(ir::Arg::Ref(place.addr.clone()));
+                        } else {
+                            self.diags.push(argument_type_error(
+                                actual.pos(),
+                                i + 1,
+                                &expected,
+                                &place.ty,
+                            ));
+                            ok = false;
+                        }
                     }
-                    _ => {
-                        self.diags.push(Diagnostic::new(
-                            actual.pos(),
-                            format!("argument {} has type {found}, expected {expected}", i + 1),
-                        ));
-                        ok = false;
-                    }
-                },
-                None => ok = false,
+                    None => ok = false,
+                }
+            } else {
+                // The value parameter asks the same compatibility function as
+                // assignment.
+                match self.lower_expr(actual) {
+                    Some((value, found)) => match assign_kind(&expected, &found) {
+                        Some(AssignKind::Store) => {
+                            args.push(ir::Arg::Val(expected.ir(), value));
+                        }
+                        _ => {
+                            self.diags.push(Diagnostic::new(
+                                actual.pos(),
+                                format!("argument {} has type {found}, expected {expected}", i + 1),
+                            ));
+                            ok = false;
+                        }
+                    },
+                    None => ok = false,
+                }
             }
         }
 
@@ -744,6 +936,52 @@ impl Analyzer {
         self.emit(ir::Inst::Call { dst, symbol, args });
         let ret = procedure.ret.clone();
         Some((dst.map(|(temp, _)| ir::Value::Temp(temp)), ret))
+    }
+
+    // The address an actual supplies to a reference formal.
+    fn ref_actual(&mut self, actual: &ast::Expr, number: usize) -> Option<Place> {
+        let place = match actual {
+            ast::Expr::Name(designator) => {
+                self.place(designator, format!("argument {number} must be a variable"))
+            }
+            _ => {
+                let _ = self.lower_expr(actual);
+                self.diags.push(Diagnostic::new(
+                    actual.pos(),
+                    format!("argument {number} must be a variable"),
+                ));
+                return None;
+            }
+        }?;
+        Some(place)
+    }
+
+    // The non-emitting type walk used only to check a call in a required
+    // constant context. Executable lowering still uses place(), which
+    // evaluates and checks every selector.
+    fn designator_type(&self, designator: &ast::Designator) -> Result<Type, Diagnostic> {
+        let (symbol, rest) = self.qualident(designator)?;
+        let ty = match symbol {
+            Symbol::Var { ty, .. } => ty,
+            Symbol::Proc { ty, .. } if rest.is_empty() => return Ok(ty),
+            _ => {
+                return Err(Diagnostic::new(
+                    designator.pos,
+                    format!("'{}' cannot be used as a value", designator.name()),
+                ));
+            }
+        };
+        for selector in rest {
+            match selector {
+                ast::Selector::Field(name, pos) => {
+                    return Err(Diagnostic::new(
+                        *pos,
+                        format!("cannot select '{name}' from {ty}: only a record has fields"),
+                    ));
+                }
+            }
+        }
+        Ok(ty)
     }
 
     // The storage a designator denotes, with every selector applied in source
@@ -811,6 +1049,62 @@ impl Analyzer {
                 }
             },
         }
+    }
+
+    // Procedure declarations use this source-signature builder. Formal names
+    // are checked here and discarded; the resulting type records only mode,
+    // type, order, and result.
+    fn resolve_procedure_signature(
+        &mut self,
+        sections: &[ast::FpSection],
+        result: Option<&ast::TypeExpr>,
+    ) -> ResolvedProcedure {
+        let mut formals = Vec::new();
+        let mut names = HashSet::new();
+        let mut ok = true;
+        for section in sections {
+            let ty = self.resolve_type(&section.ty);
+            if ty.is_none() {
+                ok = false;
+            }
+            for (name, pos) in &section.names {
+                if !names.insert(name.clone()) {
+                    self.diags.push(Diagnostic::new(
+                        *pos,
+                        format!("'{name}' is already declared"),
+                    ));
+                    ok = false;
+                }
+                if let Some(ty) = &ty {
+                    formals.push((section.var, name.clone(), *pos, ty.clone()));
+                }
+            }
+        }
+
+        let ret = match result {
+            Some(source) => match self.resolve_type(source) {
+                Some(ty) => Some(ty),
+                None => {
+                    ok = false;
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let ty = ok.then(|| {
+            Type::Procedure(Rc::new(ProcedureType {
+                params: formals
+                    .iter()
+                    .map(|(var, _, _, ty)| ProcedureParam {
+                        var: *var,
+                        ty: ty.clone(),
+                    })
+                    .collect(),
+                ret: ret.clone(),
+            }))
+        });
+        (ty, formals, ret)
     }
 
     // A designator that names an object directly, with no selectors left over.
@@ -945,7 +1239,9 @@ impl ProcBuilder {
         Self {
             proc: ir::Proc {
                 symbol,
+                params: Vec::new(),
                 ret: ret.as_ref().map(Type::ir),
+                slots: Vec::new(),
                 insts: Vec::new(),
             },
             next_temp: 0,
@@ -1002,6 +1298,13 @@ fn selector_error(designator: &ast::Designator, selector: &ast::Selector) -> Dia
 // Report 9.1 requires the same type on both sides.
 fn assign_error(pos: Pos, target: &Type, found: &Type) -> Diagnostic {
     Diagnostic::new(pos, format!("cannot assign {found} to {target}"))
+}
+
+fn argument_type_error(pos: Pos, number: usize, expected: &Type, found: &Type) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!("argument {number} has type {found}, expected {expected}"),
+    )
 }
 
 fn unary_type_error(pos: Pos, op: ast::UnOp, found: &Type) -> Diagnostic {

@@ -1,0 +1,2 @@
+tests/errors/MissingReturn.Mod:2:11: function procedure 'F' must end with RETURN
+Error: 1 error(s)

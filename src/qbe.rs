@@ -62,13 +62,41 @@ pub fn emit(program: &ir::Program) -> String {
 }
 
 fn emit_proc(out: &mut String, proc: &ir::Proc, names: &Names) {
+    let slots: HashMap<_, _> = proc
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| (name.as_str(), format!("v{i}")))
+        .collect();
     write!(out, "function ").unwrap();
     if let Some(ty) = proc.ret {
         write!(out, "{} ", class(ty)).unwrap();
     }
     write!(out, "${}(", names.symbol(&proc.symbol)).unwrap();
+    for (i, param) in proc.params.iter().enumerate() {
+        if i != 0 {
+            write!(out, ", ").unwrap();
+        }
+        let class = match param.pass {
+            ir::ParamPass::Value(ty) => class(ty),
+            ir::ParamPass::Ref => "l",
+        };
+        write!(out, "{class} {}", temp(param.temp)).unwrap();
+    }
     writeln!(out, ") {{").unwrap();
     writeln!(out, "@start").unwrap();
+    for (slot, ty) in &proc.slots {
+        // alloc4 is QBE's smallest allocation, so a byte-aligned slot is
+        // over-aligned, which is harmless.
+        writeln!(
+            out,
+            "\t%{} =l {} {}",
+            slots[slot.as_str()],
+            alloc(ty.align().max(4)),
+            ty.size()
+        )
+        .unwrap();
+    }
 
     let mut terminated = false;
     for inst in &proc.insts {
@@ -78,7 +106,7 @@ fn emit_proc(out: &mut String, proc: &ir::Proc, names: &Names) {
                 "instruction after terminator must be a label"
             );
         }
-        emit_inst(out, inst, names);
+        emit_inst(out, inst, names, &slots);
         terminated = matches!(
             inst,
             ir::Inst::Jmp(_) | ir::Inst::Br { .. } | ir::Inst::Ret(_) | ir::Inst::Trap { .. }
@@ -90,7 +118,7 @@ fn emit_proc(out: &mut String, proc: &ir::Proc, names: &Names) {
     writeln!(out, "}}").unwrap();
 }
 
-fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names) {
+fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&str, String>) {
     match inst {
         ir::Inst::Label(label) => writeln!(out, "@{label}").unwrap(),
         ir::Inst::Load { dst, ty, addr } => {
@@ -100,7 +128,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names) {
                 temp(*dst),
                 class(*ty),
                 load_op(*ty),
-                address(addr, names)
+                address(addr, names, slots)
             )
             .unwrap();
         }
@@ -110,7 +138,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names) {
                 "\t{} {}, {}",
                 store_op(*ty),
                 value(val, names),
-                address(addr, names)
+                address(addr, names, slots)
             )
             .unwrap();
         }
@@ -169,7 +197,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names) {
                 write!(out, "{} ={} ", temp(*dst), class(*ty)).unwrap();
             }
             write!(out, "call ${}(", names.symbol(symbol)).unwrap();
-            writeln!(out, "{})", args(call_args, names)).unwrap();
+            writeln!(out, "{})", args(call_args, names, slots)).unwrap();
         }
         ir::Inst::Jmp(label) => writeln!(out, "\tjmp @{label}").unwrap(),
         ir::Inst::Br { cond, then, els } => {
@@ -185,22 +213,28 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names) {
         // The runtime routine never returns, but QBE still needs the block
         // to end in a terminator.
         ir::Inst::Trap { symbol, site } => {
-            writeln!(out, "\tcall ${symbol}({})", args(&site.args(), names)).unwrap();
+            writeln!(
+                out,
+                "\tcall ${symbol}({})",
+                args(&site.args(), names, slots)
+            )
+            .unwrap();
             writeln!(out, "\thlt").unwrap();
         }
     }
 }
 
-fn args(args: &[ir::Arg], names: &Names) -> String {
+fn args(args: &[ir::Arg], names: &Names, slots: &HashMap<&str, String>) -> String {
     args.iter()
-        .map(|a| arg(a, names))
+        .map(|a| arg(a, names, slots))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn arg(arg: &ir::Arg, names: &Names) -> String {
+fn arg(arg: &ir::Arg, names: &Names, slots: &HashMap<&str, String>) -> String {
     match arg {
         ir::Arg::Val(ty, val) => format!("{} {}", class(*ty), value(val, names)),
+        ir::Arg::Ref(addr) => format!("l {}", address(addr, names, slots)),
     }
 }
 
@@ -226,6 +260,19 @@ fn store_op(ty: ir::Ty) -> &'static str {
     }
 }
 
+// QBE names the alignment in the instruction rather than taking it as an
+// operand, and alloc4 is its smallest form; the caller rounds a smaller
+// alignment up. The other two forms are here so the day a record changes
+// that, the slot is wrong loudly rather than quietly.
+fn alloc(align: i64) -> &'static str {
+    match align {
+        4 => "alloc4",
+        8 => "alloc8",
+        16 => "alloc16",
+        other => panic!("no QBE allocation with alignment {other}"),
+    }
+}
+
 fn temp(id: usize) -> String {
     format!("%.t{id}")
 }
@@ -239,9 +286,11 @@ fn value(value: &ir::Value, names: &Names) -> String {
     }
 }
 
-fn address(addr: &ir::Addr, names: &Names) -> String {
+fn address(addr: &ir::Addr, names: &Names, slots: &HashMap<&str, String>) -> String {
     match addr {
         ir::Addr::Global(symbol) => format!("${}", names.symbol(symbol)),
+        ir::Addr::Slot(name) => format!("%{}", slots[name.as_str()]),
+        ir::Addr::Temp(id) => temp(*id),
     }
 }
 

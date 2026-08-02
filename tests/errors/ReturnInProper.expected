@@ -1,0 +1,2 @@
+tests/errors/ReturnInProper.Mod:3:8: proper procedure 'P' cannot RETURN a value
+Error: 1 error(s)

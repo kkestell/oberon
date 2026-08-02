@@ -24,8 +24,9 @@ pub(super) fn bin_op_name(op: ast::BinOp) -> &'static str {
 }
 
 // Report 9.1's assignment compatibility, with each outcome named. The
-// assignment statement and the value parameter both ask this one function and
-// act on its answer.
+// assignment statement, the value parameter, and the RETURN expression all
+// ask this one function and act on its answer; a variable parameter does not,
+// because Report 10.1 demands an identical type there.
 pub(super) enum AssignKind {
     // The same scalar type on both sides: one ordinary store.
     Store,
@@ -118,8 +119,8 @@ pub(super) fn check_binary_types(
 pub enum Type {
     Integer,
     Boolean,
-    // A procedure's signature. No source names it, so it has no value and no
-    // storage.
+    // A declared procedure's signature. No source names it, so it has no
+    // value and no storage.
     Procedure(Rc<ProcedureType>),
 }
 

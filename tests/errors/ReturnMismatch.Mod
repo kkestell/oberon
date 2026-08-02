@@ -1,0 +1,5 @@
+MODULE ReturnMismatch;
+PROCEDURE F(): INTEGER;
+RETURN TRUE
+END F;
+END ReturnMismatch.

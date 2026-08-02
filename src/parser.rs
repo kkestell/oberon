@@ -74,6 +74,10 @@ impl Parser {
         };
 
         let (consts, types, vars) = self.declarations()?;
+        let mut procs = Vec::new();
+        while *self.peek() == Tok::Procedure {
+            procs.push(self.proc_declaration()?);
+        }
 
         let body = if *self.peek() == Tok::Begin {
             self.advance();
@@ -99,6 +103,7 @@ impl Parser {
             consts,
             types,
             vars,
+            procs,
             body,
         })
     }
@@ -200,6 +205,89 @@ impl Parser {
             }
         }
         Ok((consts, types, vars))
+    }
+
+    fn proc_declaration(&mut self) -> PResult<ProcDecl> {
+        self.expect(Tok::Procedure, "'PROCEDURE'")?;
+        let id = self.identdef("procedure name")?;
+        let (params, ret) = if *self.peek() == Tok::LParen {
+            self.formal_parameters()?
+        } else {
+            (Vec::new(), None)
+        };
+        self.expect(Tok::Semi, "';'")?;
+
+        let (consts, types, vars) = self.declarations()?;
+
+        let body = if *self.peek() == Tok::Begin {
+            self.advance();
+            self.stmt_seq()?
+        } else {
+            Vec::new()
+        };
+        let ret_val = if *self.peek() == Tok::Return {
+            self.advance();
+            Some(self.expression()?)
+        } else {
+            None
+        };
+
+        self.expect(Tok::End, "'END'")?;
+        let (end_name, end_pos) = self.expect_ident("procedure name after END")?;
+        if end_name != id.name {
+            return Err(Diagnostic::new(
+                end_pos,
+                format!("procedure is '{}' but END says '{end_name}'", id.name),
+            ));
+        }
+        self.expect(Tok::Semi, "';'")?;
+
+        Ok(ProcDecl {
+            id,
+            params,
+            ret,
+            consts,
+            types,
+            vars,
+            body,
+            ret_val,
+        })
+    }
+
+    // FormalParameters = "(" [FPSection {";" FPSection}] ")" [":" qualident]
+    fn formal_parameters(&mut self) -> PResult<(Vec<FpSection>, Option<TypeExpr>)> {
+        self.expect(Tok::LParen, "'('")?;
+        let mut sections = Vec::new();
+        if *self.peek() != Tok::RParen {
+            loop {
+                let var = if *self.peek() == Tok::Var {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                let mut names = vec![self.expect_ident("parameter name")?];
+                while *self.peek() == Tok::Comma {
+                    self.advance();
+                    names.push(self.expect_ident("parameter name")?);
+                }
+                self.expect(Tok::Colon, "':'")?;
+                let ty = TypeExpr::Named(self.qualident("parameter type name")?);
+                sections.push(FpSection { var, names, ty });
+                if *self.peek() != Tok::Semi {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        self.expect(Tok::RParen, "')'")?;
+        let ret = if *self.peek() == Tok::Colon {
+            self.advance();
+            Some(TypeExpr::Named(self.qualident("result type name")?))
+        } else {
+            None
+        };
+        Ok((sections, ret))
     }
 
     fn stmt_seq(&mut self) -> PResult<Vec<Stmt>> {
@@ -449,7 +537,18 @@ impl Parser {
                     pos,
                 })
             }
-            Tok::Ident(_) => Ok(Expr::Name(self.designator()?)),
+            Tok::Ident(_) => {
+                let d = self.designator()?;
+                if *self.peek() == Tok::LParen {
+                    let pos = d.pos;
+                    return Ok(Expr::Apply {
+                        callee: d,
+                        args: self.actual_parameters()?,
+                        pos,
+                    });
+                }
+                Ok(Expr::Name(d))
+            }
             Tok::LParen => {
                 self.advance();
                 let e = self.expression()?;
