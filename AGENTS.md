@@ -1,5 +1,7 @@
 # Oberon-07 Compiler
 
+> Make things as simple as possible, but not simpler.
+
 A small, native Oberon-07 compiler written in Rust. The project prioritizes simplicity, correctness, readability, and faithfulness to the language over aggressive optimization or broad platform support.
 
 ## Goals
@@ -12,7 +14,7 @@ A small, native Oberon-07 compiler written in Rust. The project prioritizes simp
 
 ## References
 
-The Report and its grammar are the normative definition of the language, and three other Oberon compilers are vendored under `references/` to consult when behaviour is ambiguous. See [docs/dev/references.md](docs/dev/references.md) for what each one is good for.
+The normative language definition is Niklaus Wirth's *The Programming Language Oberon (Revised Oberon-07)*, May 2016, referred to here as the Report. An extracted EBNF grammar is kept alongside it for convenient reference. Three Oberon compilers are also vendored as secondary references for cases where the language definition is ambiguous. See [docs/dev/references.md](docs/dev/references.md) for the language definition files, the reference implementations, and guidance on when to consult each one.
 
 ## English, Please
 
@@ -34,99 +36,14 @@ Reread your draft as someone who skimmed the visible messages and took no notes.
 
 ## Architecture
 
-```text
-Source
-    ↓
-Lexer
-    ↓
-Parser
-    ↓
-AST
-    ↓
-Semantic Analysis
-    ↓
-Typed IR
-    ↓
-QBE IL
-    ↓
-QBE
-    ↓
-System Assembler + Linker
-    ↓
-Native Executable
-```
-
-The compiler uses a small typed intermediate representation between semantic analysis and code generation. The IR makes addresses, values, storage, calls, and runtime operations explicit while remaining much smaller than LLVM IR.
-
-## Backend
-
-The backend targets QBE.
-
-QBE provides:
-
-* instruction selection
-* register allocation
-* calling conventions
-* native code generation
-
-The compiler is responsible for language semantics, object layout, runtime checks, and lowering to QBE IL.
-
-## Runtime
-
-A small C runtime provides:
-
-* memory allocation
-* module initialization
-* runtime checks
-* basic runtime support
-* standard library implementation
-
-The runtime intentionally remains minimal.
-
-## Garbage Collection
-
-Heap allocation uses the Boehm–Demers–Weiser conservative garbage collector (BDWGC).
-
-Generated code allocates through runtime wrappers rather than calling BDWGC directly:
-
-* `oberon_alloc`
-* `oberon_alloc_atomic`
-
-This isolates the compiler from the underlying allocator and allows the GC implementation to be replaced in the future if desired.
-
-## Implementation Strategy
-
-Develop incrementally.
-
-1. Lexer
-2. Parser
-3. AST
-4. Semantic analysis
-5. Typed IR
-6. QBE code generation
-7. Runtime
-8. Standard modules
-9. Conformance and regression testing
-
-Each stage should produce a working compiler capable of compiling progressively more of the language.
-
-## Plans and Reviews
-
-Development happens in slices. Every slice gets a plan written before the work starts, in [docs/dev/plans/](docs/dev/plans/), and every review gets a document written as it is delivered, in [docs/dev/reviews/](docs/dev/reviews/). Do this automatically, without being asked. See [docs/dev/plans-and-reviews.md](docs/dev/plans-and-reviews.md) for the file naming scheme and what each kind of document should contain.
-
-## Non-Goals
-
-* Self-hosting
-* LLVM
-* JIT compilation
-* Advanced optimization
-* IDE features
-* Incremental compilation
-* Language extensions
-
-The focus is a clean, faithful, native Oberon-07 compiler with a small, understandable implementation.
+See [docs/dev/architecture.md](docs/dev/architecture.md) for the compiler pipeline, backend, runtime, and garbage collector.
 
 ## Code Style
 
 The rule is "Just Enough" Rust: this is an experiment, so optimize for code that is cheap to change rather than robust to operate. Oberon-07 semantics deserve care and faithfulness to the Report; the Rust implementing them should stay thin and boring. Read [docs/dev/code-style.md](docs/dev/code-style.md) before writing code — it covers errors and diagnostics, ownership, when an abstraction is allowed, file structure, and testing.
 
+## Plans and Reviews
+
+Development happens in slices. Every slice gets a plan written before the work starts, in [docs/dev/plans/](docs/dev/plans/), and every review gets a document written as it is delivered, in [docs/dev/reviews/](docs/dev/reviews/). Do this automatically, without being asked. See [docs/dev/plans-and-reviews.md](docs/dev/plans-and-reviews.md) for the file naming scheme and what each kind of document should contain.
+
+Only write plans and do reviews for major slices of work. Not for small tasks, documentation updates, or minor bug fixes.
