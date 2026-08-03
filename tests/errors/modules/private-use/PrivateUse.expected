@@ -1,0 +1,4 @@
+tests/errors/modules/private-use/PrivateUse.Mod:5:16: 'Secret' is not declared in module 'Support'
+tests/errors/modules/private-use/PrivateUse.Mod:6:16: 'hidden' is not declared in module 'Support'
+tests/errors/modules/private-use/PrivateUse.Mod:7:11: 'Concealed' is not declared in module 'Support'
+Error: 3 error(s)

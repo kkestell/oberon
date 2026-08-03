@@ -25,6 +25,9 @@ pub fn build(source: &Path, output: &Path) -> Result<()> {
         .to_string();
     let support = support_dir()?;
     let mut build = Build {
+        root_dir: source.parent().unwrap_or(Path::new("")).to_path_buf(),
+        lib_dir: support.clone(),
+        active: Vec::new(),
         done: HashMap::new(),
         modules: Vec::new(),
     };
@@ -93,6 +96,11 @@ fn support_dir() -> Result<PathBuf> {
 // build rereads and reanalyzes every source it needs, and no interface is
 // written to disk.
 struct Build {
+    root_dir: PathBuf,
+    lib_dir: PathBuf,
+    // The modules whose compilation has started and not finished, innermost
+    // last. An import naming one of these closes a cycle.
+    active: Vec<String>,
     done: HashMap<String, sema::Interface>,
     // Source modules in the order their initializers must run. A dependency
     // finishes before its client starts, so pushing on completion puts them
@@ -139,17 +147,21 @@ impl Build {
             );
         }
 
+        self.active.push(name.to_string());
         let resolved = self.dependencies(&module, path)?;
         let (lowered, interface) = match sema::analyze(&module, &resolved) {
             Ok(result) => result,
             Err(diags) => return fail(path, &diags),
         };
+        self.active.pop();
 
         self.modules.push(lowered);
         self.done.insert(name.to_string(), interface);
         Ok(())
     }
 
+    // Depth first, in written order, so sibling dependencies initialize
+    // left to right. A module reached twice is compiled once.
     fn dependencies(
         &mut self,
         module: &ast::Module,
@@ -158,22 +170,76 @@ impl Build {
         let mut resolved = HashMap::new();
         for import in &module.imports {
             if !self.done.contains_key(&import.name) {
-                if import.name == NATIVE_OUT {
-                    self.done.insert(import.name.clone(), sema::out_interface());
-                } else {
+                if let Some(cycle) = self.cycle(&import.name) {
                     return fail(
                         path,
                         &[Diagnostic::new(
                             import.pos,
-                            format!("cannot find module '{}'", import.name),
+                            format!("import cycle: {cycle}"),
                         )],
                     );
+                }
+                match lookup(&self.root_dir, &self.lib_dir, &import.name) {
+                    Some(found) => self.compile(&import.name, &found)?,
+                    // Only when no source module of that name exists, so a
+                    // program can still supply its own Out.
+                    None if import.name == NATIVE_OUT => {
+                        self.done.insert(import.name.clone(), sema::out_interface());
+                    }
+                    None => {
+                        return fail(
+                            path,
+                            &[Diagnostic::new(
+                                import.pos,
+                                format!("cannot find module '{}'", import.name),
+                            )],
+                        );
+                    }
                 }
             }
             resolved.insert(import.name.clone(), self.done[&import.name].clone());
         }
         Ok(resolved)
     }
+
+    // The cycle text starts where the repeated name first appears, so an
+    // acyclic prefix leading into the cycle is left out. A direct self-import
+    // is the two-name form of the same text.
+    fn cycle(&self, name: &str) -> Option<String> {
+        let start = self.active.iter().position(|active| active == name)?;
+        let mut chain: Vec<&str> = self.active[start..].iter().map(String::as_str).collect();
+        chain.push(name);
+        Some(chain.join(" -> "))
+    }
+}
+
+// Report 11 leaves module lookup to the implementation. Two fixed directories,
+// root first so an application can supply a module that shadows a bundled one.
+// Spelling is exact, and neither the importing file's own directory nor any
+// environment variable takes part.
+fn lookup(root_dir: &Path, lib_dir: &Path, name: &str) -> Option<PathBuf> {
+    let file = format!("{name}.Mod");
+    if holds(root_dir, &file) {
+        return Some(root_dir.join(&file));
+    }
+    holds(lib_dir, &file).then(|| lib_dir.join(&file))
+}
+
+// A case-insensitive filesystem opens `out.Mod` from a directory holding
+// `Out.Mod`, so asking whether the joined path is a file would let the host
+// decide how an import may be spelled. The directory's own entry is compared
+// instead. An empty directory path is the working directory.
+fn holds(dir: &Path, file: &str) -> bool {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    fs::read_dir(dir).is_ok_and(|mut entries| {
+        entries.any(|entry| {
+            entry.is_ok_and(|entry| entry.file_name() == *file && entry.path().is_file())
+        })
+    })
 }
 
 fn report(source: &Path, diags: &[Diagnostic]) -> Result<()> {
@@ -205,4 +271,42 @@ fn run(cmd: &mut Command, name: &str) -> Result<()> {
         bail!("{name} failed: {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // tests/lookup/root and tests/lookup/lib hold Both.Mod, and only the
+    // library holds LibOnly.Mod.
+    fn dirs() -> (PathBuf, PathBuf) {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lookup");
+        (base.join("root"), base.join("lib"))
+    }
+
+    #[test]
+    fn root_directory_wins() {
+        let (root, lib) = dirs();
+        let found = lookup(&root, &lib, "Both").expect("module exists");
+        assert_eq!(found, root.join("Both.Mod"));
+    }
+
+    #[test]
+    fn library_is_the_fallback() {
+        let (root, lib) = dirs();
+        let found = lookup(&root, &lib, "LibOnly").expect("module exists");
+        assert_eq!(found, lib.join("LibOnly.Mod"));
+    }
+
+    #[test]
+    fn spelling_is_exact() {
+        let (root, lib) = dirs();
+        assert!(lookup(&root, &lib, "both").is_none());
+    }
+
+    #[test]
+    fn missing_module_is_not_found() {
+        let (root, lib) = dirs();
+        assert!(lookup(&root, &lib, "Absent").is_none());
+    }
 }

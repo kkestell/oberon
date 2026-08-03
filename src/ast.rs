@@ -12,16 +12,24 @@ pub struct Module {
     pub body: Vec<Stmt>,
 }
 
+// identdef = ident ["*"]. The grammar allows the mark on a local declaration
+// too, so the parser records it and sema decides whether the scope permits it.
 #[derive(Debug, Clone)]
 pub struct IdentDef {
     pub name: String,
     pub pos: Pos,
+    pub export: bool,
 }
 
+// `IMPORT X := M` declares the qualifier X and selects the module M. The two
+// names get separate positions: a lookup failure belongs on M, a duplicate
+// qualifier on X. An unaliased import repeats one name in both roles.
 #[derive(Debug, Clone)]
 pub struct Import {
     pub name: String,
     pub pos: Pos,
+    pub qualifier: String,
+    pub qualifier_pos: Pos,
 }
 
 #[derive(Debug, Clone)]

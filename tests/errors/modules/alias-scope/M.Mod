@@ -1,0 +1,3 @@
+MODULE M;
+  CONST K* = 1;
+END M.

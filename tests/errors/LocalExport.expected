@@ -1,0 +1,4 @@
+tests/errors/LocalExport.Mod:7:9: 'Local' cannot be exported: only a declaration in the module's scope can be marked
+tests/errors/LocalExport.Mod:8:7: 'n' cannot be exported: only a declaration in the module's scope can be marked
+tests/errors/LocalExport.Mod:10:15: 'Inner' cannot be exported: only a declaration in the module's scope can be marked
+Error: 3 error(s)

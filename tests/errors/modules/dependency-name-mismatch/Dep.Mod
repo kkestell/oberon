@@ -1,0 +1,2 @@
+MODULE NotDep;
+END NotDep.

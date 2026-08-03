@@ -1,0 +1,2 @@
+MODULE Both;
+END Both.

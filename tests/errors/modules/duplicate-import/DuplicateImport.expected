@@ -1,0 +1,4 @@
+tests/errors/modules/duplicate-import/DuplicateImport.Mod:6:13: 'M' is already declared
+tests/errors/modules/duplicate-import/DuplicateImport.Mod:6:24: 'X' is already declared
+tests/errors/modules/duplicate-import/DuplicateImport.Mod:7:7: 'X' is already declared
+Error: 3 error(s)

@@ -1,0 +1,2 @@
+MODULE LibOnly;
+END LibOnly.

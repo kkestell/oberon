@@ -1,0 +1,2 @@
+tests/errors/RootNameMismatch.Mod:1:8: module 'Wrong' must be stored in a file named 'Wrong.Mod'
+Error: 1 error(s)

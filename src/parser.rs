@@ -57,9 +57,14 @@ impl Parser {
         }
     }
 
+    // identdef = ident ["*"]
     fn identdef(&mut self, what: &str) -> PResult<IdentDef> {
         let (name, pos) = self.expect_ident(what)?;
-        Ok(IdentDef { name, pos })
+        let export = *self.peek() == Tok::Star;
+        if export {
+            self.advance();
+        }
+        Ok(IdentDef { name, pos, export })
     }
 
     fn module(&mut self) -> PResult<Module> {
@@ -109,12 +114,30 @@ impl Parser {
     }
 
     // ImportList = IMPORT import {"," import} ";"
+    // import = ident [":=" ident]   (alias := module)
     fn import_list(&mut self) -> PResult<Vec<Import>> {
         self.expect(Tok::Import, "'IMPORT'")?;
         let mut imports = Vec::new();
         loop {
-            let (name, pos) = self.expect_ident("module name")?;
-            imports.push(Import { name, pos });
+            let (first, first_pos) = self.expect_ident("module name")?;
+            let import = if *self.peek() == Tok::Assign {
+                self.advance();
+                let (name, pos) = self.expect_ident("module name")?;
+                Import {
+                    name,
+                    pos,
+                    qualifier: first,
+                    qualifier_pos: first_pos,
+                }
+            } else {
+                Import {
+                    name: first.clone(),
+                    pos: first_pos,
+                    qualifier: first,
+                    qualifier_pos: first_pos,
+                }
+            };
+            imports.push(import);
             if *self.peek() == Tok::Comma {
                 self.advance();
             } else {

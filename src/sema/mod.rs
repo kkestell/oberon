@@ -9,7 +9,9 @@ mod constant;
 mod symbols;
 mod types;
 
-use symbols::{Builtin, ConstValue, Scope, Symbol, builtin_signature, type_list, universe_scope};
+use symbols::{
+    Builtin, ConstValue, Member, Scope, Symbol, builtin_signature, type_list, universe_scope,
+};
 pub use symbols::{Interface, out_interface};
 use types::*;
 
@@ -133,8 +135,10 @@ impl Analyzer {
         }
     }
 
-    // Report 11: an import declares the module's name in the client's module
-    // scope, and the symbols behind it come from the module's interface.
+    // Report 11: an import declares the qualifier in the client's module
+    // scope. Two imports of one module under different qualifiers are legal
+    // and share its objects, because the symbols come from the interface and
+    // never from the qualifier.
     fn imports(&mut self, imports: &[ast::Import], resolved: &HashMap<String, Interface>) {
         for import in imports {
             let interface = resolved
@@ -145,7 +149,37 @@ impl Analyzer {
                 .iter()
                 .map(|(name, member)| (name.clone(), member.client_symbol()))
                 .collect();
-            self.declare(&import.name, import.pos, Symbol::Module(members));
+            self.declare(
+                &import.qualifier,
+                import.qualifier_pos,
+                Symbol::Module(members),
+            );
+        }
+    }
+
+    // Report 4 permits an export mark only on a declaration in a module's
+    // scope. cf. ORP.CheckExport, which consumes the mark at every identdef
+    // and reports it when the declaration level is not zero.
+    fn check_export(&mut self, id: &ast::IdentDef) -> bool {
+        if !id.export {
+            return false;
+        }
+        if self.scopes.len() != MODULE_SCOPE + 1 {
+            self.diags.push(Diagnostic::new(
+                id.pos,
+                format!(
+                    "'{}' cannot be exported: only a declaration in the module's scope can be marked",
+                    id.name
+                ),
+            ));
+            return false;
+        }
+        true
+    }
+
+    fn export(&mut self, id: &ast::IdentDef, member: Member) {
+        if self.check_export(id) {
+            self.interface.members.insert(id.name.clone(), member);
         }
     }
 
@@ -159,11 +193,13 @@ impl Analyzer {
             }
             match self.eval_const(&declaration.expr) {
                 Ok(value) => {
-                    self.declare(
+                    if self.declare(
                         &declaration.id.name,
                         declaration.id.pos,
-                        Symbol::Const(value),
-                    );
+                        Symbol::Const(value.clone()),
+                    ) {
+                        self.export(&declaration.id, Member::Const(value));
+                    }
                 }
                 Err(diag) => self.diags.push(diag),
             }
@@ -179,11 +215,13 @@ impl Analyzer {
             let Some(ty) = self.resolve_type(&declaration.ty) else {
                 continue;
             };
-            self.declare(
+            if self.declare(
                 &declaration.id.name,
                 declaration.id.pos,
-                Symbol::TypeName(ty),
-            );
+                Symbol::TypeName(ty.clone()),
+            ) {
+                self.export(&declaration.id, Member::Type(ty));
+            }
         }
     }
 
@@ -192,6 +230,8 @@ impl Analyzer {
             let Some(ty) = self.resolve_type(&declaration.ty) else {
                 continue;
             };
+            // One declaration may mix marked and unmarked names, so the mark
+            // is read per name rather than per declaration.
             for id in &declaration.names {
                 let symbol = format!("{}.{}", self.module, id.name);
                 let addr = ir::Addr::Global(symbol.clone());
@@ -205,9 +245,16 @@ impl Analyzer {
                     },
                 ) {
                     self.globals.push(ir::Global {
-                        symbol,
+                        symbol: symbol.clone(),
                         ty: ty.storage(),
                     });
+                    self.export(
+                        id,
+                        Member::Var {
+                            ty: ty.clone(),
+                            symbol,
+                        },
+                    );
                 }
             }
         }
@@ -218,14 +265,22 @@ impl Analyzer {
             self.resolve_procedure_signature(&declaration.params, declaration.ret.as_ref());
         let symbol = format!("{prefix}.{}", declaration.id.name);
         if let Some(proc_ty) = proc_ty {
-            self.declare(
+            if self.declare(
                 &declaration.id.name,
                 declaration.id.pos,
                 Symbol::Proc {
                     symbol: symbol.clone(),
-                    ty: proc_ty,
+                    ty: proc_ty.clone(),
                 },
-            );
+            ) {
+                self.export(
+                    &declaration.id,
+                    Member::Proc {
+                        symbol: symbol.clone(),
+                        ty: proc_ty,
+                    },
+                );
+            }
         }
 
         self.scopes.push(Scope::new());
@@ -303,6 +358,9 @@ impl Analyzer {
                     },
                 ) {
                     self.reserve_slot(&id.name, &ty);
+                    // A local can never be exported, but the mark still has
+                    // to be diagnosed rather than ignored.
+                    self.check_export(id);
                 }
             }
         }

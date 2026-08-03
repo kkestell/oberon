@@ -3,7 +3,9 @@ use std::fmt::Write;
 
 use crate::ir;
 
-// Every source module of the build goes into one QBE unit.
+// Every source module of the build goes into one QBE unit, so a call between
+// two of them needs no linkage annotation: Oberon export marks are a semantic
+// rule that sema has already applied by this point.
 pub fn emit(program: &ir::Program) -> String {
     let mut out = String::new();
     let names = Names::new(program);

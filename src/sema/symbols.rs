@@ -35,8 +35,8 @@ pub(super) enum Symbol {
     Var {
         ty: Type,
         addr: ir::Addr,
-        // Set while a FOR statement's body is being lowered so the body
-        // cannot move its own control variable.
+        // Set on an imported variable, and while a FOR statement's body is
+        // being lowered so the body cannot move its own control variable.
         read_only: bool,
     },
     Proc {
@@ -48,8 +48,15 @@ pub(super) enum Symbol {
     Builtin(Builtin),
 }
 
-// The public face of a module. The interface owns its data and is cloned into
-// each client.
+// The public face of an analyzed module. Report 4 says a client sees only the
+// marked declarations, so an unmarked one is absent here rather than present
+// and hidden: no lookup path can forget to check a visibility flag that does
+// not exist. The interface owns its data and is cloned into each client.
+//
+// This is a build result held in memory, not a symbol file. Cloning it clones
+// shared type handles rather than rebuilding types, so an exported type keeps
+// one identity across every client, however many of them there are and however
+// many times it is re-exported.
 #[derive(Debug, Clone, Default)]
 pub struct Interface {
     pub members: HashMap<String, Member>,
@@ -57,12 +64,24 @@ pub struct Interface {
 
 #[derive(Debug, Clone)]
 pub enum Member {
+    Const(ConstValue),
+    Type(Type),
+    Var { ty: Type, symbol: String },
     Proc { symbol: String, ty: Type },
 }
 
 impl Member {
+    // Report 9.1 and 11: an imported variable is read-only in the client. The
+    // declaring module keeps the writable symbol it built for itself.
     pub(super) fn client_symbol(&self) -> Symbol {
         match self {
+            Member::Const(value) => Symbol::Const(value.clone()),
+            Member::Type(ty) => Symbol::TypeName(ty.clone()),
+            Member::Var { ty, symbol } => Symbol::Var {
+                ty: ty.clone(),
+                addr: ir::Addr::Global(symbol.clone()),
+                read_only: true,
+            },
             Member::Proc { symbol, ty } => Symbol::Proc {
                 symbol: symbol.clone(),
                 ty: ty.clone(),

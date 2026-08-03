@@ -1,0 +1,2 @@
+tests/errors/MissingImport.Mod:2:10: cannot find module 'Absent'
+Error: 1 error(s)
