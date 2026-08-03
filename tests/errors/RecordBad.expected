@@ -1,0 +1,16 @@
+tests/errors/RecordBad.Mod:5:36: field 'x' is already declared
+tests/errors/RecordBad.Mod:10:23: a procedure cannot have the record result type R
+tests/errors/RecordBad.Mod:14:8: 'r' has type R and cannot be used as a value
+tests/errors/RecordBad.Mod:14:12: 'r' has type R and cannot be used as a value
+tests/errors/RecordBad.Mod:15:8: 'r' has type R and cannot be used as a value
+tests/errors/RecordBad.Mod:15:12: 'r' has type R and cannot be used as a value
+tests/errors/RecordBad.Mod:16:8: 'r' has type R and cannot be used as a value
+tests/errors/RecordBad.Mod:16:12: 'r' has type R and cannot be used as a value
+tests/errors/RecordBad.Mod:17:8: 'r' has type R and cannot be used as a value
+tests/errors/RecordBad.Mod:17:12: 'r' has type R and cannot be used as a value
+tests/errors/RecordBad.Mod:18:6: 'r' has type R and cannot be used as a value
+tests/errors/RecordBad.Mod:19:10: cannot select 'missing': R has no such field
+tests/errors/RecordBad.Mod:20:10: cannot select 'field' from INTEGER: only a record has fields
+tests/errors/RecordBad.Mod:21:8: cannot assign Other to R
+tests/errors/RecordBad.Mod:22:13: cannot assign RECORD to RECORD: these are different record types, and each RECORD in the source declares its own
+Error: 15 error(s)

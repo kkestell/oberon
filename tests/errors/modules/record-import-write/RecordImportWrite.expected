@@ -1,0 +1,6 @@
+tests/errors/modules/record-import-write/RecordImportWrite.Mod:9:3: cannot assign to 'RecordWriteSource.box': it is read-only
+tests/errors/modules/record-import-write/RecordImportWrite.Mod:10:3: cannot assign to 'RecordWriteSource.box.n': it is read-only
+tests/errors/modules/record-import-write/RecordImportWrite.Mod:11:3: cannot assign to 'RecordWriteSource.box.row[...]': it is read-only
+tests/errors/modules/record-import-write/RecordImportWrite.Mod:12:7: argument 1 is read-only
+tests/errors/modules/record-import-write/RecordImportWrite.Mod:13:10: argument 1 is read-only
+Error: 5 error(s)

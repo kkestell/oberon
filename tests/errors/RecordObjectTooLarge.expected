@@ -1,0 +1,2 @@
+tests/errors/RecordObjectTooLarge.Mod:3:19: record type exceeds target object-size limit
+Error: 1 error(s)

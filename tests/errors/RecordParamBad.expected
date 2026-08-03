@@ -1,0 +1,11 @@
+tests/errors/RecordParamBad.Mod:15:5: cannot assign to 'value': it is read-only
+tests/errors/RecordParamBad.Mod:16:5: cannot assign to 'value.n': it is read-only
+tests/errors/RecordParamBad.Mod:17:5: cannot assign to 'value.row[...]': it is read-only
+tests/errors/RecordParamBad.Mod:18:9: argument 1 is read-only
+tests/errors/RecordParamBad.Mod:19:16: argument 1 is read-only
+tests/errors/RecordParamBad.Mod:34:11: argument 1 has type OtherBox, expected Box
+tests/errors/RecordParamBad.Mod:34:21: argument 2 has type OtherBox, expected Box
+tests/errors/RecordParamBad.Mod:35:11: argument 1 has type ARRAY 2 OF INTEGER, expected ARRAY 2 OF INTEGER: these are different array types, and each ARRAY in the source declares its own
+tests/errors/RecordParamBad.Mod:36:12: argument 1 is a string where a variable is required
+tests/errors/RecordParamBad.Mod:37:12: argument 1 is a string where a variable is required
+Error: 10 error(s)

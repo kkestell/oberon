@@ -93,7 +93,11 @@ A string is a constant and never a variable's type: it appears only as a literal
 
 Assigning a string to a character array — a one-dimensional array of `CHAR` — requires the character count to be less than the array length, checked at compile time, and copies exactly the characters and one null character, leaving the rest of the destination untouched. The relations extend to character arrays: two operands compare when each is a character array or a string and at least one is a character array, through `oberon_str_cmp` with both addresses and both bounding lengths — a character array's declared length, a string's character count plus its terminator. The walk stops at the first differing pair, at a null present in both, or at the shorter bound, so a properly terminated value compares by its characters, an unterminated full array still gets an answer, and nothing reads past a declared length. Two strings fold under the same bounded rule, so a folded comparison and a computed one always agree.
 
-## Aggregate layout
+## Structured representation
+
+Arrays and records live in storage and are represented by addresses whenever they cross a procedure boundary. A structured `VAR` parameter is a writable reference. A structured value parameter is a read-only reference, including every field and element selected from it, and no callee-side copy is made. The actual for either form must be a variable of the identical type; a read-only variable may be passed to a structured value parameter but not to a `VAR` parameter.
+
+Whole-array and whole-record assignment copy the complete representation through `oberon_copy`, a `memmove` wrapper. Assignment resolves the destination before the source and accepts self-assignment. Records include their padding in the copy.
 
 ### Array types have identity
 
@@ -103,15 +107,25 @@ Each `ARRAY` constructor written in the source creates one type, and two types a
 
 A length is a constant expression that must yield a non-negative `INTEGER`. Zero is an ordinary length.
 
+### Record types have identity and field visibility
+
+Each `RECORD` constructor creates one type, just as each `ARRAY` constructor does. A record type descriptor holds its fields in declaration order, with each field's type, offset, and export mark. It also holds the record's size, alignment, declared name when it has one, and defining module. Aliases and imported interfaces share the descriptor, so identity and field visibility survive module boundaries.
+
+An unmarked field is visible only inside the module that declared the record. A client sees only marked fields, including when it reads an exported variable whose record type itself is private. Field selection adds the descriptor's fixed byte offset to the base address and carries the base's read-only status through subsequent selectors.
+
+Record extension is not implemented. Without extension, record assignment and structured parameter compatibility require identical types. Record comparison is not part of the language.
+
 ### Size, alignment, and the target object-size limit
 
-An array occupies exactly its length times its element size, with element *i* at *base + i × element size*. There is no padding between elements and no header. Its alignment is its element type's alignment, which is four for everything the compiler currently has, so the rule lives on the type rather than being written as a four anywhere.
+An array occupies exactly its length times its element size, with element *i* at *base + i × element size*. There is no padding between elements and no header. Its alignment is its element type's alignment.
 
-A zero-length array has size zero and keeps its element alignment. It gains no hidden element and no minimum payload byte: QBE accepts a zero-byte data object and a zero-byte stack allocation, and no valid selector can reach inside one. Records containing zero-length arrays will need exactly this.
+A record lays out fields in declaration order. Each field starts at the next offset aligned for its type. The record's alignment is the largest field alignment, and its size is rounded up to that alignment so an array of records has the correct stride. An empty record has size zero and alignment one.
+
+A zero-length array has size zero and keeps its element alignment. It gains no hidden element and no minimum payload byte: QBE accepts a zero-byte data object and a zero-byte stack allocation, and no valid selector can reach inside one. A zero-length array field reserves no payload but still contributes its alignment.
 
 Layout arithmetic is checked against a target object-size limit of one gibibyte, which is one constant shared by semantic analysis and the driver. It is well below QBE's signed stack-offset range and the reach of the small code model's data references, which leaves room for the code, the runtime's own objects, and linker placement. A single type whose size exceeds it is a source error, and so is a procedure whose locals or a module whose globals cross it in total, reported against the declaration that crossed it. The driver sums the whole program's static data before invoking QBE, so several individually valid modules cannot together produce a link that fails. This is an implementation resource limit, not an Oberon rule.
 
-A module-level array is a zero-filled data object of its complete size. A procedure-local array reserves its complete size in the activation record and, like every other local, starts uninitialized.
+A module-level structured variable is a zero-filled data object of its complete size and alignment. A procedure-local structured variable reserves its complete size in the activation record and, like every other local, starts uninitialized.
 
 ### Indexing is a checked address operation
 
@@ -125,13 +139,9 @@ An index the compiler can fold is a source error when it is outside its domain, 
 
 Selecting part of a variable does not change whether it can be written. An imported array may be read and indexed, but neither it nor any element or row of it may be assigned or passed where a variable is changed.
 
-### Whole-array assignment copies
+### Structured values
 
-An assignment between two designators of the same array type copies the complete byte representation through `oberon_copy`, a wrapper around `memmove`. The destination owns its bytes afterwards, so changing either side cannot reach the other. The destination designator is resolved first and the source second, each exactly once, which keeps source order and makes a selected row copy from where it was when the statement started. Assigning a variable to itself is legal and copies a region onto itself, which is why the runtime uses `memmove` rather than `memcpy`. A zero-length assignment still resolves both designators and runs both sides' checks, and then copies zero bytes.
-
-The copy is a runtime call rather than an expanded QBE `blit` so that a large array costs one call instead of code proportional to its size.
-
-Arrays are never turned into pointer values. An array designator is a whole value only in an assignment; arithmetic, relations, conditions, constants, and scalar arguments and results all reject it. Report 10.1 forbids an array result type outright.
+Arrays and records are never loaded as scalar values. A structured designator is a whole value only in assignment and parameter passing; arithmetic, conditions, constants, and other scalar contexts reject it. Character arrays additionally participate in the Report's string assignment and comparison rules. Report 10.1 forbids both array and record result types, and records have no equality relation.
 
 ### `LEN`
 
@@ -143,7 +153,7 @@ In a required constant context, such as a constant declaration or another array'
 
 A module's interface carries its exported type names alongside its constants, variables, and procedures. A client reaches one through the same qualified lookup as any other member, and a private type name is simply absent. Cloning an interface clones shared type handles rather than rebuilding types, so the original name, a re-exported alias, and every client that imports either all denote one type, and an assignment between variables declared through different names of it is an assignment between identical types.
 
-An exported variable may have a private or an inline array type. Its interface carries the type needed to read and index the variable without giving the client a name to declare another variable of that type, so the type stays private while the variable stays usable.
+An exported variable may have a private or inline structured type. Its interface carries the type needed to read and select from the variable without giving the client a name to declare another variable of that type, so the type stays private while the variable stays usable. A record descriptor also carries its defining module, which lets field lookup hide unmarked fields in every client without rebuilding the type.
 
 ## Backend
 

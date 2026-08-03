@@ -1,0 +1,2 @@
+tests/errors/RecordConstRelation.Mod:6:21: operator '=' is not defined for R operands
+Error: 1 error(s)

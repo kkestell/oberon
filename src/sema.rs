@@ -47,6 +47,9 @@ pub enum Type {
     // declaration's names, an alias, an interface member, and a client's view
     // of an exported type all hold the same handle.
     Array(Rc<ArrayType>),
+    // Report 6.3, under the same identity rule as Array: one RECORD
+    // constructor in the source is one type.
+    Record(Rc<RecordType>),
 }
 
 #[derive(Debug)]
@@ -58,12 +61,40 @@ pub struct ArrayType {
     size: i64,
 }
 
+#[derive(Debug)]
+pub struct RecordType {
+    // In declaration order, each with the offset the layout rule gave it.
+    fields: Vec<Field>,
+    // Both computed once, when the constructor was resolved, and checked
+    // against ir::MAX_OBJECT_SIZE there. Nothing recomputes layout later.
+    size: i64,
+    align: i64,
+    // The name of the type declaration whose right side this constructor was.
+    // A record's field list is too large to print in a diagnostic, so the
+    // declared name is what diagnostics show; an inline constructor has none
+    // and prints as RECORD.
+    name: Option<String>,
+    // The module that declared the constructor. Report 6.3 makes an unmarked
+    // field private to it, and the descriptor carries that home wherever it
+    // travels, so an imported type, a re-exported alias, and an exported
+    // variable of a private type all answer the same way.
+    module: String,
+}
+
+#[derive(Debug)]
+struct Field {
+    name: String,
+    ty: Type,
+    offset: i64,
+    export: bool,
+}
+
 impl Type {
     // The IR type of a value of this type, when a value of it exists. An
-    // array has none: it is storage, and asking for one is how a load, a
-    // store, an argument, or a result finds out it may not have this type at
-    // all. A string has none either, so no string can reach a load, a store,
-    // an argument, or a result by accident.
+    // array or a record has none: it is storage, and asking for one is how a
+    // load, a store, an argument, or a result finds out it may not have this
+    // type at all. A string has none either, so no string can reach a load, a
+    // store, an argument, or a result by accident.
     fn scalar(&self) -> Option<ir::Ty> {
         match self {
             Type::Integer => Some(ir::Ty::Int),
@@ -71,7 +102,7 @@ impl Type {
             Type::Boolean => Some(ir::Ty::Bool),
             Type::Set => Some(ir::Ty::Set),
             Type::Char | Type::Byte => Some(ir::Ty::Byte),
-            Type::String(_) | Type::Array(_) => None,
+            Type::String(_) | Type::Array(_) | Type::Record(_) => None,
         }
     }
 
@@ -87,6 +118,20 @@ impl Type {
         }
     }
 
+    fn record(&self) -> Option<&Rc<RecordType>> {
+        match self {
+            Type::Record(record) => Some(record),
+            _ => None,
+        }
+    }
+
+    // Report 9.1 and 10.1 say "structured (of array or record type)". These
+    // are the types that live in storage and travel by address: a parameter of
+    // one is a reference, and an assignment between two of them is a copy.
+    fn structured(&self) -> bool {
+        matches!(self, Type::Array(_) | Type::Record(_))
+    }
+
     // The declared length, when this is a character array: a one-dimensional
     // array whose element type is CHAR. Report 9.1's string assignment and
     // 8.2.4's array relations apply to exactly these.
@@ -100,15 +145,19 @@ impl Type {
     fn size(&self) -> i64 {
         match self {
             Type::Array(array) => array.size,
+            Type::Record(record) => record.size,
             scalar => ir::scalar_size(scalar.ir()),
         }
     }
 
     // An array is contiguous and takes its element's alignment, so the rule
-    // works for the one-byte CHAR and BYTE types without a special case.
+    // works for the one-byte CHAR and BYTE types without a special case. A
+    // record's alignment is the largest among its fields, computed when the
+    // constructor was resolved.
     fn align(&self) -> i64 {
         match self {
             Type::Array(array) => array.elem.align(),
+            Type::Record(record) => record.align,
             scalar => ir::scalar_size(scalar.ir()),
         }
     }
@@ -119,9 +168,27 @@ impl Type {
                 len: array.len,
                 elem: Box::new(array.elem.storage()),
             },
+            Type::Record(record) => ir::Storage::Record {
+                size: record.size,
+                align: record.align,
+            },
             scalar => ir::Storage::Scalar(scalar.ir()),
         }
     }
+}
+
+// Report 6.3: the scope of a field identifier is the record itself, and a
+// field that is to be visible outside the declaring module must be marked.
+// Inside the declaring module every field is visible, marked or not; outside
+// it, only marked fields exist, so an unmarked one is indistinguishable from
+// a field that was never declared. All three reference compilers behave this
+// way — Project Oberon and OBNC both omit private fields from what a client
+// can see — and it keeps private names out of other modules' diagnostics.
+fn find_field<'a>(record: &'a RecordType, name: &str, module: &str) -> Option<&'a Field> {
+    record
+        .fields
+        .iter()
+        .find(|field| field.name == name && (field.export || record.module == module))
 }
 
 // Report 6.2 and 9.1 ask whether two types are *the same type*, not whether
@@ -142,6 +209,7 @@ impl PartialEq for Type {
             | (Type::Byte, Type::Byte) => true,
             (Type::String(a), Type::String(b)) => a == b,
             (Type::Array(a), Type::Array(b)) => Rc::ptr_eq(a, b),
+            (Type::Record(a), Type::Record(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -161,6 +229,13 @@ impl fmt::Display for Type {
             Type::String(1) => write!(f, "string of 1 character"),
             Type::String(n) => write!(f, "string of {n} characters"),
             Type::Array(array) => write!(f, "ARRAY {} OF {}", array.len, array.elem),
+            // A record's field list would swamp the message it appears in, so
+            // the declared name stands for it. A constructor written inline in
+            // a variable declaration or a field list never had one.
+            Type::Record(record) => match &record.name {
+                Some(name) => write!(f, "{name}"),
+                None => write!(f, "RECORD"),
+            },
         }
     }
 }
@@ -352,12 +427,12 @@ struct Place {
 }
 
 // What the source of an assignment or a relation operand turned out to be.
-// An array keeps its address because it has no scalar value to load, and a
-// string keeps its bytes because what it becomes — a CHAR, a copy into a
-// character array, one side of a comparison — depends on the context.
+// An array or a record keeps its address because it has no scalar value to
+// load, and a string keeps its bytes because what it becomes — a CHAR, a copy
+// into a character array, one side of a comparison — depends on the context.
 enum Source {
     Value(ir::Value, Type),
-    Array(Place),
+    Structured(Place),
     Str(Rc<Vec<u8>>),
 }
 
@@ -366,7 +441,7 @@ impl Source {
     fn ty(&self) -> Type {
         match self {
             Source::Value(_, ty) => ty.clone(),
-            Source::Array(place) => place.ty.clone(),
+            Source::Structured(place) => place.ty.clone(),
             Source::Str(bytes) => Type::String(bytes.len()),
         }
     }
@@ -533,7 +608,8 @@ impl Analyzer {
     // the pointer-specific forward reference arrives with pointers.
     fn type_declarations(&mut self, declarations: &[ast::TypeDecl]) {
         for declaration in declarations {
-            let Some(ty) = self.resolve_type(&declaration.ty) else {
+            let Some(ty) = self.resolve_type_named(&declaration.ty, Some(&declaration.id.name))
+            else {
                 continue;
             };
             if self.declare(
@@ -596,17 +672,6 @@ impl Analyzer {
                 params_ok = false;
                 continue;
             };
-            // Slice 12 gives structured parameters their calling convention
-            // together with records. Until then a formal that resolves to an
-            // array stops here rather than reaching the scalar ABI.
-            if ty.array().is_some() {
-                self.diags.push(Diagnostic::new(
-                    section.ty.pos(),
-                    "not yet supported: array parameters",
-                ));
-                params_ok = false;
-                continue;
-            }
             for (name, pos) in &section.names {
                 formals.push((section.var, name.clone(), *pos, ty.clone()));
             }
@@ -617,10 +682,15 @@ impl Analyzer {
                 // Report 10.1: the result type of a procedure can be neither a
                 // record nor an array. This one is permanent, not a slice
                 // boundary.
-                Some(ty) if ty.array().is_some() => {
+                Some(ty) if ty.structured() => {
+                    let kind = if ty.array().is_some() {
+                        "array"
+                    } else {
+                        "record"
+                    };
                     self.diags.push(Diagnostic::new(
                         source.pos(),
-                        format!("a procedure cannot have the array result type {ty}"),
+                        format!("a procedure cannot have the {kind} result type {ty}"),
                     ));
                     (None, false)
                 }
@@ -660,16 +730,27 @@ impl Analyzer {
         self.current = Some(ProcBuilder::new(symbol.clone(), ret.clone()));
 
         for (var, name, pos, ty) in formals {
+            // A structured parameter is a reference whichever kind it is:
+            // Report 10.1 confines "the formal is a local variable holding
+            // the value" to basic types, and 9.1 forbids assigning to a
+            // structured value parameter or its elements. That pairing
+            // licenses passing the address and copying nothing, and all
+            // three reference compilers do exactly that — Project Oberon
+            // reclassifies the parameter as a read-only reference, OBNC
+            // emits a const pointer, oberonc passes the JVM reference. The
+            // consequence is that aliasing is observable, which
+            // ParamAlias.Mod pins.
+            let by_ref = var || ty.structured();
             let temp = self.builder().temp();
             self.builder().proc.params.push(ir::Param {
                 temp,
-                pass: if var {
+                pass: if by_ref {
                     ir::ParamPass::Ref
                 } else {
                     ir::ParamPass::Value(ty.ir())
                 },
             });
-            let addr = if var {
+            let addr = if by_ref {
                 ir::Addr::Temp(temp)
             } else {
                 ir::Addr::Slot(name.clone())
@@ -680,9 +761,11 @@ impl Analyzer {
                 Symbol::Var {
                     ty: ty.clone(),
                     addr: addr.clone(),
-                    read_only: false,
+                    // Read-only in its entirety, all the way down: the place
+                    // walk carries the flag through every field and element.
+                    read_only: !var && ty.structured(),
                 },
-            ) && !var
+            ) && !by_ref
             {
                 self.reserve_slot(&name, &ty, pos);
                 self.emit(ir::Inst::Store {
@@ -884,9 +967,11 @@ impl Analyzer {
             (Some(AssignKind::StringCopy), Source::Str(bytes)) => {
                 self.copy_string(&bytes, target, rhs.pos());
             }
-            (Some(AssignKind::ArrayCopy), Source::Array(source)) => {
-                // A zero-length array still resolved both designators and ran
-                // both sides' checks; only the byte count is zero.
+            (Some(AssignKind::WholeCopy), Source::Structured(source)) => {
+                // A zero-length array or an empty record still resolved both
+                // designators and ran both sides' checks; only the byte count
+                // is zero. A record's count includes its padding, which no
+                // program can observe either way.
                 self.emit(ir::Inst::CopyBytes {
                     dst: target.addr,
                     src: source.addr,
@@ -987,7 +1072,7 @@ impl Analyzer {
                 };
                 Source::Value(value, read_ty)
             }
-            None => Source::Array(place),
+            None => Source::Structured(place),
         })
     }
 
@@ -996,11 +1081,13 @@ impl Analyzer {
     fn source_scalar(&mut self, expr: &ast::Expr, source: Source) -> Option<(ir::Value, Type)> {
         match source {
             Source::Value(value, ty) => Some((value, ty)),
-            // Report 8: an expression operates on values, and an array
-            // designator has none.
-            Source::Array(place) => {
+            // Report 8: an expression operates on values, and an array or
+            // record designator has none. That is the whole rejection of
+            // records in relations, in arithmetic, in conditions, in a CASE
+            // selector, and in every other value context.
+            Source::Structured(place) => {
                 let ast::Expr::Name(designator) = expr else {
-                    unreachable!("only a designator resolves to an array");
+                    unreachable!("only a designator resolves to structured storage");
                 };
                 self.diags.push(Diagnostic::new(
                     designator.pos,
@@ -1895,10 +1982,10 @@ impl Analyzer {
 
         let stringy = |source: &Source| match source {
             Source::Str(_) => true,
-            Source::Array(place) => place.ty.char_array().is_some(),
+            Source::Structured(place) => place.ty.char_array().is_some(),
             Source::Value(..) => false,
         };
-        let is_array = |source: &Source| matches!(source, Source::Array(_));
+        let is_array = |source: &Source| matches!(source, Source::Structured(_));
         if stringy(&lhs_src) && stringy(&rhs_src) && (is_array(&lhs_src) || is_array(&rhs_src)) {
             let (lhs_addr, lhs_len) = self.cmp_operand(lhs_src);
             let (rhs_addr, rhs_len) = self.cmp_operand(rhs_src);
@@ -1954,7 +2041,7 @@ impl Analyzer {
     // terminator its data object carries.
     fn cmp_operand(&mut self, source: Source) -> (ir::Addr, i32) {
         match source {
-            Source::Array(place) => {
+            Source::Structured(place) => {
                 let len = place
                     .ty
                     .char_array()
@@ -2056,15 +2143,45 @@ impl Analyzer {
                 let _ = self.lower_expr(actual);
                 continue;
             };
-            if var {
-                match self.var_actual(actual, i + 1) {
+            // A structured formal — value or VAR — takes the address of its
+            // actual, so the actual must be a designator of the identical
+            // type. For VAR that is Report 10.1's rule; for a structured
+            // value it is what remains of assignment compatibility once the
+            // actual must be addressable. The one casualty is a string actual
+            // for a fixed character-array formal, which Project Oberon and
+            // oberonc also reject: under reference semantics no assignment to
+            // the formal happens, so Report 9.1's string exception has
+            // nothing to attach to. Strings meet parameters through Slice
+            // 14's open arrays of CHAR. The rejection covers a string of any
+            // length, a single character included, and is checked before the
+            // expression is lowered so it reports as a string where a
+            // variable is required rather than as a CHAR mismatch.
+            if var || expected.structured() {
+                if expected.structured() && self.is_string_expr(actual) {
+                    self.diags.push(Diagnostic::new(
+                        actual.pos(),
+                        format!(
+                            "argument {} is a string where a variable is required",
+                            i + 1
+                        ),
+                    ));
+                    ok = false;
+                    continue;
+                }
+                // A structured value actual is a read, so a read-only
+                // designator — an imported variable, another structured value
+                // parameter — may be passed on. A VAR actual will be written
+                // and may not be.
+                match self.ref_actual(actual, i + 1, var) {
                     Some((addr, found)) => {
                         if found == expected {
                             args.push(ir::Arg::Ref(addr));
                         } else {
-                            self.diags.push(Diagnostic::new(
+                            self.diags.push(argument_type_error(
                                 actual.pos(),
-                                format!("argument {} has type {found}, expected {expected}", i + 1),
+                                i + 1,
+                                &expected,
+                                &found,
                             ));
                             ok = false;
                         }
@@ -2655,6 +2772,19 @@ impl Analyzer {
     // is what resolving the designator to an address here already does, so a
     // selected element reaches a VAR parameter with no extra machinery.
     fn var_actual(&mut self, actual: &ast::Expr, number: usize) -> Option<(ir::Addr, Type)> {
+        self.ref_actual(actual, number, true)
+    }
+
+    // The address an actual supplies to a reference formal. `writable` is
+    // false only for a structured value actual, which is a read and therefore
+    // the one reference an imported variable or another structured value
+    // parameter can be.
+    fn ref_actual(
+        &mut self,
+        actual: &ast::Expr,
+        number: usize,
+        writable: bool,
+    ) -> Option<(ir::Addr, Type)> {
         let ast::Expr::Name(designator) = actual else {
             let _ = self.lower_expr(actual);
             self.diags.push(Diagnostic::new(
@@ -2664,7 +2794,7 @@ impl Analyzer {
             return None;
         };
         let place = self.place(designator, format!("argument {number} must be a variable"))?;
-        if place.read_only {
+        if writable && place.read_only {
             self.diags.push(Diagnostic::new(
                 actual.pos(),
                 format!("argument {number} is read-only"),
@@ -2672,6 +2802,20 @@ impl Analyzer {
             return None;
         }
         Some((place.addr, place.ty))
+    }
+
+    // A string in actual-parameter position: a literal or a constant declared
+    // from one. Recognized before lowering, the way every context that treats
+    // a string specially examines the expression first.
+    fn is_string_expr(&self, expr: &ast::Expr) -> bool {
+        match expr {
+            ast::Expr::Str { .. } => true,
+            ast::Expr::Name(designator) => matches!(
+                self.qualident(designator),
+                Ok((Symbol::Const(ConstValue::Str(_)), []))
+            ),
+            _ => false,
+        }
     }
 
     // The storage a designator denotes, with every selector applied in source
@@ -2703,9 +2847,10 @@ impl Analyzer {
         };
         for selector in rest {
             match selector {
-                ast::Selector::Field(..) => {
-                    self.diags.push(selector_error(designator, selector));
-                    return None;
+                // Report 8.1: if r designates a record, r.f denotes the field
+                // f of r.
+                ast::Selector::Field(name, pos) => {
+                    place = self.field(place, name, *pos)?;
                 }
                 // Report 8.1: a[i, j] abbreviates a[i][j], so each expression
                 // of one bracket list is its own index selector.
@@ -2717,6 +2862,39 @@ impl Analyzer {
             }
         }
         Some(place)
+    }
+
+    // One field. The offset is a constant the layout already fixed, so this is
+    // an address computation with nothing to check, and the base's read-only
+    // flag carries through: a field of an imported variable or of a structured
+    // value parameter is as unwritable as the whole.
+    fn field(&mut self, base: Place, name: &str, pos: Pos) -> Option<Place> {
+        let Some(record) = base.ty.record().cloned() else {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "cannot select '{name}' from {}: only a record has fields",
+                    base.ty
+                ),
+            ));
+            return None;
+        };
+        let Some(field) = find_field(&record, name, &self.module) else {
+            self.diags.push(no_such_field(pos, name, &base.ty));
+            return None;
+        };
+        let (ty, offset) = (field.ty.clone(), field.offset);
+        let dst = self.temp();
+        self.emit(ir::Inst::Field {
+            dst,
+            base: base.addr,
+            offset,
+        });
+        Some(Place {
+            addr: ir::Addr::Temp(dst),
+            ty,
+            read_only: base.read_only,
+        })
     }
 
     // One dimension. The index is evaluated before anything is done with it,
@@ -2885,16 +3063,21 @@ impl Analyzer {
                         &mut self.diags,
                     ),
                     BinOp::Eq | BinOp::Ne => {
-                        if lhs == rhs || text_relation_ok(&lhs, &rhs) {
+                        if (lhs == rhs && lhs.scalar().is_some()) || text_relation_ok(&lhs, &rhs) {
                             Some(Type::Boolean)
                         } else {
-                            self.diags.push(Diagnostic::new(
-                                *pos,
+                            let message = if lhs == rhs {
+                                format!(
+                                    "operator '{}' is not defined for {lhs} operands",
+                                    bin_op_name(*op)
+                                )
+                            } else {
                                 format!(
                                     "operator '{}' requires operands of the same type, found {lhs} and {rhs}",
                                     bin_op_name(*op)
-                                ),
-                            ));
+                                )
+                            };
+                            self.diags.push(Diagnostic::new(*pos, message));
                             None
                         }
                     }
@@ -2953,7 +3136,10 @@ impl Analyzer {
         for (i, actual) in actuals.iter().enumerate() {
             let found = self.check_const_expr(actual);
             if let (Some(found), Some((var, expected))) = (found, params.get(i))
-                && if *var {
+                // The same identical-type rule as the executable path for
+                // reference formals, structured value formals included, so
+                // the constant precheck cannot accept what lowering rejects.
+                && if *var || expected.structured() {
                     found != *expected
                 } else {
                     assign_kind(expected, &found).is_none()
@@ -3344,10 +3530,13 @@ impl Analyzer {
         };
         for selector in rest {
             match selector {
-                ast::Selector::Field(..) => {
-                    self.diags.push(selector_error(designator, selector));
-                    return None;
-                }
+                ast::Selector::Field(name, pos) => match self.const_field(&ty, name, *pos) {
+                    Ok(field) => ty = field,
+                    Err(diag) => {
+                        self.diags.push(diag);
+                        return None;
+                    }
+                },
                 ast::Selector::Index(exprs, pos) => {
                     for expr in exprs {
                         let Some(array) = ty.array().cloned() else {
@@ -3409,7 +3598,7 @@ impl Analyzer {
         };
         for selector in rest {
             match selector {
-                ast::Selector::Field(..) => return Err(selector_error(designator, selector)),
+                ast::Selector::Field(name, pos) => ty = self.const_field(&ty, name, *pos)?,
                 ast::Selector::Index(exprs, pos) => {
                     for expr in exprs {
                         let Some(array) = ty.array().cloned() else {
@@ -3434,6 +3623,22 @@ impl Analyzer {
             }
         }
         Ok(ty)
+    }
+
+    // The field selector in the constant world: the same lookup and the same
+    // visibility rule as Analyzer::field, with no address to compute. Both
+    // constant walks use it, so `LEN` of an array field folds exactly as `LEN`
+    // of an array variable does.
+    fn const_field(&self, ty: &Type, name: &str, pos: Pos) -> Result<Type, Diagnostic> {
+        let Some(record) = ty.record() else {
+            return Err(Diagnostic::new(
+                pos,
+                format!("cannot select '{name}' from {ty}: only a record has fields"),
+            ));
+        };
+        find_field(record, name, &self.module)
+            .map(|field| field.ty.clone())
+            .ok_or_else(|| no_such_field(pos, name, ty))
     }
 
     // The array a folded LEN is about. The variable itself need not be a
@@ -3462,7 +3667,18 @@ impl Analyzer {
     }
 
     fn resolve_type(&mut self, source: &ast::TypeExpr) -> Option<Type> {
+        self.resolve_type_named(source, None)
+    }
+
+    // `name` is the type declaration this constructor is the right side of, if
+    // any. A record descriptor remembers it for diagnostics, and a type
+    // declaration resolves its right side before declaring its name, so the
+    // name cannot be read back out of the scope afterwards and is threaded in
+    // here instead. Only the outermost constructor gets it: in
+    // `TYPE T = ARRAY 4 OF RECORD ... END` the name belongs to the array.
+    fn resolve_type_named(&mut self, source: &ast::TypeExpr, name: Option<&str>) -> Option<Type> {
         match source {
+            ast::TypeExpr::Record { fields, pos } => self.record_type(fields, name, *pos),
             ast::TypeExpr::Named(designator) => match self.resolve(designator) {
                 Ok(Symbol::TypeName(ty)) => Some(ty),
                 Ok(_) => {
@@ -3539,6 +3755,93 @@ impl Analyzer {
             return None;
         };
         Some(Type::Array(Rc::new(ArrayType { len, elem, size })))
+    }
+
+    // One RECORD constructor, and therefore one new type identity. Field types
+    // are resolved here, at the point the constructor is read, so every one of
+    // them is already declared: no legal source can name a type before its
+    // declaration, and `TYPE T = RECORD f: T END` is an undeclared identifier
+    // rather than a cycle. The layout below relies on that.
+    fn record_type(
+        &mut self,
+        lists: &[ast::FieldList],
+        name: Option<&str>,
+        pos: Pos,
+    ) -> Option<Type> {
+        // Report 6.3 leaves layout to the implementation. Fields go in
+        // declaration order, each at the next offset that is a multiple of its
+        // type's alignment; the record's alignment is the largest among its
+        // fields and its size is rounded up to that, so an array of records
+        // strides correctly. That is the layout a C compiler gives the same
+        // struct, which is worth having when the runtime is C. Project
+        // Oberon's rule instead aligns everything wider than a byte to four
+        // and rounds every size up to four, which would make ARRAY 3 OF CHAR
+        // occupy four bytes; this compiler keeps the exact-size array rule.
+        let mut fields: Vec<Field> = Vec::new();
+        let mut offset: i64 = 0;
+        let mut align: i64 = 1;
+        let mut ok = true;
+        for list in lists {
+            // Every field list is resolved even after one of them fails, so a
+            // record reports all of its bad field types at once.
+            let Some(ty) = self.resolve_type(&list.ty) else {
+                ok = false;
+                continue;
+            };
+            for id in &list.names {
+                if fields.iter().any(|field| field.name == id.name) {
+                    self.diags.push(Diagnostic::new(
+                        id.pos,
+                        format!("field '{}' is already declared", id.name),
+                    ));
+                    ok = false;
+                    continue;
+                }
+                // A record declared inside a procedure can never be visible
+                // outside its module, so a mark on one of its fields could
+                // never mean anything. cf. ORP.CheckExport's "remove
+                // asterisk", which this reuses along with its wording.
+                let export = self.check_export(id);
+                let field_align = ty.align();
+                align = align.max(field_align);
+                offset = (offset + field_align - 1) / field_align * field_align;
+                fields.push(Field {
+                    name: id.name.clone(),
+                    ty: ty.clone(),
+                    offset,
+                    export,
+                });
+                offset += ty.size();
+                // Checked as the layout grows, so the sum cannot run away:
+                // every field is itself within the limit, so the total stops
+                // at most one field past it.
+                if offset > ir::MAX_OBJECT_SIZE {
+                    self.diags.push(Diagnostic::new(
+                        pos,
+                        "record type exceeds target object-size limit",
+                    ));
+                    return None;
+                }
+            }
+        }
+        if !ok {
+            return None;
+        }
+        let size = (offset + align - 1) / align * align;
+        if size > ir::MAX_OBJECT_SIZE {
+            self.diags.push(Diagnostic::new(
+                pos,
+                "record type exceeds target object-size limit",
+            ));
+            return None;
+        }
+        Some(Type::Record(Rc::new(RecordType {
+            fields,
+            size,
+            align,
+            name: name.map(str::to_string),
+            module: self.module.clone(),
+        })))
     }
 
     // A designator that names an object directly, with no selectors left over.
@@ -3920,15 +4223,19 @@ enum AssignKind {
     // appended. The length rule is checked at the assignment, the one site
     // that can reach this.
     StringCopy,
-    // Report 9.1: identical array types copy the whole representation.
-    ArrayCopy,
+    // Report 9.1: two identical structured types copy the whole
+    // representation, padding included. For records the Report asks for the
+    // source to be an extension of the destination, which reduces to identity
+    // until extension exists.
+    WholeCopy,
 }
 
 fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
     if target == found {
-        return Some(match target {
-            Type::Array(_) => AssignKind::ArrayCopy,
-            _ => AssignKind::Store,
+        return Some(if target.structured() {
+            AssignKind::WholeCopy
+        } else {
+            AssignKind::Store
         });
     }
     match (target, found) {
@@ -4028,16 +4335,22 @@ fn text_bytes(value: &ConstValue) -> Option<Vec<u8>> {
     }
 }
 
-// The pairs Report 8.2.4 lets a constant relation compare: two CHAR values, a
-// CHAR and a single-character string, or two strings.
+// The text pairs Report 8.2.4 lets a relation compare. Character arrays reach
+// this only while a required constant expression is being type-checked; the
+// later constant evaluation still rejects their variables as nonconstant.
 fn text_relation_ok(lhs: &Type, rhs: &Type) -> bool {
-    matches!(
+    if matches!(
         (lhs, rhs),
         (Type::Char, Type::Char)
             | (Type::Char, Type::String(1))
             | (Type::String(1), Type::Char)
             | (Type::String(_), Type::String(_))
-    )
+    ) {
+        return true;
+    }
+    let lhs_text = lhs.char_array().is_some() || matches!(lhs, Type::String(_));
+    let rhs_text = rhs.char_array().is_some() || matches!(rhs, Type::String(_));
+    lhs_text && rhs_text && (lhs.char_array().is_some() || rhs.char_array().is_some())
 }
 
 // Report 8.2 overloads "+", "-", "*", and "/". The first three take two
@@ -4194,13 +4507,15 @@ fn type_list(types: &[Type]) -> String {
 
 // A selector on something that cannot carry one. Reaching this means the
 // context wanted a name — a type, a procedure, a constant — so the message
-// says the selector is out of place rather than guessing at the intent.
+// says the selector is out of place rather than guessing at the intent. A
+// selector on a variable never comes here: that is a field or an index, and
+// the designator walks handle both.
 fn selector_error(designator: &ast::Designator, selector: &ast::Selector) -> Diagnostic {
     match selector {
         ast::Selector::Field(name, pos) => Diagnostic::new(
             *pos,
             format!(
-                "cannot select '{name}' from '{}': record field selection is not yet supported",
+                "'{name}' cannot be selected from '{}' here",
                 designator.ident
             ),
         ),
@@ -4211,17 +4526,54 @@ fn selector_error(designator: &ast::Designator, selector: &ast::Selector) -> Dia
     }
 }
 
-// Report 9.1 requires the same type on both sides. Two array types can print
-// the same shape and still be different types, so when the shapes agree the
+// An absent field and a private one get the same message, so a client cannot
+// learn a private field's name from a diagnostic.
+fn no_such_field(pos: Pos, name: &str, ty: &Type) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!("cannot select '{name}': {ty} has no such field"),
+    )
+}
+
+// Report 9.1 requires the same type on both sides. Two structured types can
+// print the same and still be different types, so when the spellings agree the
 // message has to say what the difference is.
 fn assign_error(pos: Pos, target: &Type, found: &Type) -> Diagnostic {
-    let mut msg = format!("cannot assign {found} to {target}");
-    if found.to_string() == target.to_string() {
-        msg.push_str(
-            ": these are different array types, and each ARRAY in the source declares its own",
-        );
+    Diagnostic::new(
+        pos,
+        format!(
+            "cannot assign {found} to {target}{}",
+            distinct_types_hint(target, found)
+        ),
+    )
+}
+
+fn argument_type_error(pos: Pos, number: usize, expected: &Type, found: &Type) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!(
+            "argument {number} has type {found}, expected {expected}{}",
+            distinct_types_hint(expected, found)
+        ),
+    )
+}
+
+// Two arrays with the same shape, two records with the same declared name, or
+// two inline records all print alike, so a diagnostic comparing two of them
+// has to name the rule that keeps them apart.
+fn distinct_types_hint(target: &Type, found: &Type) -> &'static str {
+    if target.to_string() != found.to_string() {
+        return "";
     }
-    Diagnostic::new(pos, msg)
+    match target {
+        Type::Record(_) => {
+            ": these are different record types, and each RECORD in the source declares its own"
+        }
+        Type::Array(_) => {
+            ": these are different array types, and each ARRAY in the source declares its own"
+        }
+        _ => "",
+    }
 }
 
 fn index_range_error(pos: Pos, index: i32, len: i32) -> Diagnostic {

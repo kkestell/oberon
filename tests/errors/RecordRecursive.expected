@@ -1,0 +1,2 @@
+tests/errors/RecordRecursive.Mod:2:22: undeclared identifier 'T'
+Error: 1 error(s)

@@ -51,7 +51,7 @@ pub struct VarDecl {
 }
 
 // type = qualident | StrucType. The parser produces Named for a qualident and
-// Array for the one StrucType this compiler has; RECORD, POINTER, and
+// Array or Record for the two StrucTypes this compiler has; POINTER and
 // PROCEDURE types are rejected in the parser and arrive with their slices.
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
@@ -63,13 +63,28 @@ pub enum TypeExpr {
         elem: Box<TypeExpr>,
         pos: Pos,
     },
+    // RecordType = RECORD ["(" BaseType ")"] [FieldListSequence] END. The
+    // extension form is rejected in the parser, so only the field lists arrive
+    // here, and an empty sequence is legal.
+    Record {
+        fields: Vec<FieldList>,
+        pos: Pos,
+    },
+}
+
+// FieldList = IdentList ":" type. The names are identdefs, so a field may
+// carry an export mark and sema decides whether its scope permits one.
+#[derive(Debug, Clone)]
+pub struct FieldList {
+    pub names: Vec<IdentDef>,
+    pub ty: TypeExpr,
 }
 
 impl TypeExpr {
     pub fn pos(&self) -> Pos {
         match self {
             TypeExpr::Named(d) => d.pos,
-            TypeExpr::Array { pos, .. } => *pos,
+            TypeExpr::Array { pos, .. } | TypeExpr::Record { pos, .. } => *pos,
         }
     }
 }
