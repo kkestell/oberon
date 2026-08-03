@@ -97,6 +97,10 @@ Assigning a string to a character array â€” a one-dimensional array of `CHAR` â€
 
 Arrays and records live in storage and are represented by addresses whenever they cross a procedure boundary. A structured `VAR` parameter is a writable reference. A structured value parameter is a read-only reference, including every field and element selected from it, and no callee-side copy is made. The actual for either form must be a variable of the identical type; a read-only variable may be passed to a structured value parameter but not to a `VAR` parameter.
 
+A structured value parameter is an address rather than a local copy because Report 10.1 confines the rule that a value parameter is a local variable holding the actual's value to basic types, and Report 9.1 then forbids assigning to a structured value parameter or to any of its elements. That pairing licenses passing the address and copying nothing, and all three reference compilers read it the same way. The consequence is that aliasing is observable: when one variable is passed both to a value parameter and to a `VAR` parameter of the same call, an assignment through the `VAR` parameter is visible through the value parameter immediately.
+
+A string is not a variable, so it cannot be the actual for a fixed character-array formal, whatever its length. Report 9.1's string exception attaches to an assignment, and no assignment to a structured formal ever happens.
+
 Whole-array and whole-record assignment copy the complete representation through `oberon_copy`, a `memmove` wrapper. Assignment resolves the destination before the source and accepts self-assignment. Records include their padding in the copy.
 
 ### Array types have identity

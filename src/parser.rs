@@ -367,9 +367,9 @@ impl Parser {
                     names.push(self.expect_ident("parameter name")?);
                 }
                 self.expect(Tok::Colon, "':'")?;
-                // FormalType = {ARRAY OF} qualident. The open-array prefix is
-                // the one form of it that is still unsupported; a fixed array
-                // formal is written as a qualident and sema rejects it.
+                // FormalType = {ARRAY OF} qualident, so a structured formal is
+                // written as a named type and needs no syntax of its own. The
+                // open-array prefix is the one form still unsupported.
                 if *self.peek() == Tok::Array {
                     return self.unsupported("ARRAY OF formal types");
                 }
