@@ -241,7 +241,8 @@ impl Analyzer {
     // the pointer-specific forward reference arrives with pointers.
     fn type_declarations(&mut self, declarations: &[ast::TypeDecl]) {
         for declaration in declarations {
-            let Some(ty) = self.resolve_type(&declaration.ty) else {
+            let Some(ty) = self.resolve_type_named(&declaration.ty, Some(&declaration.id.name))
+            else {
                 continue;
             };
             if self.declare(
@@ -2452,10 +2453,15 @@ impl Analyzer {
         for selector in rest {
             match selector {
                 ast::Selector::Field(name, pos) => {
-                    return Err(Diagnostic::new(
-                        *pos,
-                        format!("cannot select '{name}' from {ty}: only a record has fields"),
-                    ));
+                    let Some(record) = ty.record() else {
+                        return Err(Diagnostic::new(
+                            *pos,
+                            format!("cannot select '{name}' from {ty}: only a record has fields"),
+                        ));
+                    };
+                    ty = find_field(record, name, &self.module)
+                        .map(|field| field.ty.clone())
+                        .ok_or_else(|| no_such_field(*pos, name, &ty))?;
                 }
                 ast::Selector::Index(exprs, pos) => {
                     for _ in exprs {
@@ -2520,15 +2526,38 @@ impl Analyzer {
         Some(place)
     }
 
+    // One field. The offset is a constant the layout already fixed, so this is
+    // an address computation with nothing to check, and the base's read-only
+    // flag carries through: a field of an imported variable or of a structured
+    // value parameter is as unwritable as the whole.
     fn field(&mut self, base: Place, name: &str, pos: Pos) -> Option<Place> {
-        self.diags.push(Diagnostic::new(
-            pos,
-            format!(
-                "cannot select '{name}' from {}: only a record has fields",
-                base.ty
-            ),
-        ));
-        None
+        let Some(record) = base.ty.record().cloned() else {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "cannot select '{name}' from {}: only a record has fields",
+                    base.ty
+                ),
+            ));
+            return None;
+        };
+        let Some(field) = find_field(&record, name, &self.module) else {
+            self.diags.push(no_such_field(pos, name, &base.ty));
+            return None;
+        };
+        let (ty, offset) = (field.ty.clone(), field.offset);
+        let dst = self.temp();
+        self.emit(ir::Inst::Field {
+            dst,
+            base: base.addr,
+            offset,
+        });
+        Some(Place {
+            addr: ir::Addr::Temp(dst),
+            shape: fixed_shape(&ty),
+            ty,
+            read_only: base.read_only,
+        })
     }
 
     // One dimension. The index is evaluated before anything is done with it,
@@ -2607,7 +2636,18 @@ impl Analyzer {
     }
 
     fn resolve_type(&mut self, source: &ast::TypeExpr) -> Option<Type> {
+        self.resolve_type_named(source, None)
+    }
+
+    // `name` is the type declaration this constructor is the right side of, if
+    // any. A record descriptor remembers it for diagnostics, and a type
+    // declaration resolves its right side before declaring its name, so the
+    // name cannot be read back out of the scope afterwards and is threaded in
+    // here instead. Only the outermost constructor gets it: in
+    // `TYPE T = ARRAY 4 OF RECORD ... END` the name belongs to the array.
+    fn resolve_type_named(&mut self, source: &ast::TypeExpr, name: Option<&str>) -> Option<Type> {
         match source {
+            ast::TypeExpr::Record { fields, pos } => self.record_type(fields, name, *pos),
             ast::TypeExpr::Named(designator) => match self.resolve(designator) {
                 Ok(Symbol::TypeName(ty)) => Some(ty),
                 Ok(_) => {
@@ -2749,6 +2789,94 @@ impl Analyzer {
             return None;
         };
         Some(Type::Array(Rc::new(ArrayType { len, elem, size })))
+    }
+
+    // One RECORD constructor, and therefore one new type identity. Field types
+    // are resolved here, at the point the constructor is read, so every one of
+    // them is already declared: no legal source can name a type before its
+    // declaration, and `TYPE T = RECORD f: T END` is an undeclared identifier
+    // rather than a cycle. The layout below relies on that.
+    fn record_type(
+        &mut self,
+        lists: &[ast::FieldList],
+        name: Option<&str>,
+        pos: Pos,
+    ) -> Option<Type> {
+        // Report 6.3 leaves layout to the implementation. Fields go in
+        // declaration order, each at the next offset that is a multiple of its
+        // type's alignment; the record's alignment is the largest among its
+        // fields and its size is rounded up to that, so an array of records
+        // strides correctly. That is the layout a C compiler gives the same
+        // struct, which is worth having when the runtime is C. Project
+        // Oberon's rule instead aligns everything wider than a byte to four
+        // and rounds every size up to four, which would make ARRAY 3 OF CHAR
+        // occupy four bytes; this compiler keeps the exact-size array rule.
+        let mut fields: Vec<Field> = Vec::new();
+        let mut offset: i64 = 0;
+        let mut align: i64 = 1;
+        let mut ok = true;
+        for list in lists {
+            // Every field list is resolved even after one of them fails, so a
+            // record reports all of its bad field types at once.
+            let Some(ty) = self.resolve_type(&list.ty) else {
+                ok = false;
+                continue;
+            };
+            for id in &list.names {
+                if fields.iter().any(|field| field.name == id.name) {
+                    self.diags.push(Diagnostic::new(
+                        id.pos,
+                        format!("field '{}' is already declared", id.name),
+                    ));
+                    ok = false;
+                    continue;
+                }
+                // A record declared inside a procedure can never be visible
+                // outside its module, so a mark on one of its fields could
+                // never mean anything. cf. ORP.CheckExport's "remove
+                // asterisk", which this reuses along with its wording.
+                let export = self.check_export(id);
+                let field_align = ty.align();
+                align = align.max(field_align);
+                offset = (offset + field_align - 1) / field_align * field_align;
+                fields.push(Field {
+                    name: id.name.clone(),
+                    ty: ty.clone(),
+                    offset,
+                    export,
+                });
+                offset += ty.size();
+                // Checked as the layout grows, so the sum cannot run away:
+                // every field is itself within the limit, so the total stops
+                // at most one field past it.
+                if offset > ir::MAX_OBJECT_SIZE {
+                    self.diags.push(Diagnostic::new(
+                        pos,
+                        "record type exceeds target object-size limit",
+                    ));
+                    return None;
+                }
+            }
+        }
+        if !ok {
+            return None;
+        }
+        let size = (offset + align - 1) / align * align;
+        if size > ir::MAX_OBJECT_SIZE {
+            self.diags.push(Diagnostic::new(
+                pos,
+                "record type exceeds target object-size limit",
+            ));
+            return None;
+        }
+        let record = Rc::new(RecordType {
+            fields,
+            size,
+            align,
+            name: name.map(str::to_string),
+            module: self.module.clone(),
+        });
+        Some(Type::Record(record))
     }
 
     // A designator that names an object directly, with no selectors left over.
@@ -3022,6 +3150,15 @@ fn selector_error(designator: &ast::Designator, selector: &ast::Selector) -> Dia
     }
 }
 
+// An absent field and a private one get the same message, so a client cannot
+// learn a private field's name from a diagnostic.
+fn no_such_field(pos: Pos, name: &str, ty: &Type) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!("cannot select '{name}': {ty} has no such field"),
+    )
+}
+
 // Report 9.1 requires the same type on both sides. Two structured types can
 // print the same and still be different types, so when the spellings agree the
 // message has to say what the difference is.
@@ -3053,6 +3190,9 @@ fn distinct_types_hint(target: &Type, found: &Type) -> &'static str {
         return "";
     }
     match target {
+        Type::Record(_) => {
+            ": these are different record types, and each RECORD in the source declares its own"
+        }
         Type::Array(_) => {
             ": these are different array types, and each ARRAY in the source declares its own"
         }

@@ -1,0 +1,2 @@
+tests/errors/RecordExportBad.Mod:3:25: 'public' cannot be exported: only a declaration in the module's scope can be marked
+Error: 1 error(s)

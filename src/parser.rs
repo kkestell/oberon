@@ -184,6 +184,7 @@ impl Parser {
     fn source_type(&mut self) -> PResult<TypeExpr> {
         match self.peek() {
             Tok::Array => self.array_type(),
+            Tok::Record => self.record_type(),
             _ => Ok(TypeExpr::Named(self.qualident("type name")?)),
         }
     }
@@ -200,6 +201,37 @@ impl Parser {
         self.expect(Tok::Of, "'OF'")?;
         let elem = Box::new(self.source_type()?);
         Ok(TypeExpr::Array { lengths, elem, pos })
+    }
+
+    // RecordType = RECORD ["(" BaseType ")"] [FieldListSequence] END
+    // FieldListSequence = FieldList {";" FieldList}
+    fn record_type(&mut self) -> PResult<TypeExpr> {
+        let pos = self.pos();
+        self.expect(Tok::Record, "'RECORD'")?;
+        // The field list sequence is optional, so RECORD END is a legal empty
+        // record. A semicolon separates two field lists and none precedes END.
+        let mut fields = Vec::new();
+        if matches!(self.peek(), Tok::Ident(_)) {
+            fields.push(self.field_list()?);
+            while *self.peek() == Tok::Semi {
+                self.advance();
+                fields.push(self.field_list()?);
+            }
+        }
+        self.expect(Tok::End, "'END'")?;
+        Ok(TypeExpr::Record { fields, pos })
+    }
+
+    // FieldList = IdentList ":" type
+    fn field_list(&mut self) -> PResult<FieldList> {
+        let mut names = vec![self.identdef("field name")?];
+        while *self.peek() == Tok::Comma {
+            self.advance();
+            names.push(self.identdef("field name")?);
+        }
+        self.expect(Tok::Colon, "':'")?;
+        let ty = self.source_type()?;
+        Ok(FieldList { names, ty })
     }
 
     // qualident = [ident "."] ident. A type name takes no further selectors,
@@ -805,6 +837,24 @@ mod tests {
                     .collect();
                 format!("ARRAY {} OF {}", lengths.join(", "), shape(elem))
             }
+            TypeExpr::Record { fields, .. } => {
+                let fields: Vec<String> = fields
+                    .iter()
+                    .map(|field| {
+                        let names: Vec<String> = field
+                            .names
+                            .iter()
+                            .map(|id| format!("{}{}", id.name, if id.export { "*" } else { "" }))
+                            .collect();
+                        format!("{}: {}", names.join(", "), shape(&field.ty))
+                    })
+                    .collect();
+                if fields.is_empty() {
+                    "RECORD END".into()
+                } else {
+                    format!("RECORD {} END", fields.join("; "))
+                }
+            }
         }
     }
 
@@ -941,5 +991,57 @@ mod tests {
         let single = &arms[0].labels[1];
         assert!(matches!(&single.low, Expr::Str { bytes, .. } if bytes == &[0u8]));
         assert!(single.high.is_none());
+    }
+
+    #[test]
+    fn record_fields_and_marks() {
+        let m = module(
+            "TYPE Point* = RECORD x*, y*: INTEGER; tag: CHAR END;\n\
+             Empty = RECORD END;",
+        );
+        let shapes: Vec<_> = m
+            .types
+            .iter()
+            .map(|t| (t.id.name.as_str(), t.id.export, shape(&t.ty)))
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                (
+                    "Point",
+                    true,
+                    "RECORD x*, y*: INTEGER; tag: CHAR END".to_string()
+                ),
+                ("Empty", false, "RECORD END".to_string()),
+            ]
+        );
+    }
+
+    // A record field may itself be a record or an array, and an array's
+    // element type may be a record, so the two constructors nest both ways.
+    #[test]
+    fn nested_record_and_array_types() {
+        let m = module(
+            "VAR outer: RECORD inner: RECORD n: INTEGER END; row: ARRAY 3 OF CHAR END;\n\
+             table: ARRAY 16 OF RECORD ch: CHAR; count: INTEGER END;",
+        );
+        let shapes: Vec<_> = m.vars.iter().map(|v| shape(&v.ty)).collect();
+        assert_eq!(
+            shapes,
+            vec![
+                "RECORD inner: RECORD n: INTEGER END; row: ARRAY 3 OF CHAR END".to_string(),
+                "ARRAY 16 OF RECORD ch: CHAR; count: INTEGER END".to_string(),
+            ]
+        );
+    }
+
+    // FieldListSequence separates field lists with semicolons and puts none
+    // before END.
+    #[test]
+    fn semicolon_before_end() {
+        assert_eq!(
+            error("TYPE R = RECORD n: INTEGER; END;"),
+            "expected field name, found End"
+        );
     }
 }

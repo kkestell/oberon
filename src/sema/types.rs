@@ -216,6 +216,9 @@ pub enum Type {
     // declaration's names, an alias, an interface member, and a client's view
     // of an exported type all hold the same handle.
     Array(Rc<ArrayType>),
+    // Report 6.3, under the same identity rule as Array: one RECORD
+    // constructor in the source is one type.
+    Record(Rc<RecordType>),
     // A declared procedure's signature. No source names it, so it has no
     // value and no storage.
     Procedure(Rc<ProcedureType>),
@@ -230,6 +233,36 @@ pub struct ArrayType {
     pub(super) size: i64,
 }
 
+pub struct RecordType {
+    // In declaration order, each with the offset the layout rule gave it.
+    pub(super) fields: Vec<Field>,
+    // Both computed once, when the constructor was resolved, and checked
+    // against ir::MAX_OBJECT_SIZE there. Nothing recomputes layout later.
+    pub(super) size: i64,
+    pub(super) align: i64,
+    // The name of the type declaration whose right side this constructor was.
+    // A record's field list is too large to print in a diagnostic, so the
+    // declared name is what diagnostics show; an inline constructor has none
+    // and prints as RECORD.
+    pub(super) name: Option<String>,
+    // The module that declared the constructor. Report 6.3 makes an unmarked
+    // field private to it, and the descriptor carries that home wherever it
+    // travels, so an imported type, a re-exported alias, and an exported
+    // variable of a private type all answer the same way.
+    pub(super) module: String,
+}
+
+impl fmt::Debug for RecordType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordType")
+            .field("name", &self.name)
+            .field("size", &self.size)
+            .field("align", &self.align)
+            .field("field_count", &self.fields.len())
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub struct ProcedureType {
     pub(super) params: Vec<ProcedureParam>,
@@ -242,9 +275,17 @@ pub(super) struct ProcedureParam {
     pub(super) ty: Type,
 }
 
+#[derive(Debug)]
+pub(super) struct Field {
+    pub(super) name: String,
+    pub(super) ty: Type,
+    pub(super) offset: i64,
+    pub(super) export: bool,
+}
+
 impl Type {
     // The IR type of a value of this type, when a value of it exists. An
-    // array has none: it is storage, and asking for one is how a
+    // array or a record has none: it is storage, and asking for one is how a
     // load, a store, an argument, or a result finds out it may not have this
     // type at all. A string has none either, so no string can reach a load, a
     // store, an argument, or a result by accident.
@@ -255,7 +296,7 @@ impl Type {
             Type::Boolean => Some(ir::Ty::Bool),
             Type::Set => Some(ir::Ty::Set),
             Type::Char | Type::Byte => Some(ir::Ty::Byte),
-            Type::String(_) | Type::Array(_) | Type::Procedure(_) => None,
+            Type::String(_) | Type::Array(_) | Type::Record(_) | Type::Procedure(_) => None,
         }
     }
 
@@ -282,6 +323,13 @@ impl Type {
         self.array_elem().is_some()
     }
 
+    pub(super) fn record(&self) -> Option<&Rc<RecordType>> {
+        match self {
+            Type::Record(record) => Some(record),
+            _ => None,
+        }
+    }
+
     pub(super) fn procedure(&self) -> Option<&Rc<ProcedureType>> {
         match self {
             Type::Procedure(procedure) => Some(procedure),
@@ -293,7 +341,7 @@ impl Type {
     // are the types that live in storage and travel by address: a parameter of
     // one is a reference, and an assignment between two of them is a copy.
     pub(super) fn structured(&self) -> bool {
-        matches!(self, Type::Array(_))
+        matches!(self, Type::Array(_) | Type::Record(_))
     }
 
     // A one-dimensional array whose element type is CHAR. Report 9.1's string
@@ -305,15 +353,19 @@ impl Type {
     pub(super) fn size(&self) -> i64 {
         match self {
             Type::Array(array) => array.size,
+            Type::Record(record) => record.size,
             scalar => ir::scalar_size(scalar.ir()),
         }
     }
 
     // An array is contiguous and takes its element's alignment, so the rule
-    // works for the one-byte CHAR and BYTE types without a special case.
+    // works for the one-byte CHAR and BYTE types without a special case. A
+    // record's alignment is the largest among its fields, computed when the
+    // constructor was resolved.
     pub(super) fn align(&self) -> i64 {
         match self {
             Type::Array(array) => array.elem.align(),
+            Type::Record(record) => record.align,
             scalar => ir::scalar_size(scalar.ir()),
         }
     }
@@ -324,9 +376,31 @@ impl Type {
                 len: array.len,
                 elem: Box::new(array.elem.storage()),
             },
+            Type::Record(record) => ir::Storage::Record {
+                size: record.size,
+                align: record.align,
+            },
             scalar => ir::Storage::Scalar(scalar.ir()),
         }
     }
+}
+
+// Report 6.3: the scope of a field identifier is the record itself, and a
+// field that is to be visible outside the declaring module must be marked.
+// Inside the declaring module every field is visible, marked or not; outside
+// it, only marked fields exist, so an unmarked one is indistinguishable from
+// a field that was never declared. All three reference compilers behave this
+// way — Project Oberon and OBNC both omit private fields from what a client
+// can see — and it keeps private names out of other modules' diagnostics.
+pub(super) fn find_field<'a>(
+    record: &'a RecordType,
+    name: &str,
+    module: &str,
+) -> Option<&'a Field> {
+    record
+        .fields
+        .iter()
+        .find(|field| field.name == name && (field.export || record.module == module))
 }
 
 // Report 6.2 and 9.1 ask whether two types are *the same type*, not whether
@@ -347,6 +421,7 @@ impl PartialEq for Type {
             | (Type::Byte, Type::Byte) => true,
             (Type::String(a), Type::String(b)) => a == b,
             (Type::Array(a), Type::Array(b)) => Rc::ptr_eq(a, b),
+            (Type::Record(a), Type::Record(b)) => Rc::ptr_eq(a, b),
             (Type::Procedure(a), Type::Procedure(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
@@ -367,6 +442,13 @@ impl fmt::Display for Type {
             Type::String(1) => write!(f, "string of 1 character"),
             Type::String(n) => write!(f, "string of {n} characters"),
             Type::Array(array) => write!(f, "ARRAY {} OF {}", array.len, array.elem),
+            // A record's field list would swamp the message it appears in, so
+            // the declared name stands for it. A constructor written inline in
+            // a variable declaration or a field list never had one.
+            Type::Record(record) => match &record.name {
+                Some(name) => write!(f, "{name}"),
+                None => write!(f, "RECORD"),
+            },
             Type::Procedure(procedure) => {
                 write!(f, "PROCEDURE")?;
                 if !procedure.params.is_empty() || procedure.ret.is_some() {

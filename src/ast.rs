@@ -62,13 +62,26 @@ pub enum TypeExpr {
         elem: Box<TypeExpr>,
         pos: Pos,
     },
+    // RecordType = RECORD ["(" BaseType ")"] [FieldListSequence] END.
+    Record {
+        fields: Vec<FieldList>,
+        pos: Pos,
+    },
+}
+
+// FieldList = IdentList ":" type. The names are identdefs, so a field may
+// carry an export mark and sema decides whether its scope permits one.
+#[derive(Debug, Clone)]
+pub struct FieldList {
+    pub names: Vec<IdentDef>,
+    pub ty: TypeExpr,
 }
 
 impl TypeExpr {
     pub fn pos(&self) -> Pos {
         match self {
             TypeExpr::Named(d) => d.pos,
-            TypeExpr::Array { pos, .. } => *pos,
+            TypeExpr::Array { pos, .. } | TypeExpr::Record { pos, .. } => *pos,
         }
     }
 }

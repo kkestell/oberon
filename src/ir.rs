@@ -84,6 +84,10 @@ pub const MAX_OBJECT_SIZE: i64 = 1 << 30;
 pub enum Storage {
     Scalar(Ty),
     Array { len: i32, elem: Box<Storage> },
+    // Where a record's fields sit is already baked into the field instructions
+    // the front end emitted, so reserving storage only needs the two numbers
+    // sema computed when it laid the record out.
+    Record { size: i64, align: i64 },
 }
 
 impl Storage {
@@ -93,6 +97,7 @@ impl Storage {
             Storage::Array { len, elem } => i64::from(*len)
                 .checked_mul(elem.size())
                 .expect("sema checked this layout"),
+            Storage::Record { size, .. } => *size,
         }
     }
 
@@ -102,6 +107,7 @@ impl Storage {
         match self {
             Storage::Scalar(ty) => scalar_size(*ty),
             Storage::Array { elem, .. } => elem.align(),
+            Storage::Record { align, .. } => *align,
         }
     }
 }
@@ -219,6 +225,14 @@ pub enum Inst {
         len: Value,
         stride: i64,
         site: Site,
+    },
+    // The address of one field: `dst = base + offset`. The offset is the one
+    // the record's layout assigned, so nothing downstream recomputes it, and
+    // no check applies: a field selection cannot be out of range.
+    Field {
+        dst: usize,
+        base: Addr,
+        offset: i64,
     },
     // A whole-value copy of `size` bytes. The count is the source type's exact
     // size, zero included, and the copy tolerates the source and destination

@@ -226,6 +226,17 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             )
             .unwrap();
         }
+        // One add, offset zero included: there is no optimization pass, and
+        // one literal path is the same choice the constant index made.
+        ir::Inst::Field { dst, base, offset } => {
+            writeln!(
+                out,
+                "\t{} =l add {}, {offset}",
+                temp(*dst),
+                address(base, names, slots)
+            )
+            .unwrap();
+        }
         ir::Inst::CopyBytes { dst, src, size } => {
             writeln!(
                 out,

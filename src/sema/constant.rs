@@ -930,13 +930,20 @@ impl Analyzer {
         Ok(ty)
     }
 
-    // The field selector in the constant world, with the same answer as
-    // Analyzer::field.
+    // The field selector in the constant world: the same lookup and the same
+    // visibility rule as Analyzer::field, with no address to compute. Both
+    // constant walks use it, so `LEN` of an array field folds exactly as `LEN`
+    // of an array variable does.
     fn const_field(&self, ty: &Type, name: &str, pos: Pos) -> Result<Type, Diagnostic> {
-        Err(Diagnostic::new(
-            pos,
-            format!("cannot select '{name}' from {ty}: only a record has fields"),
-        ))
+        let Some(record) = ty.record() else {
+            return Err(Diagnostic::new(
+                pos,
+                format!("cannot select '{name}' from {ty}: only a record has fields"),
+            ));
+        };
+        find_field(record, name, &self.module)
+            .map(|field| field.ty.clone())
+            .ok_or_else(|| no_such_field(pos, name, ty))
     }
 
     // Report 8: a constant expression is one a mere textual scan can evaluate
