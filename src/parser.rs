@@ -65,12 +65,13 @@ impl Parser {
     }
 
     // identdef = ident ["*"]
-    fn identdef(&mut self, what: &str) -> PResult<(String, Pos)> {
-        let id = self.expect_ident(what)?;
-        if *self.peek() == Tok::Star {
-            return self.unsupported("export marks");
+    fn identdef(&mut self, what: &str) -> PResult<IdentDef> {
+        let (name, pos) = self.expect_ident(what)?;
+        let export = *self.peek() == Tok::Star;
+        if export {
+            self.advance();
         }
-        Ok(id)
+        Ok(IdentDef { name, pos, export })
     }
 
     fn module(&mut self) -> PResult<Module> {
@@ -124,20 +125,22 @@ impl Parser {
         self.expect(Tok::Import, "'IMPORT'")?;
         let mut imports = Vec::new();
         loop {
-            let (first, pos) = self.expect_ident("module name")?;
+            let (first, first_pos) = self.expect_ident("module name")?;
             let import = if *self.peek() == Tok::Assign {
                 self.advance();
-                let (name, _) = self.expect_ident("module name")?;
+                let (name, pos) = self.expect_ident("module name")?;
                 Import {
                     name,
-                    alias: Some(first),
                     pos,
+                    qualifier: first,
+                    qualifier_pos: first_pos,
                 }
             } else {
                 Import {
-                    name: first,
-                    alias: None,
-                    pos,
+                    name: first.clone(),
+                    pos: first_pos,
+                    qualifier: first,
+                    qualifier_pos: first_pos,
                 }
             };
             imports.push(import);
@@ -152,11 +155,11 @@ impl Parser {
     }
 
     fn const_decl(&mut self) -> PResult<ConstDecl> {
-        let (name, pos) = self.identdef("constant name")?;
+        let id = self.identdef("constant name")?;
         self.expect(Tok::Eq, "'='")?;
         let expr = self.expression()?;
         self.expect(Tok::Semi, "';'")?;
-        Ok(ConstDecl { name, pos, expr })
+        Ok(ConstDecl { id, expr })
     }
 
     fn var_decl(&mut self) -> PResult<VarDecl> {
@@ -200,7 +203,7 @@ impl Parser {
 
     fn proc_declaration(&mut self) -> PResult<ProcDecl> {
         self.expect(Tok::Procedure, "'PROCEDURE'")?;
-        let (name, pos) = self.identdef("procedure name")?;
+        let id = self.identdef("procedure name")?;
         let params = if *self.peek() == Tok::LParen {
             self.formal_parameters()?
         } else {
@@ -235,17 +238,16 @@ impl Parser {
 
         self.expect(Tok::End, "'END'")?;
         let (end_name, end_pos) = self.expect_ident("procedure name after END")?;
-        if end_name != name {
+        if end_name != id.name {
             return Err(Diagnostic::new(
                 end_pos,
-                format!("procedure is '{name}' but END says '{end_name}'"),
+                format!("procedure is '{}' but END says '{end_name}'", id.name),
             ));
         }
         self.expect(Tok::Semi, "';'")?;
 
         Ok(ProcDecl {
-            name,
-            pos,
+            id,
             params,
             ret,
             consts,

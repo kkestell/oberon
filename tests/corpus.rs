@@ -9,6 +9,10 @@ use std::process::Command;
 //   tests/errors/X.Mod  must fail to compile; X.expected is the compiler's stderr.
 //   tests/failures/X.Mod must compile and fail at runtime; X.expected is stderr.
 //
+// A module graph lives in its own subdirectory. Only a .Mod file with a
+// sibling .expected file is a test root; the rest of the directory is the
+// dependencies that root imports.
+//
 // Everything runs from the repo root, which pins the driver's relative
 // runtime/oberon.c and build/ paths and keeps the source paths the compiler
 // prints in diagnostics stable across machines.
@@ -20,7 +24,7 @@ fn corpus() {
     for source in modules(root, "tests/corpus") {
         let stem = stem(&source);
         let compile = compile(root, &source);
-        if !compile.status.success() {
+        if !compile.status.success() || !compile.stderr.is_empty() {
             failures.push(format!(
                 "{stem}: compile failed ({}):\n{}",
                 compile.status,
@@ -33,12 +37,13 @@ fn corpus() {
             .output()
             .expect("running compiled module");
         let expected = expected(root, &source);
-        if run.stdout != expected {
+        if !run.status.success() || !run.stderr.is_empty() || run.stdout != expected {
             failures.push(format!(
-                "{stem}: expected stdout {:?}, got {:?} (exit {})",
+                "{stem}: expected stdout {:?}, got {:?} (exit {}, stderr {:?})",
                 String::from_utf8_lossy(&expected),
                 String::from_utf8_lossy(&run.stdout),
-                run.status
+                run.status,
+                String::from_utf8_lossy(&run.stderr)
             ));
         }
     }
@@ -95,17 +100,44 @@ fn corpus() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
+#[test]
+fn root_filename_must_end_in_mod() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = Path::new("tests/errors/RootWrongExtension.txt");
+    let compile = compile(root, source);
+
+    assert!(
+        !compile.status.success(),
+        "{} unexpectedly compiled successfully",
+        source.display()
+    );
+    assert_eq!(compile.stderr, expected(root, source));
+}
+
 fn modules(root: &Path, dir: &str) -> Vec<PathBuf> {
     // Relative to the root, so the compiler prints "tests/errors/X.Mod:2:8: ..."
     // and the .expected files are not tied to one checkout location.
-    let mut sources: Vec<_> = fs::read_dir(root.join(dir))
-        .unwrap_or_else(|e| panic!("reading {dir}: {e}"))
-        .map(|e| Path::new(dir).join(e.expect("reading dir entry").file_name()))
-        .filter(|p| p.extension().is_some_and(|e| e == "Mod"))
-        .collect();
+    let mut sources = Vec::new();
+    collect(root, Path::new(dir), &mut sources);
     sources.sort();
-    assert!(!sources.is_empty(), "no .Mod files in {dir}");
+    assert!(!sources.is_empty(), "no test roots in {dir}");
     sources
+}
+
+fn collect(root: &Path, dir: &Path, sources: &mut Vec<PathBuf>) {
+    let entries =
+        fs::read_dir(root.join(dir)).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+    for entry in entries {
+        let name = entry.expect("reading dir entry").file_name();
+        let relative = dir.join(&name);
+        if root.join(&relative).is_dir() {
+            collect(root, &relative, sources);
+        } else if relative.extension().is_some_and(|e| e == "Mod")
+            && root.join(&relative).with_extension("expected").is_file()
+        {
+            sources.push(relative);
+        }
+    }
 }
 
 fn stem(source: &Path) -> String {

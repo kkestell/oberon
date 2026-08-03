@@ -1,0 +1,3 @@
+MODULE A;
+  IMPORT B;
+END A.

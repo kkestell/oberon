@@ -2,27 +2,37 @@ use std::fmt::Write;
 
 use crate::ir;
 
+// Every source module of the build goes into one QBE unit, so a call between
+// two of them needs no linkage annotation: Oberon export marks are a semantic
+// rule that sema has already applied by this point.
 pub fn emit(program: &ir::Program) -> String {
     let mut out = String::new();
-    for global in &program.globals {
-        let size = match global.ty {
-            ir::Ty::Int | ir::Ty::Bool => 4,
-        };
-        writeln!(out, "data ${} = align {size} {{ z {size} }}", global.symbol).unwrap();
-    }
-    if !program.globals.is_empty() {
-        writeln!(out).unwrap();
-    }
+    for module in &program.modules {
+        for global in &module.globals {
+            let size = match global.ty {
+                ir::Ty::Int | ir::Ty::Bool => 4,
+            };
+            writeln!(out, "data ${} = align {size} {{ z {size} }}", global.symbol).unwrap();
+        }
+        if !module.globals.is_empty() {
+            writeln!(out).unwrap();
+        }
 
-    for proc in &program.procs {
-        emit_proc(&mut out, proc);
-        writeln!(out).unwrap();
+        for proc in &module.procs {
+            emit_proc(&mut out, proc);
+            writeln!(out).unwrap();
+        }
     }
 
     writeln!(out, "export function w $main() {{").unwrap();
     writeln!(out, "@start").unwrap();
     writeln!(out, "\tcall $oberon_init()").unwrap();
-    writeln!(out, "\tcall $.{}.init()", program.module).unwrap();
+    // Report 11: a module body runs when the module is loaded. The list is
+    // already dependency-first, so each body runs after the bodies of every
+    // module it imports, and exactly once.
+    for module in &program.modules {
+        writeln!(out, "\tcall $.{}.init()", module.name).unwrap();
+    }
     writeln!(out, "\tret 0").unwrap();
     writeln!(out, "}}").unwrap();
     out

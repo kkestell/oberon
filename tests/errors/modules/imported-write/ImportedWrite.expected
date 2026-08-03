@@ -1,0 +1,5 @@
+tests/errors/modules/imported-write/ImportedWrite.Mod:4:3: cannot assign to 'Support.count': it is read-only
+tests/errors/modules/imported-write/ImportedWrite.Mod:5:17: argument 1 is read-only
+tests/errors/modules/imported-write/ImportedWrite.Mod:6:7: argument 1 is read-only
+tests/errors/modules/imported-write/ImportedWrite.Mod:7:7: argument 1 is read-only
+Error: 4 error(s)

@@ -1,0 +1,2 @@
+tests/errors/RootWrongExtension.txt:1:8: module 'RootWrongExtension' must be stored in a file named 'RootWrongExtension.Mod'
+Error: 1 error(s)

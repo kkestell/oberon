@@ -1,6 +1,13 @@
+// Every source module of one build, in the order their initializers must run:
+// a module's dependencies precede it.
 #[derive(Debug)]
 pub struct Program {
-    pub module: String,
+    pub modules: Vec<Module>,
+}
+
+#[derive(Debug)]
+pub struct Module {
+    pub name: String,
     pub globals: Vec<Global>,
     pub procs: Vec<Proc>,
 }

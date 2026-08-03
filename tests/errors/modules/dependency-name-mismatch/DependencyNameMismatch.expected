@@ -1,0 +1,2 @@
+tests/errors/modules/dependency-name-mismatch/Dep.Mod:1:8: module 'NotDep' must be stored in a file named 'NotDep.Mod'
+Error: 1 error(s)

@@ -7,8 +7,13 @@ use crate::ir;
 
 type Scope = HashMap<String, Symbol>;
 
+// The scope stack is always [universe, module, outermost proc, ..., current
+// proc], so this index names the module scope and its length names "the
+// module scope is innermost".
+const MODULE_SCOPE: usize = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Type {
+pub enum Type {
     Integer,
     Boolean,
 }
@@ -32,7 +37,7 @@ impl fmt::Display for Type {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum ConstValue {
+pub enum ConstValue {
     Int(i32),
     Bool(bool),
 }
@@ -59,9 +64,8 @@ enum Symbol {
     Var {
         ty: Type,
         addr: ir::Addr,
-        // Set while a FOR statement's body is being lowered, so the body
-        // cannot move its own control variable. Slice 7 will set it on
-        // imported variables too.
+        // Set on an imported variable, and while a FOR statement's body is
+        // being lowered so the body cannot move its own control variable.
         read_only: bool,
     },
     Proc {
@@ -72,6 +76,56 @@ enum Symbol {
     Module(HashMap<String, Symbol>),
     TypeName(Type),
     Builtin(Builtin),
+}
+
+// The public face of an analyzed module. Report 4 says a client sees only the
+// marked declarations, so an unmarked one is absent here rather than present
+// and hidden: no lookup path can forget to check a visibility flag that does
+// not exist. The interface owns its data and is cloned into each client.
+//
+// This is a build result held in memory, not a symbol file. Slice 10 adds
+// named types to it when TYPE declarations arrive.
+#[derive(Debug, Clone, Default)]
+pub struct Interface {
+    pub members: HashMap<String, Member>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Member {
+    Const(ConstValue),
+    Var {
+        ty: Type,
+        symbol: String,
+    },
+    Proc {
+        symbol: String,
+        params: Vec<(bool, Type)>,
+        ret: Option<Type>,
+    },
+}
+
+impl Member {
+    // Report 9.1 and 11: an imported variable is read-only in the client. The
+    // declaring module keeps the writable symbol it built for itself.
+    fn client_symbol(&self) -> Symbol {
+        match self {
+            Member::Const(value) => Symbol::Const(*value),
+            Member::Var { ty, symbol } => Symbol::Var {
+                ty: *ty,
+                addr: ir::Addr::Global(symbol.clone()),
+                read_only: true,
+            },
+            Member::Proc {
+                symbol,
+                params,
+                ret,
+            } => Symbol::Proc {
+                symbol: symbol.clone(),
+                params: params.clone(),
+                ret: *ret,
+            },
+        }
+    }
 }
 
 // Report 10.2. Only the operations whose argument types exist are here; LEN,
@@ -109,8 +163,14 @@ fn universe_scope() -> Scope {
     scope
 }
 
-pub fn analyze(module: &ast::Module) -> Result<ir::Program, Vec<Diagnostic>> {
-    Analyzer::new(&module.name).module(module)
+// `resolved` maps the real name of every module this one imports to that
+// module's interface. The driver has already compiled them, so a name missing
+// here is a driver bug and not a source error.
+pub fn analyze(
+    module: &ast::Module,
+    resolved: &HashMap<String, Interface>,
+) -> Result<(ir::Module, Interface), Vec<Diagnostic>> {
+    Analyzer::new(&module.name).module(module, resolved)
 }
 
 struct Analyzer {
@@ -119,6 +179,7 @@ struct Analyzer {
     diags: Vec<Diagnostic>,
     globals: Vec<ir::Global>,
     procs: Vec<ir::Proc>,
+    interface: Interface,
     current: Option<ProcBuilder>,
 }
 
@@ -134,12 +195,17 @@ impl Analyzer {
             diags: Vec::new(),
             globals: Vec::new(),
             procs: Vec::new(),
+            interface: Interface::default(),
             current: None,
         }
     }
 
-    fn module(mut self, module: &ast::Module) -> Result<ir::Program, Vec<Diagnostic>> {
-        self.imports(&module.imports);
+    fn module(
+        mut self,
+        module: &ast::Module,
+        resolved: &HashMap<String, Interface>,
+    ) -> Result<(ir::Module, Interface), Vec<Diagnostic>> {
+        self.imports(&module.imports, resolved);
         self.const_declarations(&module.consts);
         self.global_declarations(&module.vars);
 
@@ -159,27 +225,64 @@ impl Analyzer {
         );
 
         if self.diags.is_empty() {
-            Ok(ir::Program {
-                module: self.module,
-                globals: self.globals,
-                procs: self.procs,
-            })
+            Ok((
+                ir::Module {
+                    name: self.module,
+                    globals: self.globals,
+                    procs: self.procs,
+                },
+                self.interface,
+            ))
         } else {
             Err(self.diags)
         }
     }
 
-    fn imports(&mut self, imports: &[ast::Import]) {
+    // Report 11: an import declares the qualifier in the client's module
+    // scope. Two imports of one module under different qualifiers are legal
+    // and share its objects, because the symbols come from the interface and
+    // never from the qualifier.
+    fn imports(&mut self, imports: &[ast::Import], resolved: &HashMap<String, Interface>) {
         for import in imports {
-            if import.name == "Out" {
-                let visible = import.alias.clone().unwrap_or_else(|| import.name.clone());
-                self.declare(&visible, import.pos, Symbol::Module(out_scope()));
-            } else {
-                self.diags.push(Diagnostic::new(
-                    import.pos,
-                    format!("unknown module '{}'", import.name),
-                ));
-            }
+            let interface = resolved
+                .get(&import.name)
+                .expect("the driver resolved every import");
+            let members = interface
+                .members
+                .iter()
+                .map(|(name, member)| (name.clone(), member.client_symbol()))
+                .collect();
+            self.declare(
+                &import.qualifier,
+                import.qualifier_pos,
+                Symbol::Module(members),
+            );
+        }
+    }
+
+    // Report 4 permits an export mark only on a declaration in a module's
+    // scope. cf. ORP.CheckExport, which consumes the mark at every identdef
+    // and reports it when the declaration level is not zero.
+    fn check_export(&mut self, id: &ast::IdentDef) -> bool {
+        if !id.export {
+            return false;
+        }
+        if self.scopes.len() != MODULE_SCOPE + 1 {
+            self.diags.push(Diagnostic::new(
+                id.pos,
+                format!(
+                    "'{}' cannot be exported: only a declaration in the module's scope can be marked",
+                    id.name
+                ),
+            ));
+            return false;
+        }
+        true
+    }
+
+    fn export(&mut self, id: &ast::IdentDef, member: Member) {
+        if self.check_export(id) {
+            self.interface.members.insert(id.name.clone(), member);
         }
     }
 
@@ -193,7 +296,13 @@ impl Analyzer {
             }
             match self.eval_const(&declaration.expr) {
                 Ok(value) => {
-                    self.declare(&declaration.name, declaration.pos, Symbol::Const(value));
+                    if self.declare(
+                        &declaration.id.name,
+                        declaration.id.pos,
+                        Symbol::Const(value),
+                    ) {
+                        self.export(&declaration.id, Member::Const(value));
+                    }
                 }
                 Err(diag) => self.diags.push(diag),
             }
@@ -205,12 +314,14 @@ impl Analyzer {
             let Some(ty) = self.resolve_type(&declaration.ty) else {
                 continue;
             };
-            for (name, pos) in &declaration.names {
-                let symbol = format!("{}.{}", self.module, name);
+            // One declaration may mix marked and unmarked names, so the mark
+            // is read per name rather than per declaration.
+            for id in &declaration.names {
+                let symbol = format!("{}.{}", self.module, id.name);
                 let addr = ir::Addr::Global(symbol.clone());
                 if self.declare(
-                    name,
-                    *pos,
+                    &id.name,
+                    id.pos,
                     Symbol::Var {
                         ty,
                         addr,
@@ -218,9 +329,10 @@ impl Analyzer {
                     },
                 ) {
                     self.globals.push(ir::Global {
-                        symbol,
+                        symbol: symbol.clone(),
                         ty: ty.ir(),
                     });
+                    self.export(id, Member::Var { ty, symbol });
                 }
             }
         }
@@ -246,17 +358,27 @@ impl Analyzer {
             },
             None => (None, true),
         };
-        let symbol = format!("{prefix}.{}", declaration.name);
+        let symbol = format!("{prefix}.{}", declaration.id.name);
         if params_ok && ret_ok {
-            self.declare(
-                &declaration.name,
-                declaration.pos,
+            let params: Vec<_> = formals.iter().map(|(var, _, _, ty)| (*var, *ty)).collect();
+            if self.declare(
+                &declaration.id.name,
+                declaration.id.pos,
                 Symbol::Proc {
                     symbol: symbol.clone(),
-                    params: formals.iter().map(|(var, _, _, ty)| (*var, *ty)).collect(),
+                    params: params.clone(),
                     ret,
                 },
-            );
+            ) {
+                self.export(
+                    &declaration.id,
+                    Member::Proc {
+                        symbol: symbol.clone(),
+                        params,
+                        ret,
+                    },
+                );
+            }
         }
 
         self.scopes.push(Scope::new());
@@ -316,18 +438,21 @@ impl Analyzer {
             let Some(ty) = self.resolve_type(&declaration.ty) else {
                 continue;
             };
-            for (name, pos) in &declaration.names {
-                let addr = ir::Addr::Slot(name.clone());
+            for id in &declaration.names {
+                let addr = ir::Addr::Slot(id.name.clone());
                 if self.declare(
-                    name,
-                    *pos,
+                    &id.name,
+                    id.pos,
                     Symbol::Var {
                         ty,
                         addr,
                         read_only: false,
                     },
                 ) {
-                    self.builder().proc.slots.push((name.clone(), ty.ir()));
+                    self.builder().proc.slots.push((id.name.clone(), ty.ir()));
+                    // A local can never be exported, but the mark still has
+                    // to be diagnosed rather than ignored.
+                    self.check_export(id);
                 }
             }
         }
@@ -351,10 +476,10 @@ impl Analyzer {
             }
             (Some(_), Some(_), None) => {
                 self.diags.push(Diagnostic::new(
-                    declaration.pos,
+                    declaration.id.pos,
                     format!(
                         "function procedure '{}' must end with RETURN",
-                        declaration.name
+                        declaration.id.name
                     ),
                 ));
                 self.emit(ir::Inst::Ret(None));
@@ -370,7 +495,7 @@ impl Analyzer {
                     expr.pos(),
                     format!(
                         "proper procedure '{}' cannot RETURN a value",
-                        declaration.name
+                        declaration.id.name
                     ),
                 ));
                 self.emit(ir::Inst::Ret(None));
@@ -1805,13 +1930,12 @@ impl Analyzer {
         //
         // "Enclosing" is read off the stack position rather than a level
         // stored on the symbol, which holds only because a procedure body is
-        // the one thing that pushes a scope: the stack is always
-        // [universe, module, outermost proc, ..., current proc], so index 1 is
-        // the module scope. A slice that pushes a scope for anything else must
-        // record the level on the symbol instead, or this test quietly starts
-        // letting those variables in. The universe scope holds no variables,
-        // so index 0 never reaches the check.
-        if scope_index != 1
+        // the one thing that pushes a scope; see MODULE_SCOPE. A slice that
+        // pushes a scope for anything else must record the level on the
+        // symbol instead, or this test quietly starts letting those variables
+        // in. The universe scope holds no variables, so index 0 never reaches
+        // the check.
+        if scope_index != MODULE_SCOPE
             && scope_index + 1 != self.scopes.len()
             && matches!(symbol, Symbol::Var { .. })
         {
@@ -1963,25 +2087,31 @@ impl ProcBuilder {
     }
 }
 
-fn out_scope() -> HashMap<String, Symbol> {
-    HashMap::from([
-        (
-            "Int".into(),
-            Symbol::Proc {
-                symbol: "oberon_out_int".into(),
-                params: vec![(false, Type::Integer), (false, Type::Integer)],
-                ret: None,
-            },
-        ),
-        (
-            "Ln".into(),
-            Symbol::Proc {
-                symbol: "oberon_out_ln".into(),
-                params: Vec::new(),
-                ret: None,
-            },
-        ),
-    ])
+// The temporary native Out: an interface with no Oberon source behind it,
+// whose procedures are the C runtime's. The driver installs it only when no
+// source module of that name is found. Slice 17 replaces it with lib/Out.Mod,
+// which ordinary source lookup will then select.
+pub fn out_interface() -> Interface {
+    Interface {
+        members: HashMap::from([
+            (
+                "Int".into(),
+                Member::Proc {
+                    symbol: "oberon_out_int".into(),
+                    params: vec![(false, Type::Integer), (false, Type::Integer)],
+                    ret: None,
+                },
+            ),
+            (
+                "Ln".into(),
+                Member::Proc {
+                    symbol: "oberon_out_ln".into(),
+                    params: Vec::new(),
+                    ret: None,
+                },
+            ),
+        ]),
+    }
 }
 
 fn eval_const_binary(

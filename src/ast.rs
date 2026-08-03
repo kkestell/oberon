@@ -3,7 +3,6 @@ use crate::diag::Pos;
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,
-    #[allow(dead_code)] // diagnostics will want these positions soon
     pub pos: Pos,
     pub imports: Vec<Import>,
     pub consts: Vec<ConstDecl>,
@@ -12,30 +11,41 @@ pub struct Module {
     pub body: Vec<Stmt>,
 }
 
+// identdef = ident ["*"]. The grammar allows the mark on a local declaration
+// too, so the parser records it and sema decides whether the scope permits it.
+#[derive(Debug, Clone)]
+pub struct IdentDef {
+    pub name: String,
+    pub pos: Pos,
+    pub export: bool,
+}
+
+// `IMPORT X := M` declares the qualifier X and selects the module M. The two
+// names get separate positions: a lookup failure belongs on M, a duplicate
+// qualifier on X. An unaliased import repeats one name in both roles.
 #[derive(Debug, Clone)]
 pub struct Import {
     pub name: String,
-    pub alias: Option<String>,
     pub pos: Pos,
+    pub qualifier: String,
+    pub qualifier_pos: Pos,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConstDecl {
-    pub name: String,
-    pub pos: Pos,
+    pub id: IdentDef,
     pub expr: Expr,
 }
 
 #[derive(Debug, Clone)]
 pub struct VarDecl {
-    pub names: Vec<(String, Pos)>,
+    pub names: Vec<IdentDef>,
     pub ty: Designator, // TODO: enum when StrucType lands
 }
 
 #[derive(Debug, Clone)]
 pub struct ProcDecl {
-    pub name: String,
-    pub pos: Pos,
+    pub id: IdentDef,
     pub params: Vec<FpSection>,
     pub ret: Option<Designator>,
     pub consts: Vec<ConstDecl>,

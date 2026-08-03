@@ -1,0 +1,2 @@
+tests/errors/modules/alias-scope/AliasScope.Mod:5:8: undeclared identifier 'M'
+Error: 1 error(s)

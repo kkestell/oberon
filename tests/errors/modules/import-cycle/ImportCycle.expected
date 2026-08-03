@@ -1,0 +1,2 @@
+tests/errors/modules/import-cycle/B.Mod:2:19: import cycle: A -> B -> A
+Error: 1 error(s)
