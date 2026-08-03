@@ -9,8 +9,16 @@ pub fn emit(program: &ir::Program) -> String {
     let mut out = String::new();
     for module in &program.modules {
         for global in &module.globals {
-            let size = size(global.ty);
-            writeln!(out, "data ${} = align {size} {{ z {size} }}", global.symbol).unwrap();
+            // A zero-length array reserves nothing; QBE accepts `z 0` and the
+            // assembler emits an empty, still-addressable object.
+            writeln!(
+                out,
+                "data ${} = align {} {{ z {} }}",
+                global.symbol,
+                global.ty.align(),
+                global.ty.size()
+            )
+            .unwrap();
         }
         if !module.globals.is_empty() {
             writeln!(out).unwrap();
@@ -55,7 +63,7 @@ fn emit_proc(out: &mut String, proc: &ir::Proc) {
     writeln!(out, ") {{").unwrap();
     writeln!(out, "@start").unwrap();
     for (slot, ty) in &proc.slots {
-        writeln!(out, "\t%{slot} =l alloc4 {}", size(*ty)).unwrap();
+        writeln!(out, "\t%{slot} =l {} {}", alloc(ty.align()), ty.size()).unwrap();
     }
 
     let mut terminated = false;
@@ -136,6 +144,37 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
         ir::Inst::IntToReal { dst, arg } => {
             writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg)).unwrap();
         }
+        // The check is a call, so it is textually and dynamically ahead of
+        // every part of the address calculation: nothing scales or adds an
+        // index the runtime has not accepted. The two intermediate temporaries
+        // are named from the destination number, so they cannot collide with
+        // the value temporaries, which are all `%.t<n>`.
+        ir::Inst::Index {
+            dst,
+            base,
+            index,
+            len,
+            stride,
+        } => {
+            writeln!(
+                out,
+                "\tcall $oberon_check_index(w {}, w {len})",
+                value(index)
+            )
+            .unwrap();
+            writeln!(out, "\t%.x{dst} =l extsw {}", value(index)).unwrap();
+            writeln!(out, "\t%.s{dst} =l mul %.x{dst}, {stride}").unwrap();
+            writeln!(out, "\t{} =l add {}, %.s{dst}", temp(*dst), address(base)).unwrap();
+        }
+        ir::Inst::CopyBytes { dst, src, size } => {
+            writeln!(
+                out,
+                "\tcall $oberon_copy(l {}, l {}, l {size})",
+                address(dst),
+                address(src)
+            )
+            .unwrap();
+        }
         ir::Inst::Call { dst, symbol, args } => {
             write!(out, "\t").unwrap();
             if let Some((dst, ty)) = dst {
@@ -178,9 +217,16 @@ fn class(ty: ir::Ty) -> &'static str {
     }
 }
 
-fn size(ty: ir::Ty) -> u32 {
-    match ty {
-        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set | ir::Ty::Real => 4,
+// QBE names the alignment in the instruction rather than taking it as an
+// operand. Every type this compiler has is four-byte aligned; the other two
+// forms are here so the day a record or a CHAR array changes that, the slot is
+// wrong loudly rather than quietly.
+fn alloc(align: i64) -> &'static str {
+    match align {
+        4 => "alloc4",
+        8 => "alloc8",
+        16 => "alloc16",
+        other => panic!("no QBE allocation with alignment {other}"),
     }
 }
 

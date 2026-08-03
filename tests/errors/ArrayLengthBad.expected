@@ -1,0 +1,5 @@
+tests/errors/ArrayLengthBad.Mod:4:21: array length must not be negative, found -1
+tests/errors/ArrayLengthBad.Mod:5:20: 'n' is not a constant
+tests/errors/ArrayLengthBad.Mod:6:22: array length must be INTEGER, found BOOLEAN
+tests/errors/ArrayLengthBad.Mod:7:22: constant DIV or MOD by zero
+Error: 4 error(s)

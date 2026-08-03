@@ -3,12 +3,32 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <gc.h>
 
 void oberon_init(void)              { GC_INIT(); }
 void *oberon_alloc(size_t n)        { return GC_MALLOC(n); }
 void *oberon_alloc_atomic(size_t n) { return GC_MALLOC_ATOMIC(n); }
+
+/* Report 8.1: an index must lie between zero and the length less one. The
+   check runs before the element address is formed, so a zero-length array
+   rejects every index and no invalid address is ever computed. */
+void oberon_check_index(int32_t index, int32_t length)
+{
+    if (index < 0 || index >= length) {
+        fputs("array index out of bounds\n", stderr);
+        exit(1);
+    }
+}
+
+/* Report 9.1: an array assignment copies the value. memmove rather than memcpy
+   because assigning a variable to itself is legal and has to mean something.
+   A count of zero is the ordinary result of copying a zero-length array. */
+void oberon_copy(void *destination, const void *source, size_t count)
+{
+    memmove(destination, source, count);
+}
 
 /* Oakwood Out.Int(i, n): right-justified in a field of at least n spaces. */
 void oberon_out_int(int32_t v, int32_t n) { printf("%*d", (int)n, (int)v); }

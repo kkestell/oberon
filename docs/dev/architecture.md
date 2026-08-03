@@ -81,6 +81,58 @@ The Report leaves the largest `SET` element implementation-defined. This compile
 
 Anything that produces or tests a `SET` element checks that element against 0 through 31 first: a constructor element, either endpoint of a range, the left operand of `IN`, and the second argument of `INCL` and `EXCL`. An element the compiler can fold is a source diagnostic, so `{16 + 16}` fails to compile exactly as `{32}` does. An element that is only known at run time is compared against both bounds before the shift that would otherwise consume it, because QBE reduces a shift count modulo the word width and would silently read 32 as 0. A failed check calls `oberon_set_element_range`, which prints one line and exits.
 
+## Aggregate layout
+
+### Array types have identity
+
+Each `ARRAY` constructor written in the source creates one type, and two types are the same type only when they share it. All the names in one declaration share the type that declaration resolved, so `VAR a, b: ARRAY 8 OF INTEGER` declares two variables of one type. Two separately written constructors are different types however alike they look, and a type declaration whose right side is an existing type name is an alias that keeps the existing identity. This is Report 6.2 read as identity rather than shape, and it is what OBNC does. Project Oberon additionally treats two one-dimensional arrays with equal length and the same base type as compatible; that rule is not adopted here, because it would accept separately declared one-dimensional arrays while rejecting the equivalent nested declarations.
+
+`ARRAY N0, N1 OF T` is an abbreviation for `ARRAY N0 OF ARRAY N1 OF T`, so the two spellings build the same descriptors and are interchangeable everywhere, including in the identity rule.
+
+A length is a constant expression that must yield a non-negative `INTEGER`. Zero is an ordinary length.
+
+### Size, alignment, and the target object-size limit
+
+An array occupies exactly its length times its element size, with element *i* at *base + i × element size*. There is no padding between elements and no header. Its alignment is its element type's alignment, which is four for everything the compiler currently has, so the rule lives on the type rather than being written as a four anywhere.
+
+A zero-length array has size zero and keeps its element alignment. It gains no hidden element and no minimum payload byte: QBE accepts a zero-byte data object and a zero-byte stack allocation, and no valid selector can reach inside one. Records containing zero-length arrays will need exactly this.
+
+Layout arithmetic is checked against a target object-size limit of one gibibyte, which is one constant shared by semantic analysis and the driver. It is well below QBE's signed stack-offset range and the reach of the small code model's data references, which leaves room for the code, the runtime's own objects, and linker placement. A single type whose size exceeds it is a source error, and so is a procedure whose locals or a module whose globals cross it in total, reported against the declaration that crossed it. The driver sums the whole program's static data before invoking QBE, so several individually valid modules cannot together produce a link that fails. This is an implementation resource limit, not an Oberon rule.
+
+A module-level array is a zero-filled data object of its complete size. A procedure-local array reserves its complete size in the activation record and, like every other local, starts uninitialized.
+
+### Indexing is a checked address operation
+
+`a[i, j]` means `a[i][j]`, so each expression in one bracket list is its own index selector. Index expressions are evaluated left to right and exactly once, and each dimension's index is checked against zero inclusive and that dimension's length exclusive before it is widened, scaled, or added to the base address, and before the next dimension's expression runs.
+
+The IR carries the applicable length in the index instruction itself rather than leaving the backend to recover it from the base allocation. An inner dimension's base is an address with no allocation of its own, and an open array will later supply a length that is not in any type at all; both work without changing the address rule. QBE lowering is the call to `oberon_check_index`, then a sign extension of the now-known non-negative index, then a multiplication by the element stride, then the addition to the base.
+
+A failed check prints `array index out of bounds` and exits. Like the other runtime failures, it carries no source position yet.
+
+An index the compiler can fold is a source error when it is outside its domain, exactly as an out-of-range `SET` element is. A valid constant index in an executable expression still takes the ordinary checked lowering: there is no optimization pass, and one executable path is what makes the rule literal — every executed index carries its length and checks it before the address is formed. A zero-length array therefore fails every dynamic index without relying on pointer arithmetic or a later load.
+
+Selecting part of a variable does not change whether it can be written. An imported array may be read and indexed, but neither it nor any element or row of it may be assigned or passed where a variable is changed.
+
+### Whole-array assignment copies
+
+An assignment between two designators of the same array type copies the complete byte representation through `oberon_copy`, a wrapper around `memmove`. The destination owns its bytes afterwards, so changing either side cannot reach the other. The destination designator is resolved first and the source second, each exactly once, which keeps source order and makes a selected row copy from where it was when the statement started. Assigning a variable to itself is legal and copies a region onto itself, which is why the runtime uses `memmove` rather than `memcpy`. A zero-length assignment still resolves both designators and runs both sides' checks, and then copies zero bytes.
+
+The copy is a runtime call rather than an expanded QBE `blit` so that a large array costs one call instead of code proportional to its size.
+
+Arrays are never turned into pointer values. An array designator is a whole value only in an assignment; arithmetic, relations, conditions, constants, and scalar arguments and results all reject it. Report 10.1 forbids an array result type outright.
+
+### `LEN`
+
+`LEN(v)` is the length of the fixed array `v`, as an `INTEGER`. Because that length is a property of the type, the result is an immediate — but the argument designator is still resolved, so `LEN(a[f()])` calls `f` once and checks its result before answering with the statically known inner length. Nothing about a source effect or an invalid selection is erased by the answer being known.
+
+In a required constant context, such as a constant declaration or another array's length, `LEN` folds when every selector is constant and in range. The array variable itself need not be a constant. A dynamic selector makes the call nonconstant even though its eventual result is static, and an out-of-range constant selector is a source error. Nothing observable is skipped by folding, because a required constant expression cannot contain a call or an assignment in the first place.
+
+### Types across module boundaries
+
+A module's interface carries its exported type names alongside its constants, variables, and procedures. A client reaches one through the same qualified lookup as any other member, and a private type name is simply absent. Cloning an interface clones shared type handles rather than rebuilding types, so the original name, a re-exported alias, and every client that imports either all denote one type, and an assignment between variables declared through different names of it is an assignment between identical types.
+
+An exported variable may have a private or an inline array type. Its interface carries the type needed to read and index the variable without giving the client a name to declare another variable of that type, so the type stays private while the variable stays usable.
+
 ## Backend
 
 The backend targets QBE.
@@ -100,7 +152,8 @@ A small C runtime provides:
 
 * memory allocation
 * module initialization
-* runtime checks
+* runtime checks, including the array index check
+* whole-value copying
 * basic runtime support
 * standard library implementation
 

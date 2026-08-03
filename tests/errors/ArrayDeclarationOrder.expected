@@ -1,0 +1,2 @@
+tests/errors/ArrayDeclarationOrder.Mod:3:3: expected 'END', found Type
+Error: 1 error(s)

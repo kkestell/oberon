@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::rc::Rc;
 
 use crate::ast;
 use crate::diag::{Diagnostic, Pos};
@@ -25,25 +26,103 @@ const SET_FULL: u32 = u32::MAX;
 const FLOOR_MIN: f32 = -2147483648.0;
 const FLOOR_LIMIT: f32 = 2147483648.0;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Type {
     Integer,
     Real,
     Boolean,
     Set,
+    // Report 6.2. Each ARRAY constructor in the source builds one descriptor,
+    // and sharing that descriptor is what makes two types the same type. A
+    // declaration's names, an alias, an interface member, and a client's view
+    // of an exported type all hold the same handle.
+    Array(Rc<ArrayType>),
+}
+
+#[derive(Debug)]
+pub struct ArrayType {
+    len: i32,
+    elem: Type,
+    // Checked against ir::MAX_OBJECT_SIZE when the descriptor was built, so
+    // every later layout sum can stay ordinary i64 arithmetic.
+    size: i64,
 }
 
 impl Type {
-    fn ir(self) -> ir::Ty {
+    // The IR type of a value of this type, when a value of it exists. An array
+    // has none: it is storage, and asking for one is how a load, a store, an
+    // argument, or a result finds out it may not have this type at all.
+    fn scalar(&self) -> Option<ir::Ty> {
         match self {
-            Type::Integer => ir::Ty::Int,
-            Type::Real => ir::Ty::Real,
-            Type::Boolean => ir::Ty::Bool,
-            Type::Set => ir::Ty::Set,
+            Type::Integer => Some(ir::Ty::Int),
+            Type::Real => Some(ir::Ty::Real),
+            Type::Boolean => Some(ir::Ty::Bool),
+            Type::Set => Some(ir::Ty::Set),
+            Type::Array(_) => None,
+        }
+    }
+
+    fn ir(&self) -> ir::Ty {
+        self.scalar()
+            .expect("a scalar type reached a value operation")
+    }
+
+    fn array(&self) -> Option<&Rc<ArrayType>> {
+        match self {
+            Type::Array(array) => Some(array),
+            _ => None,
+        }
+    }
+
+    fn size(&self) -> i64 {
+        match self {
+            Type::Array(array) => array.size,
+            scalar => ir::scalar_size(scalar.ir()),
+        }
+    }
+
+    // An array is contiguous and takes its element's alignment, so no type
+    // here hard-codes the four bytes every current type happens to have.
+    fn align(&self) -> i64 {
+        match self {
+            Type::Array(array) => array.elem.align(),
+            scalar => ir::scalar_size(scalar.ir()),
+        }
+    }
+
+    fn storage(&self) -> ir::Storage {
+        match self {
+            Type::Array(array) => ir::Storage::Array {
+                len: array.len,
+                elem: Box::new(array.elem.storage()),
+            },
+            scalar => ir::Storage::Scalar(scalar.ir()),
         }
     }
 }
 
+// Report 6.2 and 9.1 ask whether two types are *the same type*, not whether
+// they have the same shape. Two separately written ARRAY constructors of equal
+// length and element type are different types, and only sharing a descriptor
+// makes them one. cf. OBNC's Types_Same, which compares type structures by
+// identity; Project Oberon additionally treats two arrays with equal length
+// and the same base as compatible, which this compiler does not adopt because
+// it would not extend to the equivalent nested declarations.
+impl PartialEq for Type {
+    fn eq(&self, other: &Type) -> bool {
+        match (self, other) {
+            (Type::Integer, Type::Integer)
+            | (Type::Real, Type::Real)
+            | (Type::Boolean, Type::Boolean)
+            | (Type::Set, Type::Set) => true,
+            (Type::Array(a), Type::Array(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+// The printed shape, which two different types can share. A diagnostic that
+// compares two types says so itself when their shapes print the same.
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -51,6 +130,7 @@ impl fmt::Display for Type {
             Type::Real => write!(f, "REAL"),
             Type::Boolean => write!(f, "BOOLEAN"),
             Type::Set => write!(f, "SET"),
+            Type::Array(array) => write!(f, "ARRAY {} OF {}", array.len, array.elem),
         }
     }
 }
@@ -113,8 +193,10 @@ enum Symbol {
 // and hidden: no lookup path can forget to check a visibility flag that does
 // not exist. The interface owns its data and is cloned into each client.
 //
-// This is a build result held in memory, not a symbol file. Slice 10 adds
-// named types to it when TYPE declarations arrive.
+// This is a build result held in memory, not a symbol file. Cloning it clones
+// shared type handles rather than rebuilding types, so an exported type keeps
+// one identity across every client, however many of them there are and however
+// many times it is re-exported.
 #[derive(Debug, Clone, Default)]
 pub struct Interface {
     pub members: HashMap<String, Member>,
@@ -123,6 +205,7 @@ pub struct Interface {
 #[derive(Debug, Clone)]
 pub enum Member {
     Const(ConstValue),
+    Type(Type),
     Var {
         ty: Type,
         symbol: String,
@@ -140,8 +223,9 @@ impl Member {
     fn client_symbol(&self) -> Symbol {
         match self {
             Member::Const(value) => Symbol::Const(*value),
+            Member::Type(ty) => Symbol::TypeName(ty.clone()),
             Member::Var { ty, symbol } => Symbol::Var {
-                ty: *ty,
+                ty: ty.clone(),
                 addr: ir::Addr::Global(symbol.clone()),
                 read_only: true,
             },
@@ -152,17 +236,18 @@ impl Member {
             } => Symbol::Proc {
                 symbol: symbol.clone(),
                 params: params.clone(),
-                ret: *ret,
+                ret: ret.clone(),
             },
         }
     }
 }
 
-// Report 10.2. Only the operations whose argument types exist are here; LEN,
-// CHR, and NEW arrive with their types.
+// Report 10.2. Only the operations whose argument types exist are here; CHR
+// and NEW arrive with their types.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Builtin {
     Abs,
+    Len,
     Odd,
     Floor,
     Flt,
@@ -187,6 +272,7 @@ fn universe_scope() -> Scope {
     scope.insert("SET".into(), Symbol::TypeName(Type::Set));
     for (name, builtin) in [
         ("ABS", Builtin::Abs),
+        ("LEN", Builtin::Len),
         ("ODD", Builtin::Odd),
         ("FLOOR", Builtin::Floor),
         ("FLT", Builtin::Flt),
@@ -207,6 +293,23 @@ fn universe_scope() -> Scope {
     scope
 }
 
+// Where a variable's storage is, what type it has there, and whether it may be
+// written. Report 8.1 builds this by applying selectors to a variable, and
+// every writable context — assignment, a VAR actual, INC and its relatives —
+// uses the one that comes out.
+struct Place {
+    addr: ir::Addr,
+    ty: Type,
+    read_only: bool,
+}
+
+// What the source of an assignment turned out to be. An array keeps its
+// address because it has no scalar value to load.
+enum Source {
+    Value(ir::Value, Type),
+    Array(Place),
+}
+
 // `resolved` maps the real name of every module this one imports to that
 // module's interface. The driver has already compiled them, so a name missing
 // here is a driver bug and not a source error.
@@ -222,6 +325,10 @@ struct Analyzer {
     scopes: Vec<Scope>,
     diags: Vec<Diagnostic>,
     globals: Vec<ir::Global>,
+    // The aligned bytes the module's globals have reserved so far, so the
+    // declaration that would take the data object past the target limit is the
+    // one that reports it.
+    globals_size: i64,
     procs: Vec<ir::Proc>,
     interface: Interface,
     current: Option<ProcBuilder>,
@@ -238,6 +345,7 @@ impl Analyzer {
             scopes: vec![universe_scope(), Scope::new()],
             diags: Vec::new(),
             globals: Vec::new(),
+            globals_size: 0,
             procs: Vec::new(),
             interface: Interface::default(),
             current: None,
@@ -251,6 +359,7 @@ impl Analyzer {
     ) -> Result<(ir::Module, Interface), Vec<Diagnostic>> {
         self.imports(&module.imports, resolved);
         self.const_declarations(&module.consts);
+        self.type_declarations(&module.types);
         self.global_declarations(&module.vars);
 
         let prefix = self.module.clone();
@@ -353,6 +462,25 @@ impl Analyzer {
         }
     }
 
+    // Report 4: type declarations are analyzed in textual order, and the right
+    // side is resolved before the name is declared. A declaration can
+    // therefore use an earlier type or constant but not itself or a later one;
+    // the pointer-specific forward reference arrives with pointers.
+    fn type_declarations(&mut self, declarations: &[ast::TypeDecl]) {
+        for declaration in declarations {
+            let Some(ty) = self.resolve_type(&declaration.ty) else {
+                continue;
+            };
+            if self.declare(
+                &declaration.id.name,
+                declaration.id.pos,
+                Symbol::TypeName(ty.clone()),
+            ) {
+                self.export(&declaration.id, Member::Type(ty));
+            }
+        }
+    }
+
     fn global_declarations(&mut self, declarations: &[ast::VarDecl]) {
         for declaration in declarations {
             let Some(ty) = self.resolve_type(&declaration.ty) else {
@@ -367,16 +495,29 @@ impl Analyzer {
                     &id.name,
                     id.pos,
                     Symbol::Var {
-                        ty,
+                        ty: ty.clone(),
                         addr,
                         read_only: false,
                     },
                 ) {
+                    match reserve(self.globals_size, &ty) {
+                        Some(total) => self.globals_size = total,
+                        None => self.diags.push(Diagnostic::new(
+                            id.pos,
+                            "module storage exceeds target object-size limit",
+                        )),
+                    }
                     self.globals.push(ir::Global {
                         symbol: symbol.clone(),
-                        ty: ty.ir(),
+                        ty: ty.storage(),
                     });
-                    self.export(id, Member::Var { ty, symbol });
+                    self.export(
+                        id,
+                        Member::Var {
+                            ty: ty.clone(),
+                            symbol,
+                        },
+                    );
                 }
             }
         }
@@ -390,13 +531,34 @@ impl Analyzer {
                 params_ok = false;
                 continue;
             };
+            // Slice 12 gives structured parameters their calling convention
+            // together with records. Until then a formal that resolves to an
+            // array stops here rather than reaching the scalar ABI.
+            if ty.array().is_some() {
+                self.diags.push(Diagnostic::new(
+                    section.ty.pos(),
+                    "not yet supported: array parameters",
+                ));
+                params_ok = false;
+                continue;
+            }
             for (name, pos) in &section.names {
-                formals.push((section.var, name.clone(), *pos, ty));
+                formals.push((section.var, name.clone(), *pos, ty.clone()));
             }
         }
 
         let (ret, ret_ok) = match &declaration.ret {
-            Some(designator) => match self.resolve_type(designator) {
+            Some(source) => match self.resolve_type(source) {
+                // Report 10.1: the result type of a procedure can be neither a
+                // record nor an array. This one is permanent, not a slice
+                // boundary.
+                Some(ty) if ty.array().is_some() => {
+                    self.diags.push(Diagnostic::new(
+                        source.pos(),
+                        format!("a procedure cannot have the array result type {ty}"),
+                    ));
+                    (None, false)
+                }
                 Some(ty) => (Some(ty), true),
                 None => (None, false),
             },
@@ -404,14 +566,17 @@ impl Analyzer {
         };
         let symbol = format!("{prefix}.{}", declaration.id.name);
         if params_ok && ret_ok {
-            let params: Vec<_> = formals.iter().map(|(var, _, _, ty)| (*var, *ty)).collect();
+            let params: Vec<_> = formals
+                .iter()
+                .map(|(var, _, _, ty)| (*var, ty.clone()))
+                .collect();
             if self.declare(
                 &declaration.id.name,
                 declaration.id.pos,
                 Symbol::Proc {
                     symbol: symbol.clone(),
                     params: params.clone(),
-                    ret,
+                    ret: ret.clone(),
                 },
             ) {
                 self.export(
@@ -419,7 +584,7 @@ impl Analyzer {
                     Member::Proc {
                         symbol: symbol.clone(),
                         params,
-                        ret,
+                        ret: ret.clone(),
                     },
                 );
             }
@@ -427,7 +592,7 @@ impl Analyzer {
 
         self.scopes.push(Scope::new());
         let enclosing = self.current.take();
-        self.current = Some(ProcBuilder::new(symbol.clone(), ret));
+        self.current = Some(ProcBuilder::new(symbol.clone(), ret.clone()));
 
         for (var, name, pos, ty) in formals {
             let temp = self.builder().temp();
@@ -448,13 +613,13 @@ impl Analyzer {
                 &name,
                 pos,
                 Symbol::Var {
-                    ty,
+                    ty: ty.clone(),
                     addr: addr.clone(),
                     read_only: false,
                 },
             ) && !var
             {
-                self.builder().proc.slots.push((name, ty.ir()));
+                self.reserve_slot(&name, &ty, pos);
                 self.emit(ir::Inst::Store {
                     ty: ty.ir(),
                     val: ir::Value::Temp(temp),
@@ -464,6 +629,7 @@ impl Analyzer {
         }
 
         self.const_declarations(&declaration.consts);
+        self.type_declarations(&declaration.types);
         self.local_declarations(&declaration.vars);
         for proc in &declaration.procs {
             self.procedure(proc, &symbol);
@@ -488,18 +654,36 @@ impl Analyzer {
                     &id.name,
                     id.pos,
                     Symbol::Var {
-                        ty,
+                        ty: ty.clone(),
                         addr,
                         read_only: false,
                     },
                 ) {
-                    self.builder().proc.slots.push((id.name.clone(), ty.ir()));
+                    self.reserve_slot(&id.name, &ty, id.pos);
                     // A local can never be exported, but the mark still has
                     // to be diagnosed rather than ignored.
                     self.check_export(id);
                 }
             }
         }
+    }
+
+    // One local's storage, plus its share of the running frame total. Several
+    // individually valid locals must not add up to an activation record the
+    // target cannot address, so the declaration that crosses the limit is the
+    // one that reports it.
+    fn reserve_slot(&mut self, name: &str, ty: &Type, pos: Pos) {
+        match reserve(self.builder().frame, ty) {
+            Some(total) => self.builder().frame = total,
+            None => self.diags.push(Diagnostic::new(
+                pos,
+                "procedure storage exceeds target object-size limit",
+            )),
+        }
+        self.builder()
+            .proc
+            .slots
+            .push((name.to_string(), ty.storage()));
     }
 
     fn lower_return(&mut self, declaration: &ast::ProcDecl, ret: Option<Type>) {
@@ -556,24 +740,7 @@ impl Analyzer {
 
     fn lower_stmt(&mut self, stmt: &ast::Stmt) {
         match stmt {
-            ast::Stmt::Assign { lhs, rhs, .. } => {
-                let lhs = self.addr_of(lhs);
-                let lowered_rhs = self.lower_expr(rhs);
-                if let (Some((addr, lhs_ty)), Some((value, rhs_ty))) = (lhs, lowered_rhs) {
-                    if lhs_ty == rhs_ty {
-                        self.emit(ir::Inst::Store {
-                            ty: lhs_ty.ir(),
-                            val: value,
-                            addr,
-                        });
-                    } else {
-                        self.diags.push(Diagnostic::new(
-                            rhs.pos(),
-                            format!("cannot assign {rhs_ty} to {lhs_ty}"),
-                        ));
-                    }
-                }
-            }
+            ast::Stmt::Assign { lhs, rhs, .. } => self.lower_assign(lhs, rhs),
             ast::Stmt::Call { proc, args, pos } => {
                 if let Some((_, Some(_))) = self.lower_call(proc, args, *pos) {
                     self.diags.push(Diagnostic::new(
@@ -599,6 +766,75 @@ impl Analyzer {
             } => self.lower_for(var, start, limit, step.as_ref(), body),
             ast::Stmt::Case { expr, arms } => self.lower_case(expr, arms),
         }
+    }
+
+    // Report 9.1. A scalar assignment stores one value. An assignment between
+    // identical array types copies the whole representation, so afterwards the
+    // destination owns its own bytes and mutating either side cannot change
+    // the other.
+    fn lower_assign(&mut self, lhs: &ast::Designator, rhs: &ast::Expr) {
+        // The destination designator is resolved first and the source second,
+        // each exactly once, so both sides' index expressions run in source
+        // order and a selected row is copied from where it was when the
+        // statement started.
+        let target = self.assign_target(lhs);
+        let source = self.lower_source(rhs);
+        let (Some(target), Some(source)) = (target, source) else {
+            return;
+        };
+        match (target.ty.scalar(), source) {
+            (Some(ty), Source::Value(value, found)) if found == target.ty => {
+                self.emit(ir::Inst::Store {
+                    ty,
+                    val: value,
+                    addr: target.addr,
+                });
+            }
+            (None, Source::Array(source)) if source.ty == target.ty => {
+                // A zero-length array still resolved both designators and ran
+                // both sides' checks; only the byte count is zero.
+                self.emit(ir::Inst::CopyBytes {
+                    dst: target.addr,
+                    src: source.addr,
+                    size: target.ty.size(),
+                });
+            }
+            (_, source) => {
+                let found = match source {
+                    Source::Value(_, ty) => ty,
+                    Source::Array(place) => place.ty,
+                };
+                self.diags.push(assign_error(rhs.pos(), &target.ty, &found));
+            }
+        }
+    }
+
+    // The right-hand side of an assignment, evaluated exactly once. An array
+    // designator has no scalar value, so it stays an address here rather than
+    // being rejected: whole-array assignment is the one context that wants it.
+    fn lower_source(&mut self, expr: &ast::Expr) -> Option<Source> {
+        let ast::Expr::Name(designator) = expr else {
+            let (value, ty) = self.lower_expr(expr)?;
+            return Some(Source::Value(value, ty));
+        };
+        // A constant is not storage, so it is recognized before the designator
+        // is resolved as a variable.
+        match self.qualident(designator) {
+            Ok((Symbol::Const(value), [])) => return Some(Source::Value(value.ir(), value.ty())),
+            Ok(_) => {}
+            Err(diag) => {
+                self.diags.push(diag);
+                return None;
+            }
+        }
+        let place = self.place(
+            designator,
+            format!("'{}' cannot be used as a value", designator.name()),
+        )?;
+        Some(match place.ty.scalar() {
+            Some(ty) => Source::Value(self.load(place.addr, ty), place.ty),
+            None => Source::Array(place),
+        })
     }
 
     fn lower_if(
@@ -706,14 +942,14 @@ impl Analyzer {
         step: Option<&ast::Expr>,
         body: &[ast::Stmt],
     ) {
-        let control = match self.addr_of(var) {
-            Some((addr, Type::Integer)) => Some(addr),
-            Some((_, ty)) => {
+        let control = match self.assign_target(var) {
+            Some(place) if place.ty == Type::Integer => Some(place.addr),
+            Some(place) => {
                 self.diags.push(Diagnostic::new(
                     var.pos,
                     format!(
-                        "control variable '{}' must be INTEGER, found {ty}",
-                        var.ident
+                        "control variable '{}' must be INTEGER, found {}",
+                        var.ident, place.ty
                     ),
                 ));
                 None
@@ -738,7 +974,7 @@ impl Analyzer {
 
         let limit = self.lower_int(limit, "FOR limit");
         if let (Some(addr), Some(limit)) = (control.clone(), limit) {
-            let current = self.load(addr, Type::Integer);
+            let current = self.load(addr, ir::Ty::Int);
             // The direction is decided here, from the sign of the folded
             // step, so nothing tests the step at run time.
             let op = if step < 0 {
@@ -761,7 +997,7 @@ impl Analyzer {
         self.set_read_only(&var.ident, previous);
 
         if let Some(addr) = control {
-            let current = self.load(addr.clone(), Type::Integer);
+            let current = self.load(addr.clone(), ir::Ty::Int);
             let next = self.bin(ir::BinOp::Add, ir::Ty::Int, current, ir::Value::Int(step));
             self.emit(ir::Inst::Store {
                 ty: ir::Ty::Int,
@@ -965,18 +1201,20 @@ impl Analyzer {
             ast::Expr::Real { value, .. } => Some((ir::Value::Real(*value), Type::Real)),
             ast::Expr::Bool { value, .. } => Some((ir::Value::Bool(*value), Type::Boolean)),
             ast::Expr::Set { elements, .. } => self.lower_set(elements),
-            ast::Expr::Name(designator) => match self.resolve(designator) {
-                Ok(Symbol::Const(value)) => Some((value.ir(), value.ty())),
-                Ok(Symbol::Var { ty, addr, .. }) => Some((self.load(addr, ty), ty)),
-                Ok(_) => {
+            // Report 8: an expression operates on values, and an array
+            // designator has none. Whole-array assignment is the one place
+            // that wants the array itself, and it uses lower_source directly.
+            ast::Expr::Name(designator) => match self.lower_source(expr)? {
+                Source::Value(value, ty) => Some((value, ty)),
+                Source::Array(place) => {
                     self.diags.push(Diagnostic::new(
                         designator.pos,
-                        format!("'{}' cannot be used as a value", designator.name()),
+                        format!(
+                            "'{}' has type {} and cannot be used as a value",
+                            designator.name(),
+                            place.ty
+                        ),
                     ));
-                    None
-                }
-                Err(diag) => {
-                    self.diags.push(diag);
                     None
                 }
             },
@@ -994,7 +1232,7 @@ impl Analyzer {
             },
             ast::Expr::Unary { op, expr, pos } => {
                 let (arg, found) = self.lower_expr(expr)?;
-                match (op, found) {
+                match (op, &found) {
                     // Report 8.2.2: unary "+" is the identity on a numeric
                     // operand, so it needs no instruction of its own.
                     (ast::UnOp::Plus, Type::Integer | Type::Real) => Some((arg, found)),
@@ -1034,7 +1272,7 @@ impl Analyzer {
                         Some((ir::Value::Temp(dst), Type::Boolean))
                     }
                     _ => {
-                        self.diags.push(unary_type_error(*pos, *op, found));
+                        self.diags.push(unary_type_error(*pos, *op, &found));
                         None
                     }
                 }
@@ -1263,7 +1501,7 @@ impl Analyzer {
         let (operand_ty, result_ty) = match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Slash => {
                 let ty = check_arith_types(pos, op, lhs_ty, rhs_ty, &mut self.diags)?;
-                (ty, ty)
+                (ty.clone(), ty)
             }
             BinOp::Div | BinOp::Mod => {
                 check_binary_types(
@@ -1447,7 +1685,7 @@ impl Analyzer {
 
         let mut args = Vec::new();
         for (i, actual) in actuals.iter().enumerate() {
-            let Some((var, expected)) = params.get(i).copied() else {
+            let Some((var, expected)) = params.get(i).cloned() else {
                 let _ = self.lower_expr(actual);
                 continue;
             };
@@ -1487,7 +1725,7 @@ impl Analyzer {
         if !ok {
             return None;
         }
-        let dst = ret.map(|ty| (self.temp(), ty.ir()));
+        let dst = ret.as_ref().map(|ty| (self.temp(), ty.ir()));
         self.emit(ir::Inst::Call { dst, symbol, args });
         Some((dst.map(|(temp, _)| ir::Value::Temp(temp)), ret))
     }
@@ -1499,6 +1737,7 @@ impl Analyzer {
         pos: Pos,
     ) -> Option<(Option<ir::Value>, Option<Type>)> {
         match builtin {
+            Builtin::Len => return self.lower_len(actuals, pos),
             Builtin::Inc | Builtin::Dec => return self.lower_inc_dec(builtin, actuals, pos),
             Builtin::Incl | Builtin::Excl => return self.lower_incl_excl(builtin, actuals, pos),
             Builtin::Pack => return self.lower_pack(actuals, pos),
@@ -1576,7 +1815,8 @@ impl Analyzer {
             Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
                 self.lower_shift(builtin, args[0].0.clone(), args[1].0.clone(), &actuals[1])?
             }
-            Builtin::Inc
+            Builtin::Len
+            | Builtin::Inc
             | Builtin::Dec
             | Builtin::Incl
             | Builtin::Excl
@@ -1584,7 +1824,50 @@ impl Analyzer {
             | Builtin::Unpk
             | Builtin::Assert => unreachable!("handled above"),
         };
-        Some((Some(value), Some(result.ty(args[0].1))))
+        Some((Some(value), Some(result.ty(args[0].1.clone()))))
+    }
+
+    // Report 10.2: LEN(v) is the length of the array v. For a fixed array that
+    // length is a property of the type, so the result is an immediate — but
+    // the designator is still resolved, so `LEN(a[f()])` calls f once and
+    // checks its result before returning the inner length. cf. Project
+    // Oberon's ORP.StandFunc, which lowers the designator and then reads the
+    // length out of its type.
+    fn lower_len(
+        &mut self,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        // The arguments are deliberately not lowered when the arity is wrong:
+        // an array actual has no value, and reporting that on top of the arity
+        // would be two complaints about one mistake.
+        if actuals.len() != 1 {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "wrong number of arguments: expected 1, found {}",
+                    actuals.len()
+                ),
+            ));
+            return None;
+        }
+        let ast::Expr::Name(designator) = &actuals[0] else {
+            let _ = self.lower_expr(&actuals[0]);
+            self.diags.push(Diagnostic::new(
+                actuals[0].pos(),
+                "argument 1 must be an array variable",
+            ));
+            return None;
+        };
+        let place = self.place(designator, "argument 1 must be an array variable".into())?;
+        let Some(array) = place.ty.array() else {
+            self.diags.push(Diagnostic::new(
+                actuals[0].pos(),
+                format!("argument 1 has type {}, expected an array", place.ty),
+            ));
+            return None;
+        };
+        Some((Some(ir::Value::Int(array.len)), Some(Type::Integer)))
     }
 
     // Report 10.2: PACK(x, n) is x := x * 2^n on a writable REAL variable.
@@ -1836,7 +2119,7 @@ impl Analyzer {
             None => Some(ir::Value::Int(1)),
         };
         if let (Some(addr), Some(step)) = (target, step) {
-            let current = self.load(addr.clone(), Type::Integer);
+            let current = self.load(addr.clone(), ir::Ty::Int);
             let op = if builtin == Builtin::Inc {
                 ir::BinOp::Add
             } else {
@@ -1871,7 +2154,7 @@ impl Analyzer {
             .and_then(|(value, _)| self.check_set_element(&actuals[1], value));
         if let (Some(addr), Some(element)) = (target, element) {
             let bit = self.set_singleton(element);
-            let current = self.load(addr.clone(), Type::Set);
+            let current = self.load(addr.clone(), ir::Ty::Set);
             let next = if builtin == Builtin::Incl {
                 self.bin(ir::BinOp::BitOr, ir::Ty::Set, current, bit)
             } else {
@@ -1957,73 +2240,138 @@ impl Analyzer {
         }
     }
 
+    // Report 9.2: the selectors of a VAR actual are evaluated when the
+    // parameter is substituted, which is exactly once, before the call. That
+    // is what resolving the designator to an address here already does, so a
+    // selected element reaches a VAR parameter with no extra machinery.
     fn var_actual(&mut self, actual: &ast::Expr, number: usize) -> Option<(ir::Addr, Type)> {
-        if let ast::Expr::Name(designator) = actual {
-            match self.resolve(designator) {
-                Ok(Symbol::Var {
-                    ty,
-                    addr,
-                    read_only,
-                }) => {
-                    if read_only {
-                        self.diags.push(Diagnostic::new(
-                            actual.pos(),
-                            format!("argument {number} is read-only"),
-                        ));
-                        return None;
-                    }
-                    Some((addr, ty))
-                }
-                Ok(_) => {
-                    self.diags.push(Diagnostic::new(
-                        actual.pos(),
-                        format!("argument {number} must be a variable"),
-                    ));
-                    None
-                }
-                Err(diag) => {
-                    self.diags.push(diag);
-                    None
-                }
-            }
-        } else {
+        let ast::Expr::Name(designator) = actual else {
             let _ = self.lower_expr(actual);
             self.diags.push(Diagnostic::new(
                 actual.pos(),
                 format!("argument {number} must be a variable"),
             ));
-            None
+            return None;
+        };
+        let place = self.place(designator, format!("argument {number} must be a variable"))?;
+        if place.read_only {
+            self.diags.push(Diagnostic::new(
+                actual.pos(),
+                format!("argument {number} is read-only"),
+            ));
+            return None;
         }
+        Some((place.addr, place.ty))
     }
 
-    fn addr_of(&mut self, designator: &ast::Designator) -> Option<(ir::Addr, Type)> {
-        match self.resolve(designator) {
-            Ok(Symbol::Var {
-                ty,
-                addr,
-                read_only,
-            }) => {
-                if read_only {
-                    self.diags.push(Diagnostic::new(
-                        designator.pos,
-                        format!("cannot assign to '{}': it is read-only", designator.name()),
-                    ));
-                    return None;
-                }
-                Some((addr, ty))
-            }
-            Ok(_) => {
-                self.diags.push(Diagnostic::new(
-                    designator.pos,
-                    format!("cannot assign to '{}'", designator.name()),
-                ));
-                None
-            }
+    // The storage a designator denotes, with every selector applied in source
+    // order. `not_a_variable` is the caller's own wording for a designator
+    // that names something else, because assignment, an argument, and an
+    // expression each phrase that differently.
+    fn place(&mut self, designator: &ast::Designator, not_a_variable: String) -> Option<Place> {
+        let (symbol, rest) = match self.qualident(designator) {
+            Ok(found) => found,
             Err(diag) => {
                 self.diags.push(diag);
-                None
+                return None;
+            }
+        };
+        let Symbol::Var {
+            ty,
+            addr,
+            read_only,
+        } = symbol
+        else {
+            self.diags
+                .push(Diagnostic::new(designator.pos, not_a_variable));
+            return None;
+        };
+        let mut place = Place {
+            addr,
+            ty,
+            read_only,
+        };
+        for selector in rest {
+            match selector {
+                ast::Selector::Field(..) => {
+                    self.diags.push(selector_error(designator, selector));
+                    return None;
+                }
+                // Report 8.1: a[i, j] abbreviates a[i][j], so each expression
+                // of one bracket list is its own index selector.
+                ast::Selector::Index(exprs, pos) => {
+                    for expr in exprs {
+                        place = self.index(place, expr, *pos)?;
+                    }
+                }
             }
         }
+        Some(place)
+    }
+
+    // One dimension. The index is evaluated before anything is done with it,
+    // and the check the IR carries runs before the address is formed, so a
+    // later dimension's expression cannot run ahead of an earlier dimension's
+    // check and no invalid address is ever computed.
+    fn index(&mut self, base: Place, expr: &ast::Expr, pos: Pos) -> Option<Place> {
+        let index = self.lower_int(expr, "array index");
+        let Some(array) = base.ty.array().cloned() else {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!("cannot index {}: only an array can be indexed", base.ty),
+            ));
+            return None;
+        };
+        let index = index?;
+        // An index the compiler can fold is a source error, exactly as an
+        // out-of-range SET element is. A valid constant one still takes the
+        // ordinary checked lowering; there is no optimization pass, and one
+        // executable path is what makes the IR invariant literal.
+        match self.try_eval_const(expr) {
+            Ok(Some(ConstValue::Int(value))) => {
+                if !(0..array.len).contains(&value) {
+                    self.diags
+                        .push(index_range_error(expr.pos(), value, array.len));
+                    return None;
+                }
+            }
+            Ok(Some(_)) => unreachable!("the index was type-checked as INTEGER"),
+            Ok(None) => {}
+            Err(diag) => {
+                self.diags.push(diag);
+                return None;
+            }
+        }
+        let dst = self.temp();
+        self.emit(ir::Inst::Index {
+            dst,
+            base: base.addr,
+            index,
+            len: array.len,
+            stride: array.elem.size(),
+        });
+        Some(Place {
+            addr: ir::Addr::Temp(dst),
+            ty: array.elem.clone(),
+            // Report 9.1: an imported variable is read-only, and selecting
+            // part of it does not make that part writable.
+            read_only: base.read_only,
+        })
+    }
+
+    fn assign_target(&mut self, designator: &ast::Designator) -> Option<Place> {
+        let place = self.place(
+            designator,
+            format!("cannot assign to '{}'", designator.name()),
+        )?;
+        if place.read_only {
+            self.diags.push(Diagnostic::new(
+                designator.pos,
+                format!("cannot assign to '{}': it is read-only", designator.name()),
+            ));
+            return None;
+        }
+        Some(place)
     }
 
     fn check_const_expr(&mut self, expr: &ast::Expr) -> Option<Type> {
@@ -2062,31 +2410,20 @@ impl Analyzer {
                 }
                 ok.then_some(Type::Set)
             }
-            ast::Expr::Name(designator) => match self.resolve(designator) {
-                Ok(Symbol::Const(value)) => Some(value.ty()),
-                Ok(Symbol::Var { ty, .. }) => Some(ty),
-                Ok(_) => {
-                    self.diags.push(Diagnostic::new(
-                        designator.pos,
-                        format!("'{}' cannot be used as a value", designator.name()),
-                    ));
-                    None
-                }
-                Err(diag) => {
-                    self.diags.push(diag);
-                    None
-                }
-            },
+            // A variable is not a constant, but its type still has to be known
+            // so the rest of the expression can be checked. eval_const is what
+            // reports that it cannot be folded.
+            ast::Expr::Name(designator) => self.check_const_designator_type(designator),
             ast::Expr::Call { callee, args, pos } => self.check_const_call(callee, args, *pos),
             ast::Expr::Unary { op, expr, pos } => {
                 let found = self.check_const_expr(expr)?;
-                match (op, found) {
+                match (op, &found) {
                     (ast::UnOp::Plus, Type::Integer | Type::Real)
                     | (ast::UnOp::Neg, Type::Integer | Type::Real) => Some(found),
                     (ast::UnOp::Neg, Type::Set) => Some(Type::Set),
                     (ast::UnOp::Not, Type::Boolean) => Some(Type::Boolean),
                     _ => {
-                        self.diags.push(unary_type_error(*pos, *op, found));
+                        self.diags.push(unary_type_error(*pos, *op, &found));
                         None
                     }
                 }
@@ -2225,6 +2562,9 @@ impl Analyzer {
         actuals: &[ast::Expr],
         pos: Pos,
     ) -> Option<Type> {
+        if builtin == Builtin::Len {
+            return self.check_const_len(actuals, pos);
+        }
         let Some((params, result)) = builtin_signature(builtin) else {
             for actual in actuals {
                 let _ = self.check_const_expr(actual);
@@ -2276,6 +2616,40 @@ impl Analyzer {
         ok.then(|| result.ty(first.expect("a function-like builtin takes an argument")))
     }
 
+    // LEN in a required constant context, such as a constant declaration or
+    // another array's length. Its argument is a designator rather than a
+    // constant expression, so it is checked here instead of through the
+    // signature table.
+    fn check_const_len(&mut self, actuals: &[ast::Expr], pos: Pos) -> Option<Type> {
+        if actuals.len() != 1 {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "wrong number of arguments: expected 1, found {}",
+                    actuals.len()
+                ),
+            ));
+            return None;
+        }
+        let ast::Expr::Name(designator) = &actuals[0] else {
+            self.diags.push(Diagnostic::new(
+                actuals[0].pos(),
+                "argument 1 must be an array variable",
+            ));
+            return None;
+        };
+        let ty = self.check_const_designator_type(designator)?;
+        if ty.array().is_some() {
+            Some(Type::Integer)
+        } else {
+            self.diags.push(Diagnostic::new(
+                designator.pos,
+                format!("argument 1 has type {ty}, expected an array"),
+            ));
+            None
+        }
+    }
+
     fn eval_const_builtin(
         &self,
         builtin: Builtin,
@@ -2283,6 +2657,12 @@ impl Analyzer {
         actuals: &[ast::Expr],
         pos: Pos,
     ) -> Result<ConstValue, Diagnostic> {
+        if builtin == Builtin::Len {
+            let [ast::Expr::Name(designator)] = actuals else {
+                return Err(Diagnostic::new(pos, "argument 1 must be an array variable"));
+            };
+            return Ok(ConstValue::Int(self.const_array_type(designator)?.len));
+        }
         if builtin_signature(builtin).is_none() {
             return Err(Diagnostic::new(
                 pos,
@@ -2356,8 +2736,8 @@ impl Analyzer {
                 }
                 Ok(ConstValue::Set(bits))
             }
-            ast::Expr::Name(designator) => match self.resolve(designator)? {
-                Symbol::Const(value) => Ok(value),
+            ast::Expr::Name(designator) => match self.qualident(designator)? {
+                (Symbol::Const(value), []) => Ok(value),
                 _ => Err(Diagnostic::new(
                     designator.pos,
                     format!("'{}' is not a constant", designator.name()),
@@ -2452,6 +2832,20 @@ impl Analyzer {
             ast::Expr::Name(designator) => {
                 matches!(self.resolve(designator), Ok(Symbol::Const(_)))
             }
+            // LEN is a constant when it can see the length without running
+            // anything: the argument names an array variable and every
+            // selector on it is itself constant. A dynamic selector makes the
+            // call nonconstant even though its result is statically known.
+            ast::Expr::Call { callee, args, .. }
+                if matches!(self.resolve(callee), Ok(Symbol::Builtin(Builtin::Len))) =>
+            {
+                let [ast::Expr::Name(designator)] = args.as_slice() else {
+                    return false;
+                };
+                // designator_type folds every selector, so it fails on a
+                // dynamic one and this is the whole test.
+                matches!(self.designator_type(designator), Ok(ty) if ty.array().is_some())
+            }
             ast::Expr::Call { callee, args, .. } => {
                 matches!(
                     self.resolve(callee),
@@ -2463,6 +2857,135 @@ impl Analyzer {
                 self.is_const_expr(lhs) && self.is_const_expr(rhs)
             }
         }
+    }
+
+    // Type-checks a designator in the constant world before folding any
+    // selector. eval_const relies on that ordering and treats an impossible
+    // operand combination as an internal invariant, just as it does for every
+    // other constant expression checked through check_const_expr.
+    fn check_const_designator_type(&mut self, designator: &ast::Designator) -> Option<Type> {
+        let (symbol, rest) = match self.qualident(designator) {
+            Ok(found) => found,
+            Err(diag) => {
+                self.diags.push(diag);
+                return None;
+            }
+        };
+        let mut ty = match symbol {
+            Symbol::Const(value) if rest.is_empty() => return Some(value.ty()),
+            Symbol::Var { ty, .. } => ty,
+            _ => {
+                self.diags.push(Diagnostic::new(
+                    designator.pos,
+                    format!("'{}' cannot be used as a value", designator.name()),
+                ));
+                return None;
+            }
+        };
+        for selector in rest {
+            match selector {
+                ast::Selector::Field(..) => {
+                    self.diags.push(selector_error(designator, selector));
+                    return None;
+                }
+                ast::Selector::Index(exprs, pos) => {
+                    for expr in exprs {
+                        let Some(array) = ty.array().cloned() else {
+                            self.diags.push(Diagnostic::new(
+                                *pos,
+                                format!("cannot index {ty}: only an array can be indexed"),
+                            ));
+                            return None;
+                        };
+                        match self.check_const_expr(expr) {
+                            Some(Type::Integer) => {}
+                            Some(found) => {
+                                self.diags.push(Diagnostic::new(
+                                    expr.pos(),
+                                    format!("array index must be INTEGER, found {found}"),
+                                ));
+                                return None;
+                            }
+                            None => return None,
+                        }
+                        let value = match self.eval_const(expr) {
+                            Ok(ConstValue::Int(value)) => value,
+                            Ok(_) => unreachable!("array index was type-checked as INTEGER"),
+                            Err(diag) => {
+                                self.diags.push(diag);
+                                return None;
+                            }
+                        };
+                        if !(0..array.len).contains(&value) {
+                            self.diags
+                                .push(index_range_error(expr.pos(), value, array.len));
+                            return None;
+                        }
+                        ty = array.elem.clone();
+                    }
+                }
+            }
+        }
+        Some(ty)
+    }
+
+    // The type a designator has, worked out without evaluating or emitting
+    // anything: every index selector must be a constant in range. This is the
+    // constant world's counterpart to Analyzer::place, and it is what lets LEN
+    // be folded. A required constant expression cannot contain a call or an
+    // assignment, so nothing observable is skipped by not lowering the
+    // selectors here.
+    fn designator_type(&self, designator: &ast::Designator) -> Result<Type, Diagnostic> {
+        let (symbol, rest) = self.qualident(designator)?;
+        let mut ty = match symbol {
+            Symbol::Const(value) if rest.is_empty() => return Ok(value.ty()),
+            Symbol::Var { ty, .. } => ty,
+            _ => {
+                return Err(Diagnostic::new(
+                    designator.pos,
+                    format!("'{}' cannot be used as a value", designator.name()),
+                ));
+            }
+        };
+        for selector in rest {
+            match selector {
+                ast::Selector::Field(..) => return Err(selector_error(designator, selector)),
+                ast::Selector::Index(exprs, pos) => {
+                    for expr in exprs {
+                        let Some(array) = ty.array().cloned() else {
+                            return Err(Diagnostic::new(
+                                *pos,
+                                format!("cannot index {ty}: only an array can be indexed"),
+                            ));
+                        };
+                        let value = self.eval_const(expr)?;
+                        let ConstValue::Int(value) = value else {
+                            return Err(Diagnostic::new(
+                                expr.pos(),
+                                format!("array index must be INTEGER, found {}", value.ty()),
+                            ));
+                        };
+                        if !(0..array.len).contains(&value) {
+                            return Err(index_range_error(expr.pos(), value, array.len));
+                        }
+                        ty = array.elem.clone();
+                    }
+                }
+            }
+        }
+        Ok(ty)
+    }
+
+    // The array a folded LEN is about. The variable itself need not be a
+    // constant: a fixed length is a property of its type.
+    fn const_array_type(&self, designator: &ast::Designator) -> Result<Rc<ArrayType>, Diagnostic> {
+        let ty = self.designator_type(designator)?;
+        ty.array().cloned().ok_or_else(|| {
+            Diagnostic::new(
+                designator.pos,
+                format!("argument 1 has type {ty}, expected an array"),
+            )
+        })
     }
 
     // The static half of the one element-domain rule; Analyzer::
@@ -2478,13 +3001,59 @@ impl Analyzer {
         }
     }
 
-    fn resolve_type(&mut self, designator: &ast::Designator) -> Option<Type> {
-        match self.resolve(designator) {
-            Ok(Symbol::TypeName(ty)) => Some(ty),
-            Ok(_) => {
+    fn resolve_type(&mut self, source: &ast::TypeExpr) -> Option<Type> {
+        match source {
+            ast::TypeExpr::Named(designator) => match self.resolve(designator) {
+                Ok(Symbol::TypeName(ty)) => Some(ty),
+                Ok(_) => {
+                    self.diags.push(Diagnostic::new(
+                        designator.pos,
+                        format!("'{}' is not a type", designator.name()),
+                    ));
+                    None
+                }
+                Err(diag) => {
+                    self.diags.push(diag);
+                    None
+                }
+            },
+            ast::TypeExpr::Array { lengths, elem, pos } => {
+                // Every length is folded even after one of them fails, so a
+                // declaration reports all of its bad dimensions at once.
+                let folded: Vec<_> = lengths
+                    .iter()
+                    .map(|length| self.array_length(length))
+                    .collect();
+                let elem = self.resolve_type(elem);
+                let mut ty = elem?;
+                // Report 6.2: ARRAY N0, N1 OF T means ARRAY N0 OF ARRAY N1 OF
+                // T, so the innermost dimension is built first and the two
+                // spellings produce the same descriptors.
+                for len in folded.into_iter().rev() {
+                    ty = self.new_array(len?, ty, *pos)?;
+                }
+                Some(ty)
+            }
+        }
+    }
+
+    // Report 6.2: a length is a constant expression, and Report 5 leaves it an
+    // INTEGER. Zero is an ordinary length; a negative one has no meaning.
+    fn array_length(&mut self, expr: &ast::Expr) -> Option<i32> {
+        self.check_const_expr(expr)?;
+        match self.eval_const(expr) {
+            Ok(ConstValue::Int(len)) if len >= 0 => Some(len),
+            Ok(ConstValue::Int(len)) => {
                 self.diags.push(Diagnostic::new(
-                    designator.pos,
-                    format!("'{}' is not a type", designator.name()),
+                    expr.pos(),
+                    format!("array length must not be negative, found {len}"),
+                ));
+                None
+            }
+            Ok(other) => {
+                self.diags.push(Diagnostic::new(
+                    expr.pos(),
+                    format!("array length must be INTEGER, found {}", other.ty()),
                 ));
                 None
             }
@@ -2495,8 +3064,42 @@ impl Analyzer {
         }
     }
 
+    // One ARRAY constructor, and therefore one new type identity. The size is
+    // computed and checked here so nothing downstream has to wonder whether an
+    // array's bytes fit in the arithmetic it uses.
+    fn new_array(&mut self, len: i32, elem: Type, pos: Pos) -> Option<Type> {
+        let size = i64::from(len)
+            .checked_mul(elem.size())
+            .filter(|size| *size <= ir::MAX_OBJECT_SIZE);
+        let Some(size) = size else {
+            self.diags.push(Diagnostic::new(
+                pos,
+                "array type exceeds target object-size limit",
+            ));
+            return None;
+        };
+        Some(Type::Array(Rc::new(ArrayType { len, elem, size })))
+    }
+
+    // A designator that names an object directly, with no selectors left over.
+    // Every context that wants a name rather than a variable goes through
+    // here: a type, a procedure to call, a constant.
     fn resolve(&self, designator: &ast::Designator) -> Result<Symbol, Diagnostic> {
-        let (scope_index, mut symbol) = self
+        let (symbol, rest) = self.qualident(designator)?;
+        match rest.first() {
+            None => Ok(symbol),
+            Some(selector) => Err(selector_error(designator, selector)),
+        }
+    }
+
+    // qualident = [ident "."] ident, plus the selectors that still have to be
+    // applied to what it names. The two are separated because only a variable
+    // can carry selectors, and applying an index selector emits code.
+    fn qualident<'a>(
+        &self,
+        designator: &'a ast::Designator,
+    ) -> Result<(Symbol, &'a [ast::Selector]), Diagnostic> {
+        let (scope_index, symbol) = self
             .scopes
             .iter()
             .enumerate()
@@ -2538,31 +3141,24 @@ impl Analyzer {
                 ),
             ));
         }
-        for selector in &designator.selectors {
-            match (symbol, selector) {
-                (Symbol::Module(members), ast::Selector::Field(name, pos)) => {
-                    symbol = members.get(name).cloned().ok_or_else(|| {
-                        Diagnostic::new(
-                            *pos,
-                            format!(
-                                "'{}' is not declared in module '{}'",
-                                name, designator.ident
-                            ),
-                        )
-                    })?;
-                }
-                (_, ast::Selector::Field(name, pos)) => {
-                    return Err(Diagnostic::new(
-                        *pos,
-                        format!(
-                            "cannot select '{name}' from '{}': record field selection is not yet supported",
-                            designator.ident
-                        ),
-                    ));
-                }
-            }
+        // Report 11: the qualifier of an imported object is not a selector on
+        // a value, so it is consumed here and only here. Everything after it
+        // belongs to the object it named.
+        if let Symbol::Module(members) = &symbol
+            && let Some(ast::Selector::Field(name, pos)) = designator.selectors.first()
+        {
+            let member = members.get(name).cloned().ok_or_else(|| {
+                Diagnostic::new(
+                    *pos,
+                    format!(
+                        "'{}' is not declared in module '{}'",
+                        name, designator.ident
+                    ),
+                )
+            })?;
+            return Ok((member, &designator.selectors[1..]));
         }
-        Ok(symbol)
+        Ok((symbol, &designator.selectors))
     }
 
     // Report 4 forbids duplicate declarations only within one scope. The
@@ -2611,13 +3207,9 @@ impl Analyzer {
         ir::Value::Temp(dst)
     }
 
-    fn load(&mut self, addr: ir::Addr, ty: Type) -> ir::Value {
+    fn load(&mut self, addr: ir::Addr, ty: ir::Ty) -> ir::Value {
         let dst = self.temp();
-        self.emit(ir::Inst::Load {
-            dst,
-            ty: ty.ir(),
-            addr,
-        });
+        self.emit(ir::Inst::Load { dst, ty, addr });
         ir::Value::Temp(dst)
     }
 
@@ -2650,6 +3242,8 @@ impl Analyzer {
 
 struct ProcBuilder {
     proc: ir::Proc,
+    // The aligned bytes this procedure's parameters and locals have reserved.
+    frame: i64,
     next_temp: usize,
     next_label: usize,
 }
@@ -2660,10 +3254,11 @@ impl ProcBuilder {
             proc: ir::Proc {
                 symbol,
                 params: Vec::new(),
-                ret: ret.map(Type::ir),
+                ret: ret.as_ref().map(Type::ir),
                 slots: Vec::new(),
                 insts: Vec::new(),
             },
+            frame: 0,
             next_temp: 0,
             next_label: 0,
         }
@@ -2919,16 +3514,16 @@ fn check_binary_types(
 // Report 10.2 gives ABS one INTEGER form and one REAL form, and its result is
 // whichever type it was given. Nothing else here is generic in its result, so
 // the two cases are named directly instead of through a signature framework.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum BuiltinResult {
     Fixed(Type),
     Argument,
 }
 
 impl BuiltinResult {
-    fn ty(self, first_arg: Type) -> Type {
+    fn ty(&self, first_arg: Type) -> Type {
         match self {
-            BuiltinResult::Fixed(ty) => ty,
+            BuiltinResult::Fixed(ty) => ty.clone(),
             BuiltinResult::Argument => first_arg,
         }
     }
@@ -2951,7 +3546,11 @@ fn builtin_signature(builtin: Builtin) -> Option<(&'static [&'static [Type]], Bu
             Some((&[&[Type::Integer], &[Type::Integer]], Fixed(Type::Integer)))
         }
         Builtin::Ord => Some((&[&[Type::Boolean, Type::Set]], Fixed(Type::Integer))),
-        Builtin::Inc
+        // LEN takes a designator rather than a value, so it has no entry in
+        // the value signature table either; lower_len and check_const_len
+        // handle it.
+        Builtin::Len
+        | Builtin::Inc
         | Builtin::Dec
         | Builtin::Incl
         | Builtin::Excl
@@ -2967,6 +3566,56 @@ fn type_list(types: &[Type]) -> String {
         .map(Type::to_string)
         .collect::<Vec<_>>()
         .join(" or ")
+}
+
+// A selector on something that cannot carry one. Reaching this means the
+// context wanted a name — a type, a procedure, a constant — so the message
+// says the selector is out of place rather than guessing at the intent.
+fn selector_error(designator: &ast::Designator, selector: &ast::Selector) -> Diagnostic {
+    match selector {
+        ast::Selector::Field(name, pos) => Diagnostic::new(
+            *pos,
+            format!(
+                "cannot select '{name}' from '{}': record field selection is not yet supported",
+                designator.ident
+            ),
+        ),
+        ast::Selector::Index(_, pos) => Diagnostic::new(
+            *pos,
+            format!("'{}' cannot be indexed here", designator.ident),
+        ),
+    }
+}
+
+// Report 9.1 requires the same type on both sides. Two array types can print
+// the same shape and still be different types, so when the shapes agree the
+// message has to say what the difference is.
+fn assign_error(pos: Pos, target: &Type, found: &Type) -> Diagnostic {
+    let mut msg = format!("cannot assign {found} to {target}");
+    if found.to_string() == target.to_string() {
+        msg.push_str(
+            ": these are different array types, and each ARRAY in the source declares its own",
+        );
+    }
+    Diagnostic::new(pos, msg)
+}
+
+fn index_range_error(pos: Pos, index: i32, len: i32) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!("index {index} is out of bounds: the array has length {len}"),
+    )
+}
+
+// One object's contribution to a running frame or static-storage total, padded
+// to its own alignment first. None means the total would leave what the target
+// can address, which is a source error rather than something to discover in
+// QBE or the linker.
+fn reserve(total: i64, ty: &Type) -> Option<i64> {
+    let align = ty.align();
+    let start = total.checked_add(align - 1)? / align * align;
+    let end = start.checked_add(ty.size())?;
+    (end <= ir::MAX_OBJECT_SIZE).then_some(end)
 }
 
 fn shift_range_error(pos: Pos, count: i32) -> Diagnostic {
@@ -2997,7 +3646,7 @@ fn label_text(low: i32, high: i32) -> String {
     }
 }
 
-fn unary_type_error(pos: Pos, op: ast::UnOp, found: Type) -> Diagnostic {
+fn unary_type_error(pos: Pos, op: ast::UnOp, found: &Type) -> Diagnostic {
     let (name, expected) = match op {
         ast::UnOp::Plus => ("+", "INTEGER or REAL"),
         ast::UnOp::Neg => ("-", "INTEGER, REAL, or SET"),

@@ -1,0 +1,2 @@
+tests/errors/modules/array-private-type/ArrayPrivateType.Mod:6:26: 'Hidden' is not declared in module 'ArrayHidden'
+Error: 1 error(s)

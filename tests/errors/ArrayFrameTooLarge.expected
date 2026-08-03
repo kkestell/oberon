@@ -1,0 +1,2 @@
+tests/errors/ArrayFrameTooLarge.Mod:7:24: procedure storage exceeds target object-size limit
+Error: 1 error(s)

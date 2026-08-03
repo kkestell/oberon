@@ -1,0 +1,5 @@
+tests/errors/ArrayLenBad.Mod:5:8: wrong number of arguments: expected 1, found 2
+tests/errors/ArrayLenBad.Mod:6:12: argument 1 has type INTEGER, expected an array
+tests/errors/ArrayLenBad.Mod:7:12: argument 1 must be an array variable
+tests/errors/ArrayLenBad.Mod:8:14: argument 1 must be an array variable
+Error: 4 error(s)

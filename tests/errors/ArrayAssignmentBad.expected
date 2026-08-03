@@ -1,0 +1,7 @@
+tests/errors/ArrayAssignmentBad.Mod:14:10: cannot assign ARRAY 3 OF INTEGER to ARRAY 3 OF INTEGER: these are different array types, and each ARRAY in the source declares its own
+tests/errors/ArrayAssignmentBad.Mod:15:11: cannot assign ARRAY 2 OF ARRAY 3 OF INTEGER to ARRAY 2 OF ARRAY 3 OF INTEGER: these are different array types, and each ARRAY in the source declares its own
+tests/errors/ArrayAssignmentBad.Mod:16:10: cannot assign ARRAY 2 OF INTEGER to ARRAY 3 OF INTEGER
+tests/errors/ArrayAssignmentBad.Mod:17:10: cannot assign ARRAY 3 OF REAL to ARRAY 3 OF INTEGER
+tests/errors/ArrayAssignmentBad.Mod:18:10: cannot assign INTEGER to ARRAY 3 OF INTEGER
+tests/errors/ArrayAssignmentBad.Mod:19:8: cannot assign ARRAY 3 OF INTEGER to INTEGER
+Error: 6 error(s)

@@ -85,7 +85,7 @@ impl Parser {
             Vec::new()
         };
 
-        let (consts, vars) = self.const_var_declarations()?;
+        let (consts, types, vars) = self.declarations()?;
         let mut procs = Vec::new();
         while *self.peek() == Tok::Procedure {
             procs.push(self.proc_declaration()?);
@@ -113,6 +113,7 @@ impl Parser {
             pos,
             imports,
             consts,
+            types,
             vars,
             procs,
             body,
@@ -162,6 +163,18 @@ impl Parser {
         Ok(ConstDecl { id, expr })
     }
 
+    // TypeDeclaration = identdef "=" StrucType. The right side is the general
+    // `type` production rather than StrucType alone, so `Alias = Row;` parses:
+    // the Report's own examples declare aliases, and all three reference
+    // compilers accept a qualident here.
+    fn type_decl(&mut self) -> PResult<TypeDecl> {
+        let id = self.identdef("type name")?;
+        self.expect(Tok::Eq, "'='")?;
+        let ty = self.source_type()?;
+        self.expect(Tok::Semi, "';'")?;
+        Ok(TypeDecl { id, ty })
+    }
+
     fn var_decl(&mut self) -> PResult<VarDecl> {
         let mut names = vec![self.identdef("variable name")?];
         while *self.peek() == Tok::Comma {
@@ -169,36 +182,79 @@ impl Parser {
             names.push(self.identdef("variable name")?);
         }
         self.expect(Tok::Colon, "':'")?;
-        let ty = self.designator()?; // TODO: structured types
+        let ty = self.source_type()?;
         self.expect(Tok::Semi, "';'")?;
         Ok(VarDecl { names, ty })
     }
 
-    // DeclarationSequence allows at most one CONST and one VAR section, in
-    // that order. This accepts them repeated and interleaved; sema diagnoses
-    // any redeclarations introduced by that leniency.
-    fn const_var_declarations(&mut self) -> PResult<(Vec<ConstDecl>, Vec<VarDecl>)> {
+    // type = qualident | StrucType
+    fn source_type(&mut self) -> PResult<TypeExpr> {
+        match self.peek() {
+            Tok::Array => self.array_type(),
+            Tok::Record => self.unsupported("RECORD types"),
+            Tok::Pointer => self.unsupported("POINTER types"),
+            Tok::Procedure => self.unsupported("PROCEDURE types"),
+            _ => Ok(TypeExpr::Named(self.qualident("type name")?)),
+        }
+    }
+
+    // ArrayType = ARRAY length {"," length} OF type
+    fn array_type(&mut self) -> PResult<TypeExpr> {
+        let pos = self.pos();
+        self.expect(Tok::Array, "'ARRAY'")?;
+        let mut lengths = vec![self.expression()?];
+        while *self.peek() == Tok::Comma {
+            self.advance();
+            lengths.push(self.expression()?);
+        }
+        self.expect(Tok::Of, "'OF'")?;
+        let elem = Box::new(self.source_type()?);
+        Ok(TypeExpr::Array { lengths, elem, pos })
+    }
+
+    // qualident = [ident "."] ident. A type name takes no further selectors,
+    // so this is deliberately not `designator`.
+    fn qualident(&mut self, what: &str) -> PResult<Designator> {
+        let (ident, pos) = self.expect_ident(what)?;
+        let mut selectors = Vec::new();
+        if *self.peek() == Tok::Dot {
+            self.advance();
+            let (name, fpos) = self.expect_ident(what)?;
+            selectors.push(Selector::Field(name, fpos));
+        }
+        Ok(Designator {
+            ident,
+            selectors,
+            pos,
+        })
+    }
+
+    // DeclarationSequence allows at most one CONST, one TYPE, and one VAR
+    // section, in that order. Parsing them in three phases makes a repeated or
+    // out-of-order keyword remain for the enclosing production to diagnose.
+    fn declarations(&mut self) -> PResult<(Vec<ConstDecl>, Vec<TypeDecl>, Vec<VarDecl>)> {
         let mut consts = Vec::new();
+        let mut types = Vec::new();
         let mut vars = Vec::new();
-        loop {
-            match self.peek() {
-                Tok::Const => {
-                    self.advance();
-                    while matches!(self.peek(), Tok::Ident(_)) {
-                        consts.push(self.const_decl()?);
-                    }
-                }
-                Tok::Var => {
-                    self.advance();
-                    while matches!(self.peek(), Tok::Ident(_)) {
-                        vars.push(self.var_decl()?);
-                    }
-                }
-                Tok::Type => return self.unsupported("TYPE declarations"),
-                _ => break,
+        if *self.peek() == Tok::Const {
+            self.advance();
+            while matches!(self.peek(), Tok::Ident(_)) {
+                consts.push(self.const_decl()?);
             }
         }
-        Ok((consts, vars))
+        if *self.peek() == Tok::Type {
+            self.advance();
+            while matches!(self.peek(), Tok::Ident(_)) {
+                types.push(self.type_decl()?);
+            }
+        }
+        if *self.peek() == Tok::Var {
+            self.advance();
+            while matches!(self.peek(), Tok::Ident(_)) {
+                vars.push(self.var_decl()?);
+            }
+        }
+        Ok((consts, types, vars))
     }
 
     fn proc_declaration(&mut self) -> PResult<ProcDecl> {
@@ -211,13 +267,13 @@ impl Parser {
         };
         let ret = if *self.peek() == Tok::Colon {
             self.advance();
-            Some(self.designator()?)
+            Some(TypeExpr::Named(self.qualident("result type name")?))
         } else {
             None
         };
         self.expect(Tok::Semi, "';'")?;
 
-        let (consts, vars) = self.const_var_declarations()?;
+        let (consts, types, vars) = self.declarations()?;
         let mut procs = Vec::new();
         while *self.peek() == Tok::Procedure {
             procs.push(self.proc_declaration()?);
@@ -251,6 +307,7 @@ impl Parser {
             params,
             ret,
             consts,
+            types,
             vars,
             procs,
             body,
@@ -276,10 +333,13 @@ impl Parser {
                     names.push(self.expect_ident("parameter name")?);
                 }
                 self.expect(Tok::Colon, "':'")?;
+                // FormalType = {ARRAY OF} qualident. The open-array prefix is
+                // the one form of it that is still unsupported; a fixed array
+                // formal is written as a qualident and sema rejects it.
                 if *self.peek() == Tok::Array {
                     return self.unsupported("ARRAY OF formal types");
                 }
-                let ty = self.designator()?;
+                let ty = TypeExpr::Named(self.qualident("parameter type name")?);
                 sections.push(FpSection { var, names, ty });
                 if *self.peek() != Tok::Semi {
                     break;
@@ -496,6 +556,7 @@ impl Parser {
         Ok(args)
     }
 
+    // designator = qualident {selector}
     fn designator(&mut self) -> PResult<Designator> {
         let (ident, pos) = self.expect_ident("identifier")?;
         let mut selectors = Vec::new();
@@ -506,9 +567,21 @@ impl Parser {
                     let (name, fpos) = self.expect_ident("field name")?;
                     selectors.push(Selector::Field(name, fpos));
                 }
-                Tok::LBrack | Tok::Caret => {
-                    return self.unsupported("index and dereference selectors");
+                // selector = "[" ExpList "]". The list stays one selector:
+                // Report 8.1 makes a[i, j] mean a[i][j], and that expansion
+                // belongs to sema along with the types it needs.
+                Tok::LBrack => {
+                    let bracket = self.pos();
+                    self.advance();
+                    let mut exprs = vec![self.expression()?];
+                    while *self.peek() == Tok::Comma {
+                        self.advance();
+                        exprs.push(self.expression()?);
+                    }
+                    self.expect(Tok::RBrack, "']'")?;
+                    selectors.push(Selector::Index(exprs, bracket));
                 }
+                Tok::Caret => return self.unsupported("dereference selectors"),
                 _ => break,
             }
         }
@@ -698,5 +771,167 @@ impl Parser {
         }
         self.expect(Tok::RBrace, "'}'")?;
         Ok(Expr::Set { elements, pos })
+    }
+}
+
+// The type and selector grammar is where this slice adds syntax, so these
+// tests check the shape the parser builds rather than going through a whole
+// compilation. Everything else stays end to end in tests/corpus.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer;
+
+    fn module(body: &str) -> Module {
+        let mut diags = Vec::new();
+        let toks = lexer::lex(&format!("MODULE M;\n{body}\nEND M.\n"), &mut diags);
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        parse(toks).expect("module parses")
+    }
+
+    fn error(body: &str) -> String {
+        let mut diags = Vec::new();
+        let toks = lexer::lex(&format!("MODULE M;\n{body}\nEND M.\n"), &mut diags);
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        parse(toks).expect_err("module does not parse").msg
+    }
+
+    // The shape of a source type, flattened so a test can state it in one
+    // line: "ARRAY 2, 3 OF INTEGER" prints its lengths as written.
+    fn shape(ty: &TypeExpr) -> String {
+        match ty {
+            TypeExpr::Named(d) => d.name(),
+            TypeExpr::Array { lengths, elem, .. } => {
+                let lengths: Vec<String> = lengths
+                    .iter()
+                    .map(|length| match length {
+                        Expr::Int { value, .. } => value.to_string(),
+                        Expr::Name(d) => d.name(),
+                        _ => "?".into(),
+                    })
+                    .collect();
+                format!("ARRAY {} OF {}", lengths.join(", "), shape(elem))
+            }
+        }
+    }
+
+    #[test]
+    fn exported_type_alias_and_arrays() {
+        let m = module("TYPE Row* = ARRAY 8 OF INTEGER; Alias = Row; Grid = ARRAY 2 OF Row;");
+        let shapes: Vec<_> = m
+            .types
+            .iter()
+            .map(|t| (t.id.name.as_str(), t.id.export, shape(&t.ty)))
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                ("Row", true, "ARRAY 8 OF INTEGER".to_string()),
+                ("Alias", false, "Row".to_string()),
+                ("Grid", false, "ARRAY 2 OF Row".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_and_nested_array_variables() {
+        let m = module("VAR a: ARRAY 4 OF INTEGER; b: ARRAY 2 OF ARRAY 3 OF REAL;");
+        let shapes: Vec<_> = m.vars.iter().map(|v| shape(&v.ty)).collect();
+        assert_eq!(
+            shapes,
+            vec![
+                "ARRAY 4 OF INTEGER".to_string(),
+                "ARRAY 2 OF ARRAY 3 OF REAL".to_string(),
+            ]
+        );
+    }
+
+    // Report 6.2: the comma list stays one constructor here. Sema is what
+    // turns it into nested arrays, so the parser must not flatten it away.
+    #[test]
+    fn comma_dimensions_stay_one_constructor() {
+        let m = module("VAR g: ARRAY 2, 3, N OF INTEGER;");
+        assert_eq!(shape(&m.vars[0].ty), "ARRAY 2, 3, N OF INTEGER");
+    }
+
+    #[test]
+    fn repeated_bracket_selectors() {
+        let m = module("VAR x: INTEGER;\nBEGIN x := g[1][i, j].f[0]");
+        let Stmt::Assign { rhs, .. } = &m.body[0] else {
+            panic!("expected an assignment");
+        };
+        let Expr::Name(d) = rhs else {
+            panic!("expected a designator");
+        };
+        assert_eq!(d.name(), "g[...][...].f[...]");
+        let counts: Vec<usize> = d
+            .selectors
+            .iter()
+            .filter_map(|s| match s {
+                Selector::Index(exprs, _) => Some(exprs.len()),
+                Selector::Field(..) => None,
+            })
+            .collect();
+        assert_eq!(counts, vec![1, 2, 1]);
+    }
+
+    #[test]
+    fn malformed_length() {
+        assert_eq!(
+            error("VAR a: ARRAY OF INTEGER;"),
+            "expected expression, found Of"
+        );
+    }
+
+    #[test]
+    fn empty_index_list() {
+        assert_eq!(
+            error("VAR x: INTEGER;\nBEGIN x := a[]"),
+            "expected expression, found RBrack"
+        );
+    }
+
+    #[test]
+    fn missing_of() {
+        assert_eq!(
+            error("VAR a: ARRAY 4 INTEGER;"),
+            "expected 'OF', found Ident(\"INTEGER\")"
+        );
+    }
+
+    #[test]
+    fn missing_closing_bracket() {
+        assert_eq!(
+            error("VAR x: INTEGER;\nBEGIN x := a[1"),
+            "expected ']', found End"
+        );
+    }
+
+    #[test]
+    fn declaration_sections_must_be_ordered() {
+        assert_eq!(
+            error("VAR a: INTEGER; TYPE T = ARRAY 1 OF INTEGER;"),
+            "expected 'END', found Type"
+        );
+    }
+
+    #[test]
+    fn structured_types_still_unsupported() {
+        assert_eq!(
+            error("TYPE R = RECORD END;"),
+            "not yet supported: RECORD types"
+        );
+        assert_eq!(
+            error("TYPE P = POINTER TO R;"),
+            "not yet supported: POINTER types"
+        );
+        assert_eq!(
+            error("TYPE P = PROCEDURE (n: INTEGER);"),
+            "not yet supported: PROCEDURE types"
+        );
+        assert_eq!(
+            error("PROCEDURE P(a: ARRAY OF INTEGER); END P;"),
+            "not yet supported: ARRAY OF formal types"
+        );
     }
 }

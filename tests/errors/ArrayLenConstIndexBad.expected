@@ -1,0 +1,3 @@
+tests/errors/ArrayLenConstIndexBad.Mod:6:27: operator '+' requires two INTEGER, two REAL, or two SET operands, found INTEGER and BOOLEAN
+tests/errors/ArrayLenConstIndexBad.Mod:7:25: array index must be INTEGER, found BOOLEAN
+Error: 2 error(s)

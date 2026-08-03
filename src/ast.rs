@@ -6,6 +6,7 @@ pub struct Module {
     pub pos: Pos,
     pub imports: Vec<Import>,
     pub consts: Vec<ConstDecl>,
+    pub types: Vec<TypeDecl>,
     pub vars: Vec<VarDecl>,
     pub procs: Vec<ProcDecl>,
     pub body: Vec<Stmt>,
@@ -38,28 +39,62 @@ pub struct ConstDecl {
 }
 
 #[derive(Debug, Clone)]
+pub struct TypeDecl {
+    pub id: IdentDef,
+    pub ty: TypeExpr,
+}
+
+#[derive(Debug, Clone)]
 pub struct VarDecl {
     pub names: Vec<IdentDef>,
-    pub ty: Designator, // TODO: enum when StrucType lands
+    pub ty: TypeExpr,
+}
+
+// type = qualident | StrucType. The parser produces Named for a qualident and
+// Array for the one StrucType this compiler has; RECORD, POINTER, and
+// PROCEDURE types are rejected in the parser and arrive with their slices.
+#[derive(Debug, Clone)]
+pub enum TypeExpr {
+    Named(Designator),
+    // ArrayType = ARRAY length {"," length} OF type. The comma list is kept as
+    // written: Report 6.2 defines it as nested arrays, and sema expands it.
+    Array {
+        lengths: Vec<Expr>,
+        elem: Box<TypeExpr>,
+        pos: Pos,
+    },
+}
+
+impl TypeExpr {
+    pub fn pos(&self) -> Pos {
+        match self {
+            TypeExpr::Named(d) => d.pos,
+            TypeExpr::Array { pos, .. } => *pos,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ProcDecl {
     pub id: IdentDef,
     pub params: Vec<FpSection>,
-    pub ret: Option<Designator>,
+    pub ret: Option<TypeExpr>,
     pub consts: Vec<ConstDecl>,
+    pub types: Vec<TypeDecl>,
     pub vars: Vec<VarDecl>,
     pub procs: Vec<ProcDecl>,
     pub body: Vec<Stmt>,
     pub ret_val: Option<Expr>,
 }
 
+// FormalType = {ARRAY OF} qualident, so a formal is always Named until open
+// arrays arrive. It is a TypeExpr anyway so sema resolves every source type
+// through one path and can reject a formal that turns out to be an array.
 #[derive(Debug, Clone)]
 pub struct FpSection {
     pub var: bool,
     pub names: Vec<(String, Pos)>,
-    pub ty: Designator,
+    pub ty: TypeExpr,
 }
 
 // `Out.Int` parses as base "Out" + Field("Int"): the parser cannot tell module
@@ -73,11 +108,16 @@ pub struct Designator {
 
 #[derive(Debug, Clone)]
 pub enum Selector {
-    Field(String, Pos), // TODO: Index, Deref, TypeGuard
+    Field(String, Pos), // TODO: Deref, TypeGuard
+    // selector = "[" ExpList "]". One source selector holds the whole comma
+    // list, which Report 8.1 defines as one index selector per expression.
+    Index(Vec<Expr>, Pos),
 }
 
 impl Designator {
-    // For diagnostics: "Out.Int", not just the base "Out".
+    // For diagnostics: "Out.Int", not just the base "Out". An index selector
+    // prints as "[...]": the message names the designator, and printing the
+    // index expressions back out would need a whole expression printer.
     pub fn name(&self) -> String {
         let mut s = self.ident.clone();
         for sel in &self.selectors {
@@ -86,6 +126,7 @@ impl Designator {
                     s.push('.');
                     s.push_str(f);
                 }
+                Selector::Index(..) => s.push_str("[...]"),
             }
         }
         s
