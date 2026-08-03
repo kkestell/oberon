@@ -9,7 +9,20 @@ pub struct Program {
 pub struct Module {
     pub name: String,
     pub globals: Vec<Global>,
+    // The string literals whose bytes have to exist at run time: one data
+    // object each, numbered within the module and never shared between two
+    // occurrences of the same text.
+    pub literals: Vec<Literal>,
     pub procs: Vec<Proc>,
+}
+
+// The characters of one string literal. The emitted data object appends the
+// null terminator, so `bytes` is exactly what the source wrote and the object
+// is one byte longer.
+#[derive(Debug)]
+pub struct Literal {
+    pub symbol: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -68,6 +81,7 @@ impl Storage {
 pub fn scalar_size(ty: Ty) -> i64 {
     match ty {
         Ty::Int | Ty::Bool | Ty::Set | Ty::Real => 4,
+        Ty::Byte => 1,
     }
 }
 
@@ -83,15 +97,20 @@ pub enum ParamPass {
     Ref,
 }
 
-// Every type is four bytes wide. Int, Bool, and Set travel in a QBE word;
-// Real is IEEE 754 binary32 and travels in a QBE single, which is a distinct
-// calling class and a distinct set of arithmetic and comparison operations.
+// Int, Bool, and Set are four bytes and travel in a QBE word; Real is IEEE
+// 754 binary32 and travels in a QBE single, which is a distinct calling class
+// and a distinct set of arithmetic and comparison operations. Byte is one
+// unsigned byte in storage — CHAR and BYTE share it, because they differ only
+// in source rules — and still travels in a word: it loads zero-extended, so a
+// register value is always 0 through 255 and the signed word comparisons give
+// the correct unsigned ordering.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ty {
     Int,
     Bool,
     Set,
     Real,
+    Byte,
 }
 
 // A SET is a bit vector, so its immediate is unsigned: bit 31 is an ordinary
@@ -102,6 +121,7 @@ pub enum Value {
     Bool(bool),
     Set(u32),
     Real(f32),
+    Byte(u8),
     Temp(usize),
 }
 

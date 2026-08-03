@@ -1,4 +1,4 @@
-tests/errors/CaseBad.Mod:8:8: CASE expression must be INTEGER, found BOOLEAN
+tests/errors/CaseBad.Mod:8:8: CASE expression must be INTEGER or CHAR, found BOOLEAN
 tests/errors/CaseBad.Mod:9:13: 'v' is not a constant
 tests/errors/CaseBad.Mod:10:13: case label must be INTEGER, found BOOLEAN
 tests/errors/CaseBad.Mod:11:13: case label range 5..1 is reversed

@@ -20,7 +20,18 @@ pub fn emit(program: &ir::Program) -> String {
             )
             .unwrap();
         }
-        if !module.globals.is_empty() {
+        for literal in &module.literals {
+            // Every byte is a decimal item, so no escaping rule is needed and
+            // every value including zero is emitted the same way. The
+            // terminator the Report appends on assignment is part of the data
+            // object, so one literal serves both the copy and the comparison.
+            write!(out, "data ${} = align 1 {{ b", literal.symbol).unwrap();
+            for byte in &literal.bytes {
+                write!(out, " {byte}").unwrap();
+            }
+            writeln!(out, " 0 }}").unwrap();
+        }
+        if !module.globals.is_empty() || !module.literals.is_empty() {
             writeln!(out).unwrap();
         }
 
@@ -63,7 +74,15 @@ fn emit_proc(out: &mut String, proc: &ir::Proc) {
     writeln!(out, ") {{").unwrap();
     writeln!(out, "@start").unwrap();
     for (slot, ty) in &proc.slots {
-        writeln!(out, "\t%{slot} =l {} {}", alloc(ty.align()), ty.size()).unwrap();
+        // alloc4 is QBE's smallest allocation, so a byte-aligned slot is
+        // over-aligned, which is harmless.
+        writeln!(
+            out,
+            "\t%{slot} =l {} {}",
+            alloc(ty.align().max(4)),
+            ty.size()
+        )
+        .unwrap();
     }
 
     let mut terminated = false;
@@ -92,23 +111,16 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
         ir::Inst::Load { dst, ty, addr } => {
             writeln!(
                 out,
-                "\t{} ={} load{} {}",
+                "\t{} ={} {} {}",
                 temp(*dst),
                 class(*ty),
-                class(*ty),
+                load_op(*ty),
                 address(addr)
             )
             .unwrap();
         }
         ir::Inst::Store { ty, val, addr } => {
-            writeln!(
-                out,
-                "\tstore{} {}, {}",
-                class(*ty),
-                value(val),
-                address(addr)
-            )
-            .unwrap();
+            writeln!(out, "\t{} {}, {}", store_op(*ty), value(val), address(addr)).unwrap();
         }
         ir::Inst::Copy { dst, ty, src } => {
             writeln!(out, "\t{} ={} copy {}", temp(*dst), class(*ty), value(src)).unwrap();
@@ -208,19 +220,37 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
 }
 
 // QBE passes an `s` in the platform's floating-point class and a `w` in its
-// integer class, which is the native C float and int32_t ABI. Nothing here
-// needs a compiler-specific calling convention.
+// integer class, which is the native C float and int32_t ABI. A byte is a
+// word in every calling position; only its memory traffic is byte-wide.
 fn class(ty: ir::Ty) -> &'static str {
     match ty {
-        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "w",
+        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set | ir::Ty::Byte => "w",
         ir::Ty::Real => "s",
     }
 }
 
+// The memory mnemonics come from the type, not from its register class: a
+// byte loads zero-extended into a word and stores its low byte back.
+fn load_op(ty: ir::Ty) -> &'static str {
+    match ty {
+        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "loadw",
+        ir::Ty::Real => "loads",
+        ir::Ty::Byte => "loadub",
+    }
+}
+
+fn store_op(ty: ir::Ty) -> &'static str {
+    match ty {
+        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "storew",
+        ir::Ty::Real => "stores",
+        ir::Ty::Byte => "storeb",
+    }
+}
+
 // QBE names the alignment in the instruction rather than taking it as an
-// operand. Every type this compiler has is four-byte aligned; the other two
-// forms are here so the day a record or a CHAR array changes that, the slot is
-// wrong loudly rather than quietly.
+// operand, and alloc4 is its smallest form; the caller rounds a smaller
+// alignment up. The other two forms are here so the day a record changes
+// that, the slot is wrong loudly rather than quietly.
 fn alloc(align: i64) -> &'static str {
     match align {
         4 => "alloc4",
@@ -247,6 +277,7 @@ fn value(value: &ir::Value) -> String {
         // constant arithmetic can produce, none of which a decimal spelling
         // states directly.
         ir::Value::Real(v) => (v.to_bits() as i32).to_string(),
+        ir::Value::Byte(v) => v.to_string(),
         ir::Value::Temp(id) => temp(*id),
     }
 }

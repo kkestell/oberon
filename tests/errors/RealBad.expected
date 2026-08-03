@@ -8,8 +8,8 @@ tests/errors/RealBad.Mod:24:10: operator 'MOD' requires INTEGER and INTEGER, fou
 tests/errors/RealBad.Mod:25:10: operator '&' requires BOOLEAN and BOOLEAN, found REAL and REAL
 tests/errors/RealBad.Mod:26:10: operator 'OR' requires BOOLEAN and BOOLEAN, found REAL and REAL
 tests/errors/RealBad.Mod:27:8: operator '~' requires BOOLEAN, found REAL
-tests/errors/RealBad.Mod:28:10: operator '<' requires two INTEGER or two REAL operands, found REAL and INTEGER
-tests/errors/RealBad.Mod:29:10: operator '>=' requires two INTEGER or two REAL operands, found INTEGER and REAL
+tests/errors/RealBad.Mod:28:10: operator '<' requires two INTEGER, two REAL, or two CHAR operands, found REAL and INTEGER
+tests/errors/RealBad.Mod:29:10: operator '>=' requires two INTEGER, two REAL, or two CHAR operands, found INTEGER and REAL
 tests/errors/RealBad.Mod:30:10: operator '=' requires operands of the same type, found REAL and INTEGER
 tests/errors/RealBad.Mod:31:10: operator '+' requires two INTEGER, two REAL, or two SET operands, found REAL and SET
 tests/errors/RealBad.Mod:32:10: operator '-' requires two INTEGER, two REAL, or two SET operands, found SET and REAL

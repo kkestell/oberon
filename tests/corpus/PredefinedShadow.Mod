@@ -17,6 +17,7 @@ MODULE PredefinedShadow;
       FLOOR: INTEGER;
       PACK: INTEGER;
       LEN: INTEGER;
+      CHR: INTEGER;
 
   PROCEDURE ASSERT(n: INTEGER): INTEGER;
   BEGIN
@@ -42,6 +43,6 @@ BEGIN
   REAL := 12; FLOOR := 13; PACK := 14;
   Out.Int(REAL, 4); Out.Int(FLOOR, 4); Out.Int(PACK, 4); Out.Int(FLT, 4);
   Out.Int(UNPK(8), 4); Out.Ln;
-  LEN := 15;
-  Out.Int(LEN, 4); Out.Ln
+  LEN := 15; CHR := 16;
+  Out.Int(LEN, 4); Out.Int(CHR, 4); Out.Ln
 END PredefinedShadow.

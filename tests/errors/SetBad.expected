@@ -1,8 +1,8 @@
 tests/errors/SetBad.Mod:7:10: operator '+' requires two INTEGER, two REAL, or two SET operands, found SET and INTEGER
 tests/errors/SetBad.Mod:8:10: operator '*' requires two INTEGER, two REAL, or two SET operands, found INTEGER and SET
 tests/errors/SetBad.Mod:9:10: operator '/' requires two REAL or two SET operands, found INTEGER and INTEGER
-tests/errors/SetBad.Mod:10:10: operator '<' requires two INTEGER or two REAL operands, found SET and SET
-tests/errors/SetBad.Mod:11:10: operator '>=' requires two INTEGER or two REAL operands, found SET and SET
+tests/errors/SetBad.Mod:10:10: operator '<' requires two INTEGER, two REAL, or two CHAR operands, found SET and SET
+tests/errors/SetBad.Mod:11:10: operator '>=' requires two INTEGER, two REAL, or two CHAR operands, found SET and SET
 tests/errors/SetBad.Mod:12:9: set element must be INTEGER, found BOOLEAN
 tests/errors/SetBad.Mod:13:9: set element must be INTEGER, found BOOLEAN
 tests/errors/SetBad.Mod:14:10: operator 'DIV' requires INTEGER and INTEGER, found SET and SET

@@ -1,0 +1,7 @@
+tests/errors/ByteBad.Mod:15:8: BYTE value 256 is out of range: must be between 0 and 255
+tests/errors/ByteBad.Mod:16:8: BYTE value -1 is out of range: must be between 0 and 255
+tests/errors/ByteBad.Mod:17:11: argument 1 has type INTEGER, expected BYTE
+tests/errors/ByteBad.Mod:18:10: argument 1 has type BYTE, expected INTEGER
+tests/errors/ByteBad.Mod:19:7: control variable 'b' must be INTEGER, found BYTE
+tests/errors/ByteBad.Mod:20:8: cannot assign INTEGER to REAL
+Error: 6 error(s)

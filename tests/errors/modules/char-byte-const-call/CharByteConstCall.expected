@@ -1,0 +1,4 @@
+tests/errors/modules/char-byte-const-call/CharByteConstCall.Mod:4:9: constant expression contains a procedure call
+tests/errors/modules/char-byte-const-call/CharByteConstCall.Mod:5:9: constant expression contains a procedure call
+tests/errors/modules/char-byte-const-call/CharByteConstCall.Mod:6:9: constant expression contains a procedure call
+Error: 3 error(s)

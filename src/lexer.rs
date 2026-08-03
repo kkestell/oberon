@@ -6,8 +6,13 @@ pub enum Tok {
     Ident(String),
     Int(i64),  // i64 so an oversized decimal literal lexes; sema range-checks to i32
     Real(f32), // REAL is IEEE 754 binary32, so the literal rounds once, here
-    Char(u8),  // the 41X form
-    Str(String),
+    // Report 3 gives strings two forms, and both are strings: a quoted literal
+    // is the bytes of its source text exactly as they appear in the file, and
+    // 41X is "a single-character string specified by the ordinal number of the
+    // character". The bytes are not decoded or validated, so a UTF-8 source
+    // character is one CHAR per byte, and the 0X form can carry the one byte a
+    // quoted literal cannot contain.
+    Str(Vec<u8>),
     // Keywords
     Array,
     Begin,
@@ -256,7 +261,7 @@ impl Lexer {
             Some('X') => {
                 self.bump();
                 match u32::from_str_radix(&s, 16) {
-                    Ok(v) if v <= 0xFF => Some(Tok::Char(v as u8)),
+                    Ok(v) if v <= 0xFF => Some(Tok::Str(vec![v as u8])),
                     _ => {
                         diags.push(Diagnostic::new(
                             pos,
@@ -355,7 +360,7 @@ impl Lexer {
             match self.peek() {
                 Some('"') => {
                     self.bump();
-                    return Some(Tok::Str(s));
+                    return Some(Tok::Str(s.into_bytes()));
                 }
                 Some('\n') | None => {
                     diags.push(Diagnostic::new(pos, "unterminated string"));
@@ -513,17 +518,43 @@ mod tests {
         );
     }
 
+    // Both source forms produce the one string token: 41X is a one-character
+    // string, 0X is a one-character string holding the null character, and a
+    // byte above 127 is an ordinary character with no meaning attached.
     #[test]
-    fn char_literal() {
+    fn ordinal_strings() {
         assert_eq!(
-            toks("41X 0X"),
-            vec![Tok::Char(0x41), Tok::Char(0), Tok::Eof]
+            toks("41X 0X 0FFX"),
+            vec![
+                Tok::Str(vec![0x41]),
+                Tok::Str(vec![0]),
+                Tok::Str(vec![0xFF]),
+                Tok::Eof
+            ]
         );
     }
 
     #[test]
     fn string_literal() {
-        assert_eq!(toks("\"hello\""), vec![Tok::Str("hello".into()), Tok::Eof]);
+        assert_eq!(
+            toks("\"hello\" \"\""),
+            vec![Tok::Str(b"hello".to_vec()), Tok::Str(Vec::new()), Tok::Eof]
+        );
+    }
+
+    // A quoted literal is the bytes of its source text, so a multi-byte UTF-8
+    // character is one CHAR per byte, not one CHAR per character.
+    #[test]
+    fn string_literal_keeps_source_bytes() {
+        assert_eq!(toks("\"é\""), vec![Tok::Str(vec![0xC3, 0xA9]), Tok::Eof]);
+    }
+
+    #[test]
+    fn ordinal_string_out_of_range_diagnoses() {
+        let mut diags = Vec::new();
+        lex("100X", &mut diags);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].msg, "character code '100X' out of range");
     }
 
     #[test]

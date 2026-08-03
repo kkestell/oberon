@@ -199,6 +199,14 @@ fn check_static_data(program: &ir::Program) -> Result<()> {
                 bail!("program static data exceeds target object-size limit");
             }
         }
+        // String literals are data too. Each is byte-aligned and one byte
+        // longer than its characters, for the terminator.
+        for literal in &module.literals {
+            total += literal.bytes.len() as i64 + 1;
+            if total > ir::MAX_OBJECT_SIZE {
+                bail!("program static data exceeds target object-size limit");
+            }
+        }
     }
     Ok(())
 }

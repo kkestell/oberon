@@ -1,0 +1,12 @@
+tests/errors/CharBad.Mod:4:12: operator '+' requires two INTEGER, two REAL, or two SET operands, found CHAR and CHAR
+tests/errors/CharBad.Mod:5:8: cannot assign CHAR to INTEGER
+tests/errors/CharBad.Mod:6:9: cannot assign INTEGER to CHAR
+tests/errors/CharBad.Mod:7:10: array index must be INTEGER, found CHAR
+tests/errors/CharBad.Mod:8:13: 'a' has type ARRAY 4 OF CHAR and cannot be used as a value
+tests/errors/CharBad.Mod:9:8: wrong number of arguments: expected 1, found 0
+tests/errors/CharBad.Mod:10:12: argument 1 has type INTEGER, expected CHAR or BOOLEAN or SET
+tests/errors/CharBad.Mod:11:13: argument 1 has type CHAR, expected INTEGER
+tests/errors/CharBad.Mod:12:9: wrong number of arguments: expected 1, found 2
+tests/errors/CharBad.Mod:13:13: CHR argument 256 is out of range: must be between 0 and 255
+tests/errors/CharBad.Mod:14:13: CHR argument -1 is out of range: must be between 0 and 255
+Error: 11 error(s)
