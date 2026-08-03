@@ -1,5 +1,5 @@
 tests/errors/BuiltinBad.Mod:5:36: constant expression overflows
-tests/errors/BuiltinBad.Mod:8:12: argument 1 has type BOOLEAN, expected INTEGER
+tests/errors/BuiltinBad.Mod:8:12: argument 1 has type BOOLEAN, expected INTEGER or REAL
 tests/errors/BuiltinBad.Mod:9:12: argument 1 has type BOOLEAN, expected INTEGER
 tests/errors/BuiltinBad.Mod:10:15: shift count -1 is out of range: must be between 0 and 31
 tests/errors/BuiltinBad.Mod:11:15: shift count 32 is out of range: must be between 0 and 31

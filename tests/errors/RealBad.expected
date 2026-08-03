@@ -1,0 +1,21 @@
+tests/errors/RealBad.Mod:15:10: RETURN expression has type INTEGER, expected REAL
+tests/errors/RealBad.Mod:19:10: operator '+' requires two INTEGER, two REAL, or two SET operands, found REAL and INTEGER
+tests/errors/RealBad.Mod:20:10: operator '-' requires two INTEGER, two REAL, or two SET operands, found INTEGER and REAL
+tests/errors/RealBad.Mod:21:10: operator '*' requires two INTEGER, two REAL, or two SET operands, found INTEGER and REAL
+tests/errors/RealBad.Mod:22:10: operator '/' requires two REAL or two SET operands, found INTEGER and INTEGER
+tests/errors/RealBad.Mod:23:10: operator 'DIV' requires INTEGER and INTEGER, found REAL and REAL
+tests/errors/RealBad.Mod:24:10: operator 'MOD' requires INTEGER and INTEGER, found REAL and REAL
+tests/errors/RealBad.Mod:25:10: operator '&' requires BOOLEAN and BOOLEAN, found REAL and REAL
+tests/errors/RealBad.Mod:26:10: operator 'OR' requires BOOLEAN and BOOLEAN, found REAL and REAL
+tests/errors/RealBad.Mod:27:8: operator '~' requires BOOLEAN, found REAL
+tests/errors/RealBad.Mod:28:10: operator '<' requires two INTEGER or two REAL operands, found REAL and INTEGER
+tests/errors/RealBad.Mod:29:10: operator '>=' requires two INTEGER or two REAL operands, found INTEGER and REAL
+tests/errors/RealBad.Mod:30:10: operator '=' requires operands of the same type, found REAL and INTEGER
+tests/errors/RealBad.Mod:31:10: operator '+' requires two INTEGER, two REAL, or two SET operands, found REAL and SET
+tests/errors/RealBad.Mod:32:10: operator '-' requires two INTEGER, two REAL, or two SET operands, found SET and REAL
+tests/errors/RealBad.Mod:33:10: operator '=' requires operands of the same type, found REAL and SET
+tests/errors/RealBad.Mod:34:8: cannot assign INTEGER to REAL
+tests/errors/RealBad.Mod:35:8: cannot assign REAL to INTEGER
+tests/errors/RealBad.Mod:36:8: argument 1 has type INTEGER, expected REAL
+tests/errors/RealBad.Mod:37:8: argument 1 has type SET, expected REAL
+Error: 20 error(s)

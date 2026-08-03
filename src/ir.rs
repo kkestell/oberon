@@ -39,11 +39,15 @@ pub enum ParamPass {
     Ref,
 }
 
-#[derive(Debug, Clone, Copy)]
+// Every type is four bytes wide. Int, Bool, and Set travel in a QBE word;
+// Real is IEEE 754 binary32 and travels in a QBE single, which is a distinct
+// calling class and a distinct set of arithmetic and comparison operations.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ty {
     Int,
     Bool,
     Set,
+    Real,
 }
 
 // A SET is a bit vector, so its immediate is unsigned: bit 31 is an ordinary
@@ -53,6 +57,7 @@ pub enum Value {
     Int(i32),
     Bool(bool),
     Set(u32),
+    Real(f32),
     Temp(usize),
 }
 
@@ -78,18 +83,34 @@ pub enum Inst {
     },
     Copy {
         dst: usize,
+        ty: Ty,
         src: Value,
     },
+    // `ty` is the operand type, which is also the result type: negation of a
+    // REAL is a single-precision operation and negation of an INTEGER is a
+    // word one.
     Un {
         dst: usize,
         op: UnOp,
+        ty: Ty,
         arg: Value,
     },
+    // `ty` is the type the operation computes in, which is the type of the
+    // operands and, for everything but a comparison, of the result too. A
+    // comparison always yields BOOLEAN and picks its QBE instruction from the
+    // operand type.
     Bin {
         dst: usize,
         op: BinOp,
+        ty: Ty,
         lhs: Value,
         rhs: Value,
+    },
+    // Report 10.2 FLT: the only conversion between machine classes this
+    // compiler has, so it needs no general conversion matrix.
+    IntToReal {
+        dst: usize,
+        arg: Value,
     },
     Call {
         dst: Option<(usize, Ty)>,
@@ -137,4 +158,15 @@ pub enum BinOp {
     BitAnd,
     BitOr,
     BitXor,
+}
+
+impl BinOp {
+    // A comparison returns BOOLEAN whatever its operands are; every other
+    // binary operation returns the operand type.
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        )
+    }
 }

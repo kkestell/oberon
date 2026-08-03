@@ -156,6 +156,12 @@ pub enum Expr {
         value: i64,
         pos: Pos,
     },
+    // Already rounded to binary32 by the lexer, so nothing downstream rounds
+    // a second time.
+    Real {
+        value: f32,
+        pos: Pos,
+    },
     Bool {
         value: bool,
         pos: Pos,
@@ -228,6 +234,7 @@ impl Expr {
     pub fn pos(&self) -> Pos {
         match self {
             Expr::Int { pos, .. }
+            | Expr::Real { pos, .. }
             | Expr::Bool { pos, .. }
             | Expr::Set { pos, .. }
             | Expr::Call { pos, .. }

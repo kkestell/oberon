@@ -1,2 +1,2 @@
-tests/errors/OrderOnBool.Mod:3:11: operator '<' requires INTEGER and INTEGER, found BOOLEAN and BOOLEAN
+tests/errors/OrderOnBool.Mod:3:11: operator '<' requires two INTEGER or two REAL operands, found BOOLEAN and BOOLEAN
 Error: 1 error(s)

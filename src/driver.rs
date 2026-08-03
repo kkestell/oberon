@@ -52,6 +52,8 @@ pub fn build(source: &Path) -> Result<()> {
             .arg(&asm)
             .arg(RUNTIME_C)
             .arg("-lgc")
+            // The REAL operations of Report 10.2 are the C float forms.
+            .arg("-lm")
             .arg("-o")
             .arg(&exe),
         CC,

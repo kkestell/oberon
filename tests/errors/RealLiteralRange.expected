@@ -1,0 +1,3 @@
+tests/errors/RealLiteralRange.Mod:6:18: real literal '3.5E38' is too large
+tests/errors/RealLiteralRange.Mod:9:8: real literal '1.0E39' is too large
+Error: 2 error(s)

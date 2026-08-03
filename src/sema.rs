@@ -18,9 +18,17 @@ const MODULE_SCOPE: usize = 1;
 const SET_MAX: i32 = 31;
 const SET_FULL: u32 = u32::MAX;
 
+// Report 10.2: FLOOR yields the largest INTEGER not greater than its
+// argument, so an argument only has a result while one exists. Both endpoints
+// are exact binary32 values, and the upper one is excluded because it is
+// MAX(INTEGER) + 1. The runtime check in oberon_floor uses the same pair.
+const FLOOR_MIN: f32 = -2147483648.0;
+const FLOOR_LIMIT: f32 = 2147483648.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Type {
     Integer,
+    Real,
     Boolean,
     Set,
 }
@@ -29,6 +37,7 @@ impl Type {
     fn ir(self) -> ir::Ty {
         match self {
             Type::Integer => ir::Ty::Int,
+            Type::Real => ir::Ty::Real,
             Type::Boolean => ir::Ty::Bool,
             Type::Set => ir::Ty::Set,
         }
@@ -39,6 +48,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Integer => write!(f, "INTEGER"),
+            Type::Real => write!(f, "REAL"),
             Type::Boolean => write!(f, "BOOLEAN"),
             Type::Set => write!(f, "SET"),
         }
@@ -48,6 +58,10 @@ impl fmt::Display for Type {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConstValue {
     Int(i32),
+    // Folded at binary32 precision at every source operator, so a constant
+    // expression and the same expression computed at run time round the same
+    // way at the same points.
+    Real(f32),
     Bool(bool),
     // Unsigned so complement covers exactly the 32 supported elements and no
     // set operation can overflow a signed INTEGER.
@@ -58,6 +72,7 @@ impl ConstValue {
     fn ty(self) -> Type {
         match self {
             ConstValue::Int(_) => Type::Integer,
+            ConstValue::Real(_) => Type::Real,
             ConstValue::Bool(_) => Type::Boolean,
             ConstValue::Set(_) => Type::Set,
         }
@@ -66,6 +81,7 @@ impl ConstValue {
     fn ir(self) -> ir::Value {
         match self {
             ConstValue::Int(v) => ir::Value::Int(v),
+            ConstValue::Real(v) => ir::Value::Real(v),
             ConstValue::Bool(v) => ir::Value::Bool(v),
             ConstValue::Set(v) => ir::Value::Set(v),
         }
@@ -143,11 +159,13 @@ impl Member {
 }
 
 // Report 10.2. Only the operations whose argument types exist are here; LEN,
-// FLOOR, FLT, CHR, NEW, PACK, and UNPK arrive with their types.
+// CHR, and NEW arrive with their types.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Builtin {
     Abs,
     Odd,
+    Floor,
+    Flt,
     Lsl,
     Asr,
     Ror,
@@ -156,17 +174,22 @@ enum Builtin {
     Dec,
     Incl,
     Excl,
+    Pack,
+    Unpk,
     Assert,
 }
 
 fn universe_scope() -> Scope {
     let mut scope = Scope::new();
     scope.insert("INTEGER".into(), Symbol::TypeName(Type::Integer));
+    scope.insert("REAL".into(), Symbol::TypeName(Type::Real));
     scope.insert("BOOLEAN".into(), Symbol::TypeName(Type::Boolean));
     scope.insert("SET".into(), Symbol::TypeName(Type::Set));
     for (name, builtin) in [
         ("ABS", Builtin::Abs),
         ("ODD", Builtin::Odd),
+        ("FLOOR", Builtin::Floor),
+        ("FLT", Builtin::Flt),
         ("LSL", Builtin::Lsl),
         ("ASR", Builtin::Asr),
         ("ROR", Builtin::Ror),
@@ -175,6 +198,8 @@ fn universe_scope() -> Scope {
         ("DEC", Builtin::Dec),
         ("INCL", Builtin::Incl),
         ("EXCL", Builtin::Excl),
+        ("PACK", Builtin::Pack),
+        ("UNPK", Builtin::Unpk),
         ("ASSERT", Builtin::Assert),
     ] {
         scope.insert(name.into(), Symbol::Builtin(builtin));
@@ -721,7 +746,7 @@ impl Analyzer {
             } else {
                 ir::BinOp::Le
             };
-            let cond = self.bin(op, current, limit);
+            let cond = self.bin(op, ir::Ty::Int, current, limit);
             let yes = self.label("for.body");
             self.emit(ir::Inst::Br {
                 cond,
@@ -737,7 +762,7 @@ impl Analyzer {
 
         if let Some(addr) = control {
             let current = self.load(addr.clone(), Type::Integer);
-            let next = self.bin(ir::BinOp::Add, current, ir::Value::Int(step));
+            let next = self.bin(ir::BinOp::Add, ir::Ty::Int, current, ir::Value::Int(step));
             self.emit(ir::Inst::Store {
                 ty: ir::Ty::Int,
                 val: next,
@@ -840,13 +865,28 @@ impl Analyzer {
             let next = self.label("case.next");
             for (low, high) in ranges {
                 let cond = if low == high {
-                    self.bin(ir::BinOp::Eq, selector.clone(), ir::Value::Int(*low))
+                    self.bin(
+                        ir::BinOp::Eq,
+                        ir::Ty::Int,
+                        selector.clone(),
+                        ir::Value::Int(*low),
+                    )
                 } else {
                     // Comparisons yield 0 or 1, so a bitwise and is the
                     // conjunction of the two bounds tests.
-                    let above = self.bin(ir::BinOp::Ge, selector.clone(), ir::Value::Int(*low));
-                    let below = self.bin(ir::BinOp::Le, selector.clone(), ir::Value::Int(*high));
-                    self.bin(ir::BinOp::BitAnd, above, below)
+                    let above = self.bin(
+                        ir::BinOp::Ge,
+                        ir::Ty::Int,
+                        selector.clone(),
+                        ir::Value::Int(*low),
+                    );
+                    let below = self.bin(
+                        ir::BinOp::Le,
+                        ir::Ty::Int,
+                        selector.clone(),
+                        ir::Value::Int(*high),
+                    );
+                    self.bin(ir::BinOp::BitAnd, ir::Ty::Bool, above, below)
                 };
                 let miss = self.label("case.test");
                 self.emit(ir::Inst::Br {
@@ -922,6 +962,7 @@ impl Analyzer {
                     None
                 }
             },
+            ast::Expr::Real { value, .. } => Some((ir::Value::Real(*value), Type::Real)),
             ast::Expr::Bool { value, .. } => Some((ir::Value::Bool(*value), Type::Boolean)),
             ast::Expr::Set { elements, .. } => self.lower_set(elements),
             ast::Expr::Name(designator) => match self.resolve(designator) {
@@ -956,21 +997,30 @@ impl Analyzer {
                 match (op, found) {
                     // Report 8.2.2: unary "+" is the identity on a numeric
                     // operand, so it needs no instruction of its own.
-                    (ast::UnOp::Plus, Type::Integer) => Some((arg, Type::Integer)),
-                    (ast::UnOp::Neg, Type::Integer) => {
+                    (ast::UnOp::Plus, Type::Integer | Type::Real) => Some((arg, found)),
+                    // REAL negation flips the binary32 sign; INTEGER negation
+                    // is the word operation, which still wraps at
+                    // MIN(INTEGER) as it did before this slice.
+                    (ast::UnOp::Neg, Type::Integer | Type::Real) => {
                         let dst = self.temp();
                         self.emit(ir::Inst::Un {
                             dst,
                             op: ir::UnOp::Neg,
+                            ty: found.ir(),
                             arg,
                         });
-                        Some((ir::Value::Temp(dst), Type::Integer))
+                        Some((ir::Value::Temp(dst), found))
                     }
                     // Report 8.2.3: unary "-" on a SET is the complement.
                     // Every one of the 32 bits belongs to the domain, so the
                     // result cannot name an element outside it.
                     (ast::UnOp::Neg, Type::Set) => Some((
-                        self.bin(ir::BinOp::BitXor, arg, ir::Value::Set(SET_FULL)),
+                        self.bin(
+                            ir::BinOp::BitXor,
+                            ir::Ty::Set,
+                            arg,
+                            ir::Value::Set(SET_FULL),
+                        ),
                         Type::Set,
                     )),
                     (ast::UnOp::Not, Type::Boolean) => {
@@ -978,6 +1028,7 @@ impl Analyzer {
                         self.emit(ir::Inst::Un {
                             dst,
                             op: ir::UnOp::Not,
+                            ty: ir::Ty::Bool,
                             arg,
                         });
                         Some((ir::Value::Temp(dst), Type::Boolean))
@@ -1031,7 +1082,7 @@ impl Analyzer {
     fn set_singleton(&mut self, element: ir::Value) -> ir::Value {
         match element {
             ir::Value::Int(n) => ir::Value::Set(1 << n),
-            _ => self.bin(ir::BinOp::Shl, ir::Value::Int(1), element),
+            _ => self.bin(ir::BinOp::Shl, ir::Ty::Set, ir::Value::Int(1), element),
         }
     }
 
@@ -1045,16 +1096,16 @@ impl Analyzer {
         if let (ir::Value::Int(low), ir::Value::Int(high)) = (&low, &high) {
             return ir::Value::Set(set_range_bits(*low, *high));
         }
-        let above = self.bin(ir::BinOp::Shl, ir::Value::Set(SET_FULL), low);
-        let drop = self.bin(ir::BinOp::Sub, ir::Value::Int(SET_MAX), high);
-        let below = self.bin(ir::BinOp::Shr, ir::Value::Set(SET_FULL), drop);
-        self.bin(ir::BinOp::BitAnd, above, below)
+        let above = self.bin(ir::BinOp::Shl, ir::Ty::Set, ir::Value::Set(SET_FULL), low);
+        let drop = self.bin(ir::BinOp::Sub, ir::Ty::Int, ir::Value::Int(SET_MAX), high);
+        let below = self.bin(ir::BinOp::Shr, ir::Ty::Set, ir::Value::Set(SET_FULL), drop);
+        self.bin(ir::BinOp::BitAnd, ir::Ty::Set, above, below)
     }
 
     fn set_union(&mut self, lhs: ir::Value, rhs: ir::Value) -> ir::Value {
         match (lhs, rhs) {
             (ir::Value::Set(lhs), ir::Value::Set(rhs)) => ir::Value::Set(lhs | rhs),
-            (lhs, rhs) => self.bin(ir::BinOp::BitOr, lhs, rhs),
+            (lhs, rhs) => self.bin(ir::BinOp::BitOr, ir::Ty::Set, lhs, rhs),
         }
     }
 
@@ -1084,9 +1135,14 @@ impl Analyzer {
         }
         // QBE reduces a shift count modulo the word width, so an unchecked
         // 32 would quietly behave like 0.
-        let low = self.bin(ir::BinOp::Lt, value.clone(), ir::Value::Int(0));
-        let high = self.bin(ir::BinOp::Gt, value.clone(), ir::Value::Int(SET_MAX));
-        let bad = self.bin(ir::BinOp::BitOr, low, high);
+        let low = self.bin(ir::BinOp::Lt, ir::Ty::Int, value.clone(), ir::Value::Int(0));
+        let high = self.bin(
+            ir::BinOp::Gt,
+            ir::Ty::Int,
+            value.clone(),
+            ir::Value::Int(SET_MAX),
+        );
+        let bad = self.bin(ir::BinOp::BitOr, ir::Ty::Bool, low, high);
         let trap = self.label("set.bad");
         let ok = self.label("set.ok");
         self.emit(ir::Inst::Br {
@@ -1122,9 +1178,9 @@ impl Analyzer {
         }
         let element = self.check_set_element(lhs, element)?;
         let bit = self.set_singleton(element);
-        let masked = self.bin(ir::BinOp::BitAnd, set, bit);
+        let masked = self.bin(ir::BinOp::BitAnd, ir::Ty::Set, set, bit);
         Some((
-            self.bin(ir::BinOp::Ne, masked, ir::Value::Set(0)),
+            self.bin(ir::BinOp::Ne, ir::Ty::Set, masked, ir::Value::Set(0)),
             Type::Boolean,
         ))
     }
@@ -1159,6 +1215,7 @@ impl Analyzer {
         self.emit(ir::Inst::Label(short_label));
         self.emit(ir::Inst::Copy {
             dst: result,
+            ty: ir::Ty::Bool,
             src: ir::Value::Bool(short),
         });
         self.emit(ir::Inst::Jmp(end.clone()));
@@ -1167,6 +1224,7 @@ impl Analyzer {
         if let Some((value, _)) = &rhs {
             self.emit(ir::Inst::Copy {
                 dst: result,
+                ty: ir::Ty::Bool,
                 src: value.clone(),
             });
         }
@@ -1200,19 +1258,25 @@ impl Analyzer {
         };
 
         use ast::BinOp;
-        let result_ty = match op {
+        // The operand type selects the machine operation; the result type is
+        // what the expression has. They differ only for a relation.
+        let (operand_ty, result_ty) = match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Slash => {
-                check_arith_types(pos, op, lhs_ty, rhs_ty, &mut self.diags)?
+                let ty = check_arith_types(pos, op, lhs_ty, rhs_ty, &mut self.diags)?;
+                (ty, ty)
             }
-            BinOp::Div | BinOp::Mod => check_binary_types(
-                pos,
-                bin_op_name(op),
-                Type::Integer,
-                lhs_ty,
-                rhs_ty,
-                Type::Integer,
-                &mut self.diags,
-            )?,
+            BinOp::Div | BinOp::Mod => {
+                check_binary_types(
+                    pos,
+                    bin_op_name(op),
+                    Type::Integer,
+                    lhs_ty,
+                    rhs_ty,
+                    Type::Integer,
+                    &mut self.diags,
+                )?;
+                (Type::Integer, Type::Integer)
+            }
             BinOp::Eq | BinOp::Ne => {
                 if lhs_ty != rhs_ty {
                     self.diags.push(Diagnostic::new(
@@ -1224,17 +1288,12 @@ impl Analyzer {
                     ));
                     return None;
                 }
-                Type::Boolean
+                (lhs_ty, Type::Boolean)
             }
-            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => check_binary_types(
-                pos,
-                bin_op_name(op),
-                Type::Integer,
-                lhs_ty,
-                rhs_ty,
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => (
+                check_order_types(pos, op, lhs_ty, rhs_ty, &mut self.diags)?,
                 Type::Boolean,
-                &mut self.diags,
-            )?,
+            ),
             BinOp::In | BinOp::And | BinOp::Or => unreachable!(),
         };
 
@@ -1245,13 +1304,18 @@ impl Analyzer {
         if result_ty == Type::Set {
             return Some((
                 match op {
-                    BinOp::Add => self.bin(ir::BinOp::BitOr, lhs, rhs_ir),
+                    BinOp::Add => self.bin(ir::BinOp::BitOr, ir::Ty::Set, lhs, rhs_ir),
                     BinOp::Sub => {
-                        let keep = self.bin(ir::BinOp::BitXor, rhs_ir, ir::Value::Set(SET_FULL));
-                        self.bin(ir::BinOp::BitAnd, lhs, keep)
+                        let keep = self.bin(
+                            ir::BinOp::BitXor,
+                            ir::Ty::Set,
+                            rhs_ir,
+                            ir::Value::Set(SET_FULL),
+                        );
+                        self.bin(ir::BinOp::BitAnd, ir::Ty::Set, lhs, keep)
                     }
-                    BinOp::Mul => self.bin(ir::BinOp::BitAnd, lhs, rhs_ir),
-                    BinOp::Slash => self.bin(ir::BinOp::BitXor, lhs, rhs_ir),
+                    BinOp::Mul => self.bin(ir::BinOp::BitAnd, ir::Ty::Set, lhs, rhs_ir),
+                    BinOp::Slash => self.bin(ir::BinOp::BitXor, ir::Ty::Set, lhs, rhs_ir),
                     _ => unreachable!("only the four set operators yield SET"),
                 },
                 Type::Set,
@@ -1265,11 +1329,11 @@ impl Analyzer {
                 }
                 let (rem, adjust) = self.floor_adjust(lhs.clone(), rhs_ir.clone());
                 if op == BinOp::Mod {
-                    let delta = self.bin(ir::BinOp::Mul, adjust, rhs_ir);
-                    self.bin(ir::BinOp::Add, rem, delta)
+                    let delta = self.bin(ir::BinOp::Mul, ir::Ty::Int, adjust, rhs_ir);
+                    self.bin(ir::BinOp::Add, ir::Ty::Int, rem, delta)
                 } else {
-                    let quotient = self.bin(ir::BinOp::Div, lhs, rhs_ir);
-                    self.bin(ir::BinOp::Sub, quotient, adjust)
+                    let quotient = self.bin(ir::BinOp::Div, ir::Ty::Int, lhs, rhs_ir);
+                    self.bin(ir::BinOp::Sub, ir::Ty::Int, quotient, adjust)
                 }
             }
             _ => self.bin(
@@ -1277,16 +1341,22 @@ impl Analyzer {
                     BinOp::Add => ir::BinOp::Add,
                     BinOp::Sub => ir::BinOp::Sub,
                     BinOp::Mul => ir::BinOp::Mul,
+                    // Only REAL reaches this: "/" on two INTEGERs is not an
+                    // Oberon operation, and the SET form returned above.
+                    // IEEE division by zero yields an infinity or a NaN and
+                    // is not a trap, unlike DIV and MOD.
+                    BinOp::Slash => ir::BinOp::Div,
                     BinOp::Eq => ir::BinOp::Eq,
                     BinOp::Ne => ir::BinOp::Ne,
                     BinOp::Lt => ir::BinOp::Lt,
                     BinOp::Le => ir::BinOp::Le,
                     BinOp::Gt => ir::BinOp::Gt,
                     BinOp::Ge => ir::BinOp::Ge,
-                    BinOp::Slash | BinOp::Div | BinOp::Mod | BinOp::In | BinOp::And | BinOp::Or => {
+                    BinOp::Div | BinOp::Mod | BinOp::In | BinOp::And | BinOp::Or => {
                         unreachable!()
                     }
                 },
+                operand_ty.ir(),
                 lhs,
                 rhs_ir,
             ),
@@ -1295,7 +1365,7 @@ impl Analyzer {
     }
 
     fn div_zero_check(&mut self, divisor: ir::Value) {
-        let zero = self.bin(ir::BinOp::Eq, divisor, ir::Value::Int(0));
+        let zero = self.bin(ir::BinOp::Eq, ir::Ty::Int, divisor, ir::Value::Int(0));
         let trap = self.label("div.zero");
         let ok = self.label("div.ok");
         self.emit(ir::Inst::Br {
@@ -1317,12 +1387,12 @@ impl Analyzer {
     // answers for divisors near MAX(INTEGER). Constant folding applies the
     // same adjustment and must stay identical.
     fn floor_adjust(&mut self, lhs: ir::Value, rhs: ir::Value) -> (ir::Value, ir::Value) {
-        let rem = self.bin(ir::BinOp::Rem, lhs, rhs.clone());
-        let nonzero = self.bin(ir::BinOp::Ne, rem.clone(), ir::Value::Int(0));
-        let rem_neg = self.bin(ir::BinOp::Lt, rem.clone(), ir::Value::Int(0));
-        let rhs_neg = self.bin(ir::BinOp::Lt, rhs, ir::Value::Int(0));
-        let differ = self.bin(ir::BinOp::Ne, rem_neg, rhs_neg);
-        let adjust = self.bin(ir::BinOp::Mul, nonzero, differ);
+        let rem = self.bin(ir::BinOp::Rem, ir::Ty::Int, lhs, rhs.clone());
+        let nonzero = self.bin(ir::BinOp::Ne, ir::Ty::Int, rem.clone(), ir::Value::Int(0));
+        let rem_neg = self.bin(ir::BinOp::Lt, ir::Ty::Int, rem.clone(), ir::Value::Int(0));
+        let rhs_neg = self.bin(ir::BinOp::Lt, ir::Ty::Int, rhs, ir::Value::Int(0));
+        let differ = self.bin(ir::BinOp::Ne, ir::Ty::Bool, rem_neg, rhs_neg);
+        let adjust = self.bin(ir::BinOp::Mul, ir::Ty::Int, nonzero, differ);
         (rem, adjust)
     }
 
@@ -1431,11 +1501,13 @@ impl Analyzer {
         match builtin {
             Builtin::Inc | Builtin::Dec => return self.lower_inc_dec(builtin, actuals, pos),
             Builtin::Incl | Builtin::Excl => return self.lower_incl_excl(builtin, actuals, pos),
+            Builtin::Pack => return self.lower_pack(actuals, pos),
+            Builtin::Unpk => return self.lower_unpk(actuals, pos),
             Builtin::Assert => return self.lower_assert(actuals, pos),
             _ => {}
         }
 
-        let (params, ret) = builtin_signature(builtin).expect("function-like builtin");
+        let (params, result) = builtin_signature(builtin).expect("function-like builtin");
         if !self.builtin_arity(actuals, params.len(), pos) {
             return None;
         }
@@ -1445,7 +1517,7 @@ impl Analyzer {
             // Every argument is lowered even after one of them fails, so a
             // call reports all of its type errors rather than only the first.
             match self.builtin_arg(actual, i + 1, expected) {
-                Some(value) => args.push(value),
+                Some(arg) => args.push(arg),
                 None => ok = false,
             }
         }
@@ -1454,32 +1526,182 @@ impl Analyzer {
         }
 
         let value = match builtin {
-            Builtin::Abs => self.lower_abs(args[0].clone()),
+            Builtin::Abs => match args[0].1 {
+                Type::Integer => self.lower_abs_int(args[0].0.clone()),
+                Type::Real => self.call_runtime(
+                    "oberon_abs_real",
+                    vec![ir::Arg::Val(ir::Ty::Real, args[0].0.clone())],
+                    ir::Ty::Real,
+                ),
+                _ => unreachable!("ABS was type-checked as INTEGER or REAL"),
+            },
             // Truncating remainder, so the test must be against zero and not
             // against one: -3 rem 2 is -1. This agrees with the Report's
             // "x MOD 2 = 1" under the floored MOD the compiler implements.
             Builtin::Odd => {
-                let rem = self.bin(ir::BinOp::Rem, args[0].clone(), ir::Value::Int(2));
-                self.bin(ir::BinOp::Ne, rem, ir::Value::Int(0))
+                let rem = self.bin(
+                    ir::BinOp::Rem,
+                    ir::Ty::Int,
+                    args[0].0.clone(),
+                    ir::Value::Int(2),
+                );
+                self.bin(ir::BinOp::Ne, ir::Ty::Int, rem, ir::Value::Int(0))
+            }
+            // The rounded argument has to be inside the INTEGER range for a
+            // result to exist, and neither QBE nor C defines a conversion
+            // that is out of range, so the wrapper checks the domain itself.
+            Builtin::Floor => {
+                self.check_floor_argument(&actuals[0])?;
+                self.call_runtime(
+                    "oberon_floor",
+                    vec![ir::Arg::Val(ir::Ty::Real, args[0].0.clone())],
+                    ir::Ty::Int,
+                )
+            }
+            // The one conversion between machine classes. It rounds to the
+            // nearest binary32 value, so an INTEGER near the top of the range
+            // does not survive the trip.
+            Builtin::Flt => {
+                let dst = self.temp();
+                self.emit(ir::Inst::IntToReal {
+                    dst,
+                    arg: args[0].0.clone(),
+                });
+                ir::Value::Temp(dst)
             }
             // BOOLEAN is already 0 or 1 in a word, and a SET is already its
             // own bit pattern, so the value passes through with only its
             // type changed. cf. Project Oberon, where ORD lowers to nothing.
-            Builtin::Ord => args[0].clone(),
+            Builtin::Ord => args[0].0.clone(),
             Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
-                self.lower_shift(builtin, &args, &actuals[1])?
+                self.lower_shift(builtin, args[0].0.clone(), args[1].0.clone(), &actuals[1])?
             }
-            Builtin::Inc | Builtin::Dec | Builtin::Incl | Builtin::Excl | Builtin::Assert => {
-                unreachable!("handled above")
-            }
+            Builtin::Inc
+            | Builtin::Dec
+            | Builtin::Incl
+            | Builtin::Excl
+            | Builtin::Pack
+            | Builtin::Unpk
+            | Builtin::Assert => unreachable!("handled above"),
         };
-        Some((Some(value), Some(ret)))
+        Some((Some(value), Some(result.ty(args[0].1))))
+    }
+
+    // Report 10.2: PACK(x, n) is x := x * 2^n on a writable REAL variable.
+    // The address is resolved before the exponent is lowered, so the two
+    // arguments are evaluated left to right and each exactly once.
+    fn lower_pack(
+        &mut self,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        if !self.builtin_arity(actuals, 2, pos) {
+            return None;
+        }
+        let target = self.modified_actual(&actuals[0], 1, Type::Real);
+        let exponent = self
+            .builtin_arg(&actuals[1], 2, &[Type::Integer])
+            .map(|(value, _)| value);
+        if let (Some(addr), Some(exponent)) = (target, exponent) {
+            self.emit(ir::Inst::Call {
+                dst: None,
+                symbol: "oberon_pack".into(),
+                args: vec![ir::Arg::Ref(addr), ir::Arg::Val(ir::Ty::Int, exponent)],
+            });
+        }
+        Some((None, None))
+    }
+
+    // Report 10.2: UNPK(x, n) splits x into a fraction and an exponent, so
+    // both arguments are writable variables and both reach the runtime as
+    // addresses.
+    fn lower_unpk(
+        &mut self,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        if !self.builtin_arity(actuals, 2, pos) {
+            return None;
+        }
+        let fraction = self.modified_actual(&actuals[0], 1, Type::Real);
+        let exponent = self.modified_actual(&actuals[1], 2, Type::Integer);
+        if let (Some(fraction), Some(exponent)) = (fraction, exponent) {
+            self.emit(ir::Inst::Call {
+                dst: None,
+                symbol: "oberon_unpk".into(),
+                args: vec![ir::Arg::Ref(fraction), ir::Arg::Ref(exponent)],
+            });
+        }
+        Some((None, None))
+    }
+
+    // The argument of a predefined operation that changes it: a variable of
+    // exactly one type, writable through the same designator path as INC and
+    // therefore equally unable to reach an imported variable.
+    fn modified_actual(
+        &mut self,
+        actual: &ast::Expr,
+        number: usize,
+        expected: Type,
+    ) -> Option<ir::Addr> {
+        match self.var_actual(actual, number) {
+            Some((addr, found)) if found == expected => Some(addr),
+            Some((_, found)) => {
+                self.diags.push(Diagnostic::new(
+                    actual.pos(),
+                    format!("argument {number} has type {found}, expected {expected}"),
+                ));
+                None
+            }
+            None => None,
+        }
+    }
+
+    // A predefined operation the C runtime implements. The call names the
+    // exact value type of every argument and of the result, so QBE emits the
+    // native calling classes.
+    fn call_runtime(&mut self, symbol: &str, args: Vec<ir::Arg>, ret: ir::Ty) -> ir::Value {
+        let dst = self.temp();
+        self.emit(ir::Inst::Call {
+            dst: Some((dst, ret)),
+            symbol: symbol.into(),
+            args,
+        });
+        ir::Value::Temp(dst)
+    }
+
+    // A known FLOOR argument outside the INTEGER result domain is a source
+    // error even in an executable expression. A dynamic argument keeps the
+    // runtime check. Valid constants also keep the ordinary runtime lowering,
+    // because this compiler has no optimization pass.
+    fn check_floor_argument(&mut self, actual: &ast::Expr) -> Option<()> {
+        match self.try_eval_const(actual) {
+            Ok(Some(ConstValue::Real(value))) => match floor_const(value, actual.pos()) {
+                Ok(_) => Some(()),
+                Err(diag) => {
+                    self.diags.push(diag);
+                    None
+                }
+            },
+            Ok(Some(_)) => unreachable!("FLOOR argument was type-checked as REAL"),
+            Ok(None) => Some(()),
+            Err(diag) => {
+                self.diags.push(diag);
+                None
+            }
+        }
     }
 
     // MIN(INTEGER) has no absolute value. Folding rejects it, so the runtime
-    // form must not quietly wrap the way unary minus still does.
-    fn lower_abs(&mut self, arg: ir::Value) -> ir::Value {
-        let overflows = self.bin(ir::BinOp::Eq, arg.clone(), ir::Value::Int(i32::MIN));
+    // form must not quietly wrap the way unary minus still does. The REAL
+    // form has no such hole and is an ordinary runtime call.
+    fn lower_abs_int(&mut self, arg: ir::Value) -> ir::Value {
+        let overflows = self.bin(
+            ir::BinOp::Eq,
+            ir::Ty::Int,
+            arg.clone(),
+            ir::Value::Int(i32::MIN),
+        );
         let bad = self.label("abs.bad");
         let ok = self.label("abs.ok");
         self.emit(ir::Inst::Br {
@@ -1491,7 +1713,7 @@ impl Analyzer {
         self.trap("oberon_abs_overflow");
         self.emit(ir::Inst::Label(ok));
 
-        let negative = self.bin(ir::BinOp::Lt, arg.clone(), ir::Value::Int(0));
+        let negative = self.bin(ir::BinOp::Lt, ir::Ty::Int, arg.clone(), ir::Value::Int(0));
         let negate = self.label("abs.neg");
         let keep = self.label("abs.pos");
         let end = self.label("abs.end");
@@ -1506,16 +1728,19 @@ impl Analyzer {
         self.emit(ir::Inst::Un {
             dst: negated,
             op: ir::UnOp::Neg,
+            ty: ir::Ty::Int,
             arg: arg.clone(),
         });
         self.emit(ir::Inst::Copy {
             dst: result,
+            ty: ir::Ty::Int,
             src: ir::Value::Temp(negated),
         });
         self.emit(ir::Inst::Jmp(end.clone()));
         self.emit(ir::Inst::Label(keep));
         self.emit(ir::Inst::Copy {
             dst: result,
+            ty: ir::Ty::Int,
             src: arg,
         });
         self.emit(ir::Inst::Jmp(end.clone()));
@@ -1530,10 +1755,10 @@ impl Analyzer {
     fn lower_shift(
         &mut self,
         builtin: Builtin,
-        args: &[ir::Value],
+        value: ir::Value,
+        count: ir::Value,
         count_expr: &ast::Expr,
     ) -> Option<ir::Value> {
-        let (value, count) = (args[0].clone(), args[1].clone());
         match &count {
             ir::Value::Int(n) => {
                 if !(0..=31).contains(n) {
@@ -1542,9 +1767,14 @@ impl Analyzer {
                 }
             }
             _ => {
-                let low = self.bin(ir::BinOp::Lt, count.clone(), ir::Value::Int(0));
-                let high = self.bin(ir::BinOp::Gt, count.clone(), ir::Value::Int(31));
-                let bad = self.bin(ir::BinOp::BitOr, low, high);
+                let low = self.bin(ir::BinOp::Lt, ir::Ty::Int, count.clone(), ir::Value::Int(0));
+                let high = self.bin(
+                    ir::BinOp::Gt,
+                    ir::Ty::Int,
+                    count.clone(),
+                    ir::Value::Int(31),
+                );
+                let bad = self.bin(ir::BinOp::BitOr, ir::Ty::Bool, low, high);
                 let trap = self.label("shift.bad");
                 let ok = self.label("shift.ok");
                 self.emit(ir::Inst::Br {
@@ -1558,17 +1788,22 @@ impl Analyzer {
             }
         }
         Some(match builtin {
-            Builtin::Lsl => self.bin(ir::BinOp::Shl, value, count),
-            Builtin::Asr => self.bin(ir::BinOp::Sar, value, count),
+            Builtin::Lsl => self.bin(ir::BinOp::Shl, ir::Ty::Int, value, count),
+            Builtin::Asr => self.bin(ir::BinOp::Sar, ir::Ty::Int, value, count),
             // A logical right shift merged with the bits that fall off the
             // bottom. The mask makes a rotation by zero the identity instead
             // of a shift by the word width.
             Builtin::Ror => {
-                let right = self.bin(ir::BinOp::Shr, value.clone(), count.clone());
-                let complement = self.bin(ir::BinOp::Sub, ir::Value::Int(32), count);
-                let left_count = self.bin(ir::BinOp::BitAnd, complement, ir::Value::Int(31));
-                let left = self.bin(ir::BinOp::Shl, value, left_count);
-                self.bin(ir::BinOp::BitOr, right, left)
+                let right = self.bin(ir::BinOp::Shr, ir::Ty::Int, value.clone(), count.clone());
+                let complement = self.bin(ir::BinOp::Sub, ir::Ty::Int, ir::Value::Int(32), count);
+                let left_count = self.bin(
+                    ir::BinOp::BitAnd,
+                    ir::Ty::Int,
+                    complement,
+                    ir::Value::Int(31),
+                );
+                let left = self.bin(ir::BinOp::Shl, ir::Ty::Int, value, left_count);
+                self.bin(ir::BinOp::BitOr, ir::Ty::Int, right, left)
             }
             _ => unreachable!("not a shift"),
         })
@@ -1593,19 +1828,11 @@ impl Analyzer {
             }
             return None;
         }
-        let target = match self.var_actual(&actuals[0], 1) {
-            Some((addr, Type::Integer)) => Some(addr),
-            Some((_, ty)) => {
-                self.diags.push(Diagnostic::new(
-                    actuals[0].pos(),
-                    format!("argument 1 has type {ty}, expected INTEGER"),
-                ));
-                None
-            }
-            None => None,
-        };
+        let target = self.modified_actual(&actuals[0], 1, Type::Integer);
         let step = match actuals.get(1) {
-            Some(actual) => self.builtin_arg(actual, 2, &[Type::Integer]),
+            Some(actual) => self
+                .builtin_arg(actual, 2, &[Type::Integer])
+                .map(|(value, _)| value),
             None => Some(ir::Value::Int(1)),
         };
         if let (Some(addr), Some(step)) = (target, step) {
@@ -1615,7 +1842,7 @@ impl Analyzer {
             } else {
                 ir::BinOp::Sub
             };
-            let next = self.bin(op, current, step);
+            let next = self.bin(op, ir::Ty::Int, current, step);
             self.emit(ir::Inst::Store {
                 ty: ir::Ty::Int,
                 val: next,
@@ -1638,28 +1865,23 @@ impl Analyzer {
         if !self.builtin_arity(actuals, 2, pos) {
             return None;
         }
-        let target = match self.var_actual(&actuals[0], 1) {
-            Some((addr, Type::Set)) => Some(addr),
-            Some((_, ty)) => {
-                self.diags.push(Diagnostic::new(
-                    actuals[0].pos(),
-                    format!("argument 1 has type {ty}, expected SET"),
-                ));
-                None
-            }
-            None => None,
-        };
+        let target = self.modified_actual(&actuals[0], 1, Type::Set);
         let element = self
             .builtin_arg(&actuals[1], 2, &[Type::Integer])
-            .and_then(|value| self.check_set_element(&actuals[1], value));
+            .and_then(|(value, _)| self.check_set_element(&actuals[1], value));
         if let (Some(addr), Some(element)) = (target, element) {
             let bit = self.set_singleton(element);
             let current = self.load(addr.clone(), Type::Set);
             let next = if builtin == Builtin::Incl {
-                self.bin(ir::BinOp::BitOr, current, bit)
+                self.bin(ir::BinOp::BitOr, ir::Ty::Set, current, bit)
             } else {
-                let keep = self.bin(ir::BinOp::BitXor, bit, ir::Value::Set(SET_FULL));
-                self.bin(ir::BinOp::BitAnd, current, keep)
+                let keep = self.bin(
+                    ir::BinOp::BitXor,
+                    ir::Ty::Set,
+                    bit,
+                    ir::Value::Set(SET_FULL),
+                );
+                self.bin(ir::BinOp::BitAnd, ir::Ty::Set, current, keep)
             };
             self.emit(ir::Inst::Store {
                 ty: ir::Ty::Set,
@@ -1680,7 +1902,7 @@ impl Analyzer {
         }
         // No constant special case: ASSERT(FALSE) emits the test like any
         // other condition and QBE folds it.
-        if let Some(cond) = self.builtin_arg(&actuals[0], 1, &[Type::Boolean]) {
+        if let Some((cond, _)) = self.builtin_arg(&actuals[0], 1, &[Type::Boolean]) {
             let bad = self.label("assert.bad");
             let ok = self.label("assert.ok");
             self.emit(ir::Inst::Br {
@@ -1712,15 +1934,17 @@ impl Analyzer {
         false
     }
 
+    // The found type comes back with the value because ABS is generic: its
+    // result is whichever of the accepted types the argument turned out to be.
     fn builtin_arg(
         &mut self,
         actual: &ast::Expr,
         number: usize,
         expected: &[Type],
-    ) -> Option<ir::Value> {
+    ) -> Option<(ir::Value, Type)> {
         let (value, found) = self.lower_expr(actual)?;
         if expected.contains(&found) {
-            Some(value)
+            Some((value, found))
         } else {
             self.diags.push(Diagnostic::new(
                 actual.pos(),
@@ -1812,6 +2036,7 @@ impl Analyzer {
                     None
                 }
             },
+            ast::Expr::Real { .. } => Some(Type::Real),
             ast::Expr::Bool { .. } => Some(Type::Boolean),
             ast::Expr::Set { elements, .. } => {
                 // Only the element types are checked here. The domain check
@@ -1856,9 +2081,8 @@ impl Analyzer {
             ast::Expr::Unary { op, expr, pos } => {
                 let found = self.check_const_expr(expr)?;
                 match (op, found) {
-                    (ast::UnOp::Plus, Type::Integer) | (ast::UnOp::Neg, Type::Integer) => {
-                        Some(Type::Integer)
-                    }
+                    (ast::UnOp::Plus, Type::Integer | Type::Real)
+                    | (ast::UnOp::Neg, Type::Integer | Type::Real) => Some(found),
                     (ast::UnOp::Neg, Type::Set) => Some(Type::Set),
                     (ast::UnOp::Not, Type::Boolean) => Some(Type::Boolean),
                     _ => {
@@ -1923,15 +2147,10 @@ impl Analyzer {
                             None
                         }
                     }
-                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => check_binary_types(
-                        *pos,
-                        bin_op_name(*op),
-                        Type::Integer,
-                        lhs,
-                        rhs,
-                        Type::Boolean,
-                        &mut self.diags,
-                    ),
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        check_order_types(*pos, *op, lhs, rhs, &mut self.diags)?;
+                        Some(Type::Boolean)
+                    }
                 }
             }
         }
@@ -2006,7 +2225,7 @@ impl Analyzer {
         actuals: &[ast::Expr],
         pos: Pos,
     ) -> Option<Type> {
-        let Some((params, ret)) = builtin_signature(builtin) else {
+        let Some((params, result)) = builtin_signature(builtin) else {
             for actual in actuals {
                 let _ = self.check_const_expr(actual);
             }
@@ -2032,6 +2251,7 @@ impl Analyzer {
             // fold the same call and report the same arity twice.
             return None;
         }
+        let mut first = None;
         let mut ok = true;
         for (i, (actual, expected)) in actuals.iter().zip(params).enumerate() {
             let Some(found) = self.check_const_expr(actual) else {
@@ -2049,8 +2269,11 @@ impl Analyzer {
                 ));
                 ok = false;
             }
+            if i == 0 {
+                first = Some(found);
+            }
         }
-        ok.then_some(ret)
+        ok.then(|| result.ty(first.expect("a function-like builtin takes an argument")))
     }
 
     fn eval_const_builtin(
@@ -2075,7 +2298,16 @@ impl Analyzer {
                 .checked_abs()
                 .map(ConstValue::Int)
                 .ok_or_else(|| Diagnostic::new(pos, "constant expression overflows")),
+            // Clears the sign of a negative zero, leaves an infinity alone,
+            // and returns a NaN for a NaN, exactly as fabsf does at run time.
+            (Builtin::Abs, [ConstValue::Real(value)]) => Ok(ConstValue::Real(value.abs())),
             (Builtin::Odd, [ConstValue::Int(value)]) => Ok(ConstValue::Bool(value % 2 != 0)),
+            // The rounding is what makes FLT(MAX(INTEGER)) equal 2147483648.0
+            // and therefore outside the FLOOR domain below.
+            (Builtin::Flt, [ConstValue::Int(value)]) => Ok(ConstValue::Real(*value as f32)),
+            (Builtin::Floor, [ConstValue::Real(value)]) => {
+                floor_const(*value, actuals[0].pos()).map(ConstValue::Int)
+            }
             (Builtin::Ord, [ConstValue::Bool(value)]) => Ok(ConstValue::Int(i32::from(*value))),
             // Report 10.2 calls this the ordinal number of a SET but does not
             // say how 32 elements map onto a signed INTEGER. Reinterpreting
@@ -2109,6 +2341,7 @@ impl Analyzer {
             ast::Expr::Int { value, pos } => i32::try_from(*value)
                 .map(ConstValue::Int)
                 .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
+            ast::Expr::Real { value, .. } => Ok(ConstValue::Real(*value)),
             ast::Expr::Bool { value, .. } => Ok(ConstValue::Bool(*value)),
             ast::Expr::Set { elements, .. } => {
                 let mut bits = 0;
@@ -2140,11 +2373,16 @@ impl Analyzer {
             ast::Expr::Unary { op, expr, pos } => {
                 let value = self.eval_const(expr)?;
                 match (op, value) {
-                    (ast::UnOp::Plus, ConstValue::Int(value)) => Ok(ConstValue::Int(value)),
+                    (ast::UnOp::Plus, value @ (ConstValue::Int(_) | ConstValue::Real(_))) => {
+                        Ok(value)
+                    }
                     (ast::UnOp::Neg, ConstValue::Int(value)) => value
                         .checked_neg()
                         .map(ConstValue::Int)
                         .ok_or_else(|| Diagnostic::new(*pos, "constant expression overflows")),
+                    // Flipping the binary32 sign, so -0.0 is a value the
+                    // source can write and the emitted immediate preserves.
+                    (ast::UnOp::Neg, ConstValue::Real(value)) => Ok(ConstValue::Real(-value)),
                     (ast::UnOp::Neg, ConstValue::Set(bits)) => Ok(ConstValue::Set(bits ^ SET_FULL)),
                     (ast::UnOp::Not, ConstValue::Bool(value)) => Ok(ConstValue::Bool(!value)),
                     _ => unreachable!("constant expression was type-checked"),
@@ -2203,7 +2441,7 @@ impl Analyzer {
 
     fn is_const_expr(&self, expr: &ast::Expr) -> bool {
         match expr {
-            ast::Expr::Int { .. } | ast::Expr::Bool { .. } => true,
+            ast::Expr::Int { .. } | ast::Expr::Real { .. } | ast::Expr::Bool { .. } => true,
             ast::Expr::Set { elements, .. } => elements.iter().all(|element| {
                 self.is_const_expr(&element.low)
                     && element
@@ -2359,9 +2597,17 @@ impl Analyzer {
         self.builder().proc.insts.push(inst);
     }
 
-    fn bin(&mut self, op: ir::BinOp, lhs: ir::Value, rhs: ir::Value) -> ir::Value {
+    // `ty` is the operand type, which is what the emitter needs to choose
+    // between a word and a single-precision instruction.
+    fn bin(&mut self, op: ir::BinOp, ty: ir::Ty, lhs: ir::Value, rhs: ir::Value) -> ir::Value {
         let dst = self.temp();
-        self.emit(ir::Inst::Bin { dst, op, lhs, rhs });
+        self.emit(ir::Inst::Bin {
+            dst,
+            op,
+            ty,
+            lhs,
+            rhs,
+        });
         ir::Value::Temp(dst)
     }
 
@@ -2487,6 +2733,29 @@ fn eval_const_binary(
             _ => unreachable!(),
         }));
     }
+    // Every source operator rounds at binary32, so a folded expression takes
+    // the same rounding steps as the same expression computed at run time.
+    // IEEE behaviour is the whole answer here: overflow yields an infinity,
+    // division by zero yields an infinity or a NaN, and neither is a
+    // diagnostic. A NaN is unequal to everything, itself included, and every
+    // ordering comparison against one is false.
+    if let (ConstValue::Real(lhs), ConstValue::Real(rhs)) = (lhs, rhs) {
+        return Ok(match op {
+            BinOp::Add => ConstValue::Real(lhs + rhs),
+            BinOp::Sub => ConstValue::Real(lhs - rhs),
+            BinOp::Mul => ConstValue::Real(lhs * rhs),
+            BinOp::Slash => ConstValue::Real(lhs / rhs),
+            BinOp::Eq => ConstValue::Bool(lhs == rhs),
+            BinOp::Ne => ConstValue::Bool(lhs != rhs),
+            BinOp::Lt => ConstValue::Bool(lhs < rhs),
+            BinOp::Le => ConstValue::Bool(lhs <= rhs),
+            BinOp::Gt => ConstValue::Bool(lhs > rhs),
+            BinOp::Ge => ConstValue::Bool(lhs >= rhs),
+            BinOp::Div | BinOp::Mod | BinOp::In | BinOp::And | BinOp::Or => {
+                unreachable!("constant expression was type-checked")
+            }
+        });
+    }
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let (ConstValue::Int(lhs), ConstValue::Int(rhs)) = (lhs, rhs) else {
@@ -2552,10 +2821,22 @@ fn eval_const_binary(
     }
 }
 
+fn floor_const(value: f32, pos: Pos) -> Result<i32, Diagnostic> {
+    if !value.is_finite() || !(FLOOR_MIN..FLOOR_LIMIT).contains(&value) {
+        Err(Diagnostic::new(
+            pos,
+            "constant FLOOR result is outside INTEGER range",
+        ))
+    } else {
+        Ok(value.floor() as i32)
+    }
+}
+
 // Report 8.2 overloads "+", "-", "*", and "/". The first three take two
-// INTEGERs or two SETs; "/" is symmetric set difference here and gains its
-// REAL meaning in Slice 9. The operation is chosen from the operand types,
-// not from the token, so the AST keeps the source operator.
+// INTEGERs, two REALs, or two SETs; "/" means REAL quotient or symmetric set
+// difference and has no INTEGER meaning. INTEGER and REAL never mix
+// implicitly, here or anywhere else. The operation is chosen from the operand
+// types, not from the token, so the AST keeps the source operator.
 fn check_arith_types(
     pos: Pos,
     op: ast::BinOp,
@@ -2563,26 +2844,56 @@ fn check_arith_types(
     rhs: Type,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
-    let numeric = op != ast::BinOp::Slash;
-    match (lhs, rhs) {
-        (Type::Set, Type::Set) => Some(Type::Set),
-        (Type::Integer, Type::Integer) if numeric => Some(Type::Integer),
-        _ => {
-            let expected = if numeric {
-                "two INTEGER or two SET operands"
-            } else {
-                "two SET operands"
-            };
-            diags.push(Diagnostic::new(
-                pos,
-                format!(
-                    "operator '{}' requires {expected}, found {lhs} and {rhs}",
-                    bin_op_name(op)
-                ),
-            ));
-            None
-        }
+    let accepted: &[Type] = if op == ast::BinOp::Slash {
+        &[Type::Real, Type::Set]
+    } else {
+        &[Type::Integer, Type::Real, Type::Set]
+    };
+    check_operand_types(pos, op, accepted, lhs, rhs, diags)
+}
+
+// Report 8.2.4 orders the numeric types; SET and BOOLEAN have equality and
+// inequality only. The operand type is returned rather than BOOLEAN, because
+// the comparison instruction is chosen from it.
+fn check_order_types(
+    pos: Pos,
+    op: ast::BinOp,
+    lhs: Type,
+    rhs: Type,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    check_operand_types(pos, op, &[Type::Integer, Type::Real], lhs, rhs, diags)
+}
+
+fn check_operand_types(
+    pos: Pos,
+    op: ast::BinOp,
+    accepted: &[Type],
+    lhs: Type,
+    rhs: Type,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    if lhs == rhs && accepted.contains(&lhs) {
+        return Some(lhs);
     }
+    let expected = accepted
+        .iter()
+        .map(|ty| format!("two {ty}"))
+        .collect::<Vec<_>>();
+    let expected = match expected.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) if rest.len() == 1 => format!("{} or {last}", rest[0]),
+        Some((last, rest)) => format!("{}, or {last}", rest.join(", ")),
+        None => unreachable!("an operator accepts at least one operand type"),
+    };
+    diags.push(Diagnostic::new(
+        pos,
+        format!(
+            "operator '{}' requires {expected} operands, found {lhs} and {rhs}",
+            bin_op_name(op)
+        ),
+    ));
+    None
 }
 
 fn check_binary_types(
@@ -2605,21 +2916,48 @@ fn check_binary_types(
     }
 }
 
+// Report 10.2 gives ABS one INTEGER form and one REAL form, and its result is
+// whichever type it was given. Nothing else here is generic in its result, so
+// the two cases are named directly instead of through a signature framework.
+#[derive(Debug, Clone, Copy)]
+enum BuiltinResult {
+    Fixed(Type),
+    Argument,
+}
+
+impl BuiltinResult {
+    fn ty(self, first_arg: Type) -> Type {
+        match self {
+            BuiltinResult::Fixed(ty) => ty,
+            BuiltinResult::Argument => first_arg,
+        }
+    }
+}
+
 // Argument types and result type of the function-like predefined operations.
 // Each parameter carries the types it accepts, which is one type everywhere
-// except ORD: Report 10.2 gives it a BOOLEAN form and a SET form, and CHAR
-// joins them in Slice 11. INC, DEC, INCL, EXCL, and ASSERT are proper
-// procedures and have no entry: a None here is what makes them "cannot be
-// used as a value" in an expression.
-fn builtin_signature(builtin: Builtin) -> Option<(&'static [&'static [Type]], Type)> {
+// except ABS and ORD: Report 10.2 gives ORD a BOOLEAN form and a SET form,
+// and CHAR joins them in Slice 11. INC, DEC, INCL, EXCL, PACK, UNPK, and
+// ASSERT are proper procedures and have no entry: a None here is what makes
+// them "cannot be used as a value" in an expression.
+fn builtin_signature(builtin: Builtin) -> Option<(&'static [&'static [Type]], BuiltinResult)> {
+    use BuiltinResult::{Argument, Fixed};
     match builtin {
-        Builtin::Abs => Some((&[&[Type::Integer]], Type::Integer)),
-        Builtin::Odd => Some((&[&[Type::Integer]], Type::Boolean)),
+        Builtin::Abs => Some((&[&[Type::Integer, Type::Real]], Argument)),
+        Builtin::Odd => Some((&[&[Type::Integer]], Fixed(Type::Boolean))),
+        Builtin::Floor => Some((&[&[Type::Real]], Fixed(Type::Integer))),
+        Builtin::Flt => Some((&[&[Type::Integer]], Fixed(Type::Real))),
         Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
-            Some((&[&[Type::Integer], &[Type::Integer]], Type::Integer))
+            Some((&[&[Type::Integer], &[Type::Integer]], Fixed(Type::Integer)))
         }
-        Builtin::Ord => Some((&[&[Type::Boolean, Type::Set]], Type::Integer)),
-        Builtin::Inc | Builtin::Dec | Builtin::Incl | Builtin::Excl | Builtin::Assert => None,
+        Builtin::Ord => Some((&[&[Type::Boolean, Type::Set]], Fixed(Type::Integer))),
+        Builtin::Inc
+        | Builtin::Dec
+        | Builtin::Incl
+        | Builtin::Excl
+        | Builtin::Pack
+        | Builtin::Unpk
+        | Builtin::Assert => None,
     }
 }
 
@@ -2661,8 +2999,8 @@ fn label_text(low: i32, high: i32) -> String {
 
 fn unary_type_error(pos: Pos, op: ast::UnOp, found: Type) -> Diagnostic {
     let (name, expected) = match op {
-        ast::UnOp::Plus => ("+", "INTEGER"),
-        ast::UnOp::Neg => ("-", "INTEGER or SET"),
+        ast::UnOp::Plus => ("+", "INTEGER or REAL"),
+        ast::UnOp::Neg => ("-", "INTEGER, REAL, or SET"),
         ast::UnOp::Not => ("~", "BOOLEAN"),
     };
     Diagnostic::new(

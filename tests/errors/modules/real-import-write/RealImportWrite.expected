@@ -1,0 +1,6 @@
+tests/errors/modules/real-import-write/RealImportWrite.Mod:8:3: cannot assign to 'RealImportSupport.scale': it is read-only
+tests/errors/modules/real-import-write/RealImportWrite.Mod:9:28: argument 1 is read-only
+tests/errors/modules/real-import-write/RealImportWrite.Mod:10:8: argument 1 is read-only
+tests/errors/modules/real-import-write/RealImportWrite.Mod:11:8: argument 1 is read-only
+tests/errors/modules/real-import-write/RealImportWrite.Mod:12:11: argument 2 is read-only
+Error: 5 error(s)

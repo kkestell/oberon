@@ -1,7 +1,7 @@
 MODULE SetBad;
   (* Report 8.2 gives SET four binary operators, complement, equality, and
-     inequality, and nothing else. "/" is symmetric difference until REAL
-     arrives, so it has no INTEGER meaning yet. *)
+     inequality, and nothing else. "/" means REAL quotient or symmetric set
+     difference, so it has no INTEGER meaning at all. *)
   VAR s, t: SET; n: INTEGER; b: BOOLEAN;
 BEGIN
   s := s + n;

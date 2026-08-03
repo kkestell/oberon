@@ -1,0 +1,17 @@
+tests/errors/RealBuiltinBad.Mod:9:12: argument 1 has type BOOLEAN, expected INTEGER or REAL
+tests/errors/RealBuiltinBad.Mod:10:12: argument 1 has type REAL, expected INTEGER
+tests/errors/RealBuiltinBad.Mod:11:14: argument 1 has type INTEGER, expected REAL
+tests/errors/RealBuiltinBad.Mod:12:8: wrong number of arguments: expected 1, found 2
+tests/errors/RealBuiltinBad.Mod:13:8: wrong number of arguments: expected 1, found 0
+tests/errors/RealBuiltinBad.Mod:14:8: argument 1 must be a variable
+tests/errors/RealBuiltinBad.Mod:15:10: argument 1 must be a variable
+tests/errors/RealBuiltinBad.Mod:16:8: argument 1 has type INTEGER, expected REAL
+tests/errors/RealBuiltinBad.Mod:17:11: argument 2 has type REAL, expected INTEGER
+tests/errors/RealBuiltinBad.Mod:18:3: wrong number of arguments: expected 2, found 1
+tests/errors/RealBuiltinBad.Mod:19:11: argument 2 has type REAL, expected INTEGER
+tests/errors/RealBuiltinBad.Mod:20:8: argument 1 has type INTEGER, expected REAL
+tests/errors/RealBuiltinBad.Mod:21:8: argument 1 must be a variable
+tests/errors/RealBuiltinBad.Mod:22:3: wrong number of arguments: expected 2, found 3
+tests/errors/RealBuiltinBad.Mod:23:8: 'PACK' cannot be used as a value
+tests/errors/RealBuiltinBad.Mod:24:8: 'UNPK' cannot be used as a value
+Error: 16 error(s)

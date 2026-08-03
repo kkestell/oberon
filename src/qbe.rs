@@ -9,9 +9,7 @@ pub fn emit(program: &ir::Program) -> String {
     let mut out = String::new();
     for module in &program.modules {
         for global in &module.globals {
-            let size = match global.ty {
-                ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => 4,
-            };
+            let size = size(global.ty);
             writeln!(out, "data ${} = align {size} {{ z {size} }}", global.symbol).unwrap();
         }
         if !module.globals.is_empty() {
@@ -57,10 +55,7 @@ fn emit_proc(out: &mut String, proc: &ir::Proc) {
     writeln!(out, ") {{").unwrap();
     writeln!(out, "@start").unwrap();
     for (slot, ty) in &proc.slots {
-        let bytes = match ty {
-            ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => 4,
-        };
-        writeln!(out, "\t%{slot} =l alloc4 {bytes}").unwrap();
+        writeln!(out, "\t%{slot} =l alloc4 {}", size(*ty)).unwrap();
     }
 
     let mut terminated = false;
@@ -107,30 +102,39 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
             )
             .unwrap();
         }
-        ir::Inst::Copy { dst, src } => {
-            writeln!(out, "\t{} =w copy {}", temp(*dst), value(src)).unwrap();
+        ir::Inst::Copy { dst, ty, src } => {
+            writeln!(out, "\t{} ={} copy {}", temp(*dst), class(*ty), value(src)).unwrap();
         }
-        ir::Inst::Un { dst, op, arg } => {
-            let op = match op {
-                ir::UnOp::Neg => "neg",
-                ir::UnOp::Not => "ceqw",
-            };
-            if matches!(op, "ceqw") {
-                writeln!(out, "\t{} =w {op} {}, 0", temp(*dst), value(arg)).unwrap();
-            } else {
-                writeln!(out, "\t{} =w {op} {}", temp(*dst), value(arg)).unwrap();
+        ir::Inst::Un { dst, op, ty, arg } => match op {
+            ir::UnOp::Neg => {
+                writeln!(out, "\t{} ={} neg {}", temp(*dst), class(*ty), value(arg)).unwrap();
             }
-        }
-        ir::Inst::Bin { dst, op, lhs, rhs } => {
+            // QBE has no logical negation, so ~b is b = 0. The operand is
+            // always BOOLEAN, which is already 0 or 1 in a word.
+            ir::UnOp::Not => {
+                writeln!(out, "\t{} =w ceqw {}, 0", temp(*dst), value(arg)).unwrap();
+            }
+        },
+        ir::Inst::Bin {
+            dst,
+            op,
+            ty,
+            lhs,
+            rhs,
+        } => {
+            let result = if op.is_comparison() { "w" } else { class(*ty) };
             writeln!(
                 out,
-                "\t{} =w {} {}, {}",
+                "\t{} ={result} {} {}, {}",
                 temp(*dst),
-                bin_op(*op),
+                bin_op(*op, *ty),
                 value(lhs),
                 value(rhs)
             )
             .unwrap();
+        }
+        ir::Inst::IntToReal { dst, arg } => {
+            writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg)).unwrap();
         }
         ir::Inst::Call { dst, symbol, args } => {
             write!(out, "\t").unwrap();
@@ -164,9 +168,19 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
     }
 }
 
+// QBE passes an `s` in the platform's floating-point class and a `w` in its
+// integer class, which is the native C float and int32_t ABI. Nothing here
+// needs a compiler-specific calling convention.
 fn class(ty: ir::Ty) -> &'static str {
     match ty {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "w",
+        ir::Ty::Real => "s",
+    }
+}
+
+fn size(ty: ir::Ty) -> u32 {
+    match ty {
+        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set | ir::Ty::Real => 4,
     }
 }
 
@@ -181,6 +195,12 @@ fn value(value: &ir::Value) -> String {
         // QBE parses a word immediate as a signed 32-bit number, so a set
         // with bit 31 in it has to be spelled negative. The bits are the same.
         ir::Value::Set(bits) => (*bits as i32).to_string(),
+        // A QBE constant is an untyped bit string, so in an `s` context the
+        // signed spelling of the binary32 pattern reproduces the value
+        // exactly. That covers negative zero and the infinities and NaNs
+        // constant arithmetic can produce, none of which a decimal spelling
+        // states directly.
+        ir::Value::Real(v) => (v.to_bits() as i32).to_string(),
         ir::Value::Temp(id) => temp(*id),
     }
 }
@@ -193,13 +213,24 @@ fn address(addr: &ir::Addr) -> String {
     }
 }
 
-fn bin_op(op: ir::BinOp) -> &'static str {
+// The arithmetic mnemonics are shared: `div` on two singles is already the
+// floating quotient. Only comparisons differ, because QBE names the operand
+// class in the instruction and gives a signedness to the integer forms only.
+// The remaining operations are word-only and never see a REAL operand.
+fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
+    let real = ty == ir::Ty::Real;
     match op {
         ir::BinOp::Add => "add",
         ir::BinOp::Sub => "sub",
         ir::BinOp::Mul => "mul",
         ir::BinOp::Div => "div",
         ir::BinOp::Rem => "rem",
+        ir::BinOp::Eq if real => "ceqs",
+        ir::BinOp::Ne if real => "cnes",
+        ir::BinOp::Lt if real => "clts",
+        ir::BinOp::Le if real => "cles",
+        ir::BinOp::Gt if real => "cgts",
+        ir::BinOp::Ge if real => "cges",
         ir::BinOp::Eq => "ceqw",
         ir::BinOp::Ne => "cnew",
         ir::BinOp::Lt => "csltw",
