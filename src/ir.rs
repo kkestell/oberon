@@ -91,7 +91,7 @@ impl Storage {
 
 pub fn scalar_size(ty: Ty) -> i64 {
     match ty {
-        Ty::Int | Ty::Bool => 4,
+        Ty::Int | Ty::Bool | Ty::Set => 4,
         Ty::Pointer => 8,
     }
 }
@@ -108,18 +108,22 @@ pub enum ParamPass {
     Ref,
 }
 
-// Int and Bool are four bytes and travel in a QBE word.
+// Int, Bool, and Set are four bytes and travel in a QBE word.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ty {
     Int,
     Bool,
+    Set,
     Pointer,
 }
 
+// A SET is a bit vector, so its immediate is unsigned: bit 31 is an ordinary
+// element and not a sign.
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i32),
     Bool(bool),
+    Set(u32),
     Symbol(String),
     Temp(usize),
 }
@@ -217,6 +221,7 @@ pub enum BinOp {
     Sar,
     BitAnd,
     BitOr,
+    BitXor,
 }
 
 impl BinOp {

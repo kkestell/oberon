@@ -20,6 +20,12 @@ use types::*;
 // module scope is innermost".
 const MODULE_SCOPE: usize = 1;
 
+// Report 6.1 leaves the largest SET element implementation-defined. This
+// compiler picks 31, so a SET is exactly one 32-bit bit vector and bit n
+// records membership of element n. Project Oberon makes the same choice.
+const SET_MAX: i32 = 31;
+const SET_FULL: u32 = u32::MAX;
+
 // Where a variable's storage is, what type it has there, and whether it may be
 // written. Report 8.1 builds this by applying selectors to a variable, and
 // every writable context — assignment, a VAR actual, INC and its relatives —
@@ -907,6 +913,7 @@ impl Analyzer {
                 }
             },
             ast::Expr::Bool { value, .. } => Some((ir::Value::Bool(*value), Type::Boolean)),
+            ast::Expr::Set { elements, .. } => self.lower_set(elements),
             ast::Expr::Name(_) => {
                 let source = self.lower_source(expr)?;
                 self.source_scalar(source)
@@ -941,6 +948,18 @@ impl Analyzer {
                         });
                         Some((ir::Value::Temp(dst), found))
                     }
+                    // Report 8.2.3: unary "-" on a SET is the complement.
+                    // Every one of the 32 bits belongs to the domain, so the
+                    // result cannot name an element outside it.
+                    (ast::UnOp::Neg, Type::Set) => Some((
+                        self.bin(
+                            ir::BinOp::BitXor,
+                            ir::Ty::Set,
+                            arg,
+                            ir::Value::Set(SET_FULL),
+                        ),
+                        Type::Set,
+                    )),
                     (ast::UnOp::Not, Type::Boolean) => {
                         let dst = self.temp();
                         self.emit(ir::Inst::Un {
@@ -959,9 +978,148 @@ impl Analyzer {
             }
             ast::Expr::Binary { op, lhs, rhs, pos } => match op {
                 ast::BinOp::And | ast::BinOp::Or => self.lower_logical(*op, lhs, rhs, *pos),
+                ast::BinOp::In => self.lower_membership(lhs, rhs, *pos),
                 _ => self.lower_binary(*op, lhs, rhs, *pos),
             },
         }
+    }
+
+    // Report 8.2: {} is empty, {m} holds m, and {m .. n} holds m through n
+    // and is empty when m > n. Elements are evaluated once each, left to
+    // right, and their masks are combined with union.
+    fn lower_set(&mut self, elements: &[ast::SetElement]) -> Option<(ir::Value, Type)> {
+        let mut result = None;
+        let mut ok = true;
+        for element in elements {
+            let low = self.lower_set_element(&element.low);
+            let mask = match &element.high {
+                None => low.map(|low| self.set_singleton(low)),
+                // The high endpoint is lowered even when the low one failed,
+                // so an invalid range reports both of its errors.
+                Some(high) => {
+                    let high = self.lower_set_element(high);
+                    match (low, high) {
+                        (Some(low), Some(high)) => Some(self.set_range(low, high)),
+                        _ => None,
+                    }
+                }
+            };
+            let Some(mask) = mask else {
+                ok = false;
+                continue;
+            };
+            result = Some(match result {
+                None => mask,
+                Some(acc) => self.set_union(acc, mask),
+            });
+        }
+        ok.then(|| (result.unwrap_or(ir::Value::Set(0)), Type::Set))
+    }
+
+    fn set_singleton(&mut self, element: ir::Value) -> ir::Value {
+        match element {
+            ir::Value::Int(n) => ir::Value::Set(1 << n),
+            _ => self.bin(ir::BinOp::Shl, ir::Ty::Set, ir::Value::Int(1), element),
+        }
+    }
+
+    // The bits at or above the low endpoint, intersected with the bits at or
+    // below the high one. That is empty exactly when the range is reversed,
+    // so the Report's rule for {m .. n} with m > n needs no branch of its
+    // own, and no endpoint comparison is generated. The shift counts are
+    // `low` and `31 - high`, both already checked to lie in 0 .. 31, so
+    // neither can reach the word width.
+    fn set_range(&mut self, low: ir::Value, high: ir::Value) -> ir::Value {
+        if let (ir::Value::Int(low), ir::Value::Int(high)) = (&low, &high) {
+            return ir::Value::Set(set_range_bits(*low, *high));
+        }
+        let above = self.bin(ir::BinOp::Shl, ir::Ty::Set, ir::Value::Set(SET_FULL), low);
+        let drop = self.bin(ir::BinOp::Sub, ir::Ty::Int, ir::Value::Int(SET_MAX), high);
+        let below = self.bin(ir::BinOp::Shr, ir::Ty::Set, ir::Value::Set(SET_FULL), drop);
+        self.bin(ir::BinOp::BitAnd, ir::Ty::Set, above, below)
+    }
+
+    fn set_union(&mut self, lhs: ir::Value, rhs: ir::Value) -> ir::Value {
+        match (lhs, rhs) {
+            (ir::Value::Set(lhs), ir::Value::Set(rhs)) => ir::Value::Set(lhs | rhs),
+            (lhs, rhs) => self.bin(ir::BinOp::BitOr, ir::Ty::Set, lhs, rhs),
+        }
+    }
+
+    fn lower_set_element(&mut self, expr: &ast::Expr) -> Option<ir::Value> {
+        let value = self.lower_int(expr, "set element")?;
+        self.check_set_element(expr, value)
+    }
+
+    // The one domain rule, shared by constructors, ranges, IN, INCL, and
+    // EXCL. A constant is diagnosed here rather than deferred to run time,
+    // and folding is what makes `{16 + 16}` as wrong as `{32}`.
+    fn check_set_element(&mut self, expr: &ast::Expr, value: ir::Value) -> Option<ir::Value> {
+        match self.try_eval_const(expr) {
+            Ok(Some(ConstValue::Int(n))) => {
+                if !(0..=SET_MAX).contains(&n) {
+                    self.diags.push(set_element_range_error(expr.pos(), n));
+                    return None;
+                }
+                return Some(ir::Value::Int(n));
+            }
+            Ok(Some(_)) => unreachable!("set element was type-checked as INTEGER"),
+            Ok(None) => {}
+            Err(diag) => {
+                self.diags.push(diag);
+                return None;
+            }
+        }
+        // QBE reduces a shift count modulo the word width, so an unchecked
+        // 32 would quietly behave like 0.
+        let low = self.bin(ir::BinOp::Lt, ir::Ty::Int, value.clone(), ir::Value::Int(0));
+        let high = self.bin(
+            ir::BinOp::Gt,
+            ir::Ty::Int,
+            value.clone(),
+            ir::Value::Int(SET_MAX),
+        );
+        let bad = self.bin(ir::BinOp::BitOr, ir::Ty::Bool, low, high);
+        let trap = self.label("set.bad");
+        let ok = self.label("set.ok");
+        self.emit(ir::Inst::Br {
+            cond: bad,
+            then: trap.clone(),
+            els: ok.clone(),
+        });
+        self.emit(ir::Inst::Label(trap));
+        self.trap("oberon_set_element_range", expr.pos());
+        self.emit(ir::Inst::Label(ok));
+        Some(value)
+    }
+
+    // Report 8.2: x IN s. The element takes the same domain check as one
+    // written in a constructor, because the test lowers to a shift too.
+    fn lower_membership(
+        &mut self,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        pos: Pos,
+    ) -> Option<(ir::Value, Type)> {
+        let element = self.lower_expr(lhs);
+        let set = self.lower_expr(rhs);
+        let (Some((element, element_ty)), Some((set, set_ty))) = (element, set) else {
+            return None;
+        };
+        if element_ty != Type::Integer || set_ty != Type::Set {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!("operator 'IN' requires INTEGER and SET, found {element_ty} and {set_ty}"),
+            ));
+            return None;
+        }
+        let element = self.check_set_element(lhs, element)?;
+        let bit = self.set_singleton(element);
+        let masked = self.bin(ir::BinOp::BitAnd, ir::Ty::Set, set, bit);
+        Some((
+            self.bin(ir::BinOp::Ne, ir::Ty::Set, masked, ir::Value::Set(0)),
+            Type::Boolean,
+        ))
     }
 
     fn lower_logical(
@@ -1043,7 +1201,7 @@ impl Analyzer {
         // The operand type selects the machine operation, and it is the
         // result type too: a relation never reaches here.
         let (operand_ty, result_ty) = match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul => {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Slash => {
                 let ty = check_arith_types(pos, op, lhs_ty, rhs_ty, &mut self.diags)?;
                 (ty.clone(), ty)
             }
@@ -1065,9 +1223,35 @@ impl Analyzer {
             | BinOp::Le
             | BinOp::Gt
             | BinOp::Ge
+            | BinOp::In
             | BinOp::And
             | BinOp::Or => unreachable!(),
         };
+
+        // Report 8.2: for SET operands "+", "-", "*", and "/" mean union,
+        // difference, intersection, and symmetric difference. Difference
+        // clears the right-hand bits, so it is an intersection with the
+        // complement and never a subtraction.
+        if result_ty == Type::Set {
+            return Some((
+                match op {
+                    BinOp::Add => self.bin(ir::BinOp::BitOr, ir::Ty::Set, lhs, rhs_ir),
+                    BinOp::Sub => {
+                        let keep = self.bin(
+                            ir::BinOp::BitXor,
+                            ir::Ty::Set,
+                            rhs_ir,
+                            ir::Value::Set(SET_FULL),
+                        );
+                        self.bin(ir::BinOp::BitAnd, ir::Ty::Set, lhs, keep)
+                    }
+                    BinOp::Mul => self.bin(ir::BinOp::BitAnd, ir::Ty::Set, lhs, rhs_ir),
+                    BinOp::Slash => self.bin(ir::BinOp::BitXor, ir::Ty::Set, lhs, rhs_ir),
+                    _ => unreachable!("only the four set operators yield SET"),
+                },
+                Type::Set,
+            ));
+        }
 
         let value = match op {
             BinOp::Div | BinOp::Mod => {
@@ -1098,8 +1282,8 @@ impl Analyzer {
         Some((value, result_ty))
     }
 
-    // Report 8.2.4. The relations order INTEGER, and compare BOOLEAN for
-    // equality.
+    // Report 8.2.4. The relations order INTEGER, and compare SET and BOOLEAN
+    // for equality.
     fn lower_relation(
         &mut self,
         op: ast::BinOp,
@@ -1291,6 +1475,7 @@ impl Analyzer {
     ) -> Option<(Option<ir::Value>, Option<Type>)> {
         match builtin {
             Builtin::Inc | Builtin::Dec => return self.lower_inc_dec(builtin, actuals, pos),
+            Builtin::Incl | Builtin::Excl => return self.lower_incl_excl(builtin, actuals, pos),
             Builtin::Assert => return self.lower_assert(actuals, pos),
             _ => {}
         }
@@ -1327,16 +1512,40 @@ impl Analyzer {
                 );
                 self.bin(ir::BinOp::Ne, ir::Ty::Int, rem, ir::Value::Int(0))
             }
-            // BOOLEAN is already 0 or 1 in a word, so the value passes through
-            // with only its type changed. cf. Project Oberon, where ORD lowers
-            // to nothing.
+            // BOOLEAN is already 0 or 1 in a word and a SET is already its
+            // own bit pattern, so the value passes through with only its type
+            // changed. cf. Project Oberon, where ORD lowers to nothing.
             Builtin::Ord => args[0].0.clone(),
             Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
                 self.lower_shift(builtin, args[0].0.clone(), args[1].0.clone(), &actuals[1])?
             }
-            Builtin::Inc | Builtin::Dec | Builtin::Assert => unreachable!("handled above"),
+            Builtin::Inc | Builtin::Dec | Builtin::Incl | Builtin::Excl | Builtin::Assert => {
+                unreachable!("handled above")
+            }
         };
         Some((Some(value), Some(result.ty(args[0].1.clone()))))
+    }
+
+    // The argument of a predefined operation that changes it: a variable of
+    // exactly one type, writable through the same designator path as INC and
+    // therefore equally unable to reach an imported variable.
+    fn modified_actual(
+        &mut self,
+        actual: &ast::Expr,
+        number: usize,
+        expected: Type,
+    ) -> Option<ir::Addr> {
+        match self.var_actual(actual, number) {
+            Some((addr, found)) if found == expected => Some(addr),
+            Some((_, found)) => {
+                self.diags.push(Diagnostic::new(
+                    actual.pos(),
+                    format!("argument {number} has type {found}, expected {expected}"),
+                ));
+                None
+            }
+            None => None,
+        }
     }
 
     // MIN(INTEGER) has no absolute value. Folding rejects it, so the runtime
@@ -1503,6 +1712,46 @@ impl Analyzer {
             let next = self.bin(op, ir::Ty::Int, current, step);
             self.emit(ir::Inst::Store {
                 ty: scalar,
+                val: next,
+                addr,
+            });
+        }
+        Some((None, None))
+    }
+
+    // Report 10.2: INCL(v, x) is v := v + {x} and EXCL(v, x) is v := v - {x}.
+    // Both are proper procedures taking a writable SET variable, so they go
+    // through the same designator path as INC and DEC and are equally unable
+    // to change an imported variable.
+    fn lower_incl_excl(
+        &mut self,
+        builtin: Builtin,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        if !self.builtin_arity(actuals, 2, pos) {
+            return None;
+        }
+        let target = self.modified_actual(&actuals[0], 1, Type::Set);
+        let element = self
+            .builtin_arg(&actuals[1], 2, &[Type::Integer])
+            .and_then(|(value, _)| self.check_set_element(&actuals[1], value));
+        if let (Some(addr), Some(element)) = (target, element) {
+            let bit = self.set_singleton(element);
+            let current = self.load(addr.clone(), ir::Ty::Set);
+            let next = if builtin == Builtin::Incl {
+                self.bin(ir::BinOp::BitOr, ir::Ty::Set, current, bit)
+            } else {
+                let keep = self.bin(
+                    ir::BinOp::BitXor,
+                    ir::Ty::Set,
+                    bit,
+                    ir::Value::Set(SET_FULL),
+                );
+                self.bin(ir::BinOp::BitAnd, ir::Ty::Set, current, keep)
+            };
+            self.emit(ir::Inst::Store {
+                ty: ir::Ty::Set,
                 val: next,
                 addr,
             });
@@ -2029,6 +2278,19 @@ fn shift_range_error(pos: Pos, count: i32) -> Diagnostic {
     )
 }
 
+fn set_element_range_error(pos: Pos, element: i32) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!("set element {element} is out of range: must be between 0 and {SET_MAX}"),
+    )
+}
+
+// The bits of {low .. high}, which is empty when the range is reversed. The
+// runtime form in Analyzer::set_range computes the same intersection.
+fn set_range_bits(low: i32, high: i32) -> u32 {
+    (SET_FULL << low) & (SET_FULL >> (SET_MAX - high))
+}
+
 fn label_text(low: i32, high: i32) -> String {
     if low == high {
         format!("case label {low}")
@@ -2040,7 +2302,7 @@ fn label_text(low: i32, high: i32) -> String {
 fn unary_type_error(pos: Pos, op: ast::UnOp, found: &Type) -> Diagnostic {
     let (name, expected) = match op {
         ast::UnOp::Plus => ("+", "INTEGER"),
-        ast::UnOp::Neg => ("-", "INTEGER"),
+        ast::UnOp::Neg => ("-", "INTEGER or SET"),
         ast::UnOp::Not => ("~", "BOOLEAN"),
     };
     Diagnostic::new(

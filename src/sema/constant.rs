@@ -7,6 +7,19 @@ fn eval_const_binary(
     pos: Pos,
 ) -> Result<ConstValue, Diagnostic> {
     use ast::BinOp;
+    // Same bit rules as the runtime forms in Analyzer::lower_binary: union,
+    // difference, intersection, symmetric difference.
+    if let (ConstValue::Set(lhs), ConstValue::Set(rhs)) = (&lhs, &rhs)
+        && let BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Slash = op
+    {
+        return Ok(ConstValue::Set(match op {
+            BinOp::Add => lhs | rhs,
+            BinOp::Sub => lhs & !rhs,
+            BinOp::Mul => lhs & rhs,
+            BinOp::Slash => lhs ^ rhs,
+            _ => unreachable!(),
+        }));
+    }
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let (ConstValue::Int(lhs), ConstValue::Int(rhs)) = (lhs, rhs) else {
@@ -66,6 +79,8 @@ fn eval_const_binary(
                 _ => unreachable!(),
             }))
         }
+        BinOp::Slash => unreachable!("'/' on non-SET operands was rejected"),
+        BinOp::In => unreachable!("membership is folded with the element check"),
         BinOp::And | BinOp::Or => unreachable!("short-circuit operators handled separately"),
     }
 }
@@ -82,6 +97,30 @@ impl Analyzer {
                 }
             },
             ast::Expr::Bool { .. } => Some(Type::Boolean),
+            ast::Expr::Set { elements, .. } => {
+                // Only the element types are checked here. The domain check
+                // belongs to eval_const, which has the values.
+                let mut ok = true;
+                for element in elements {
+                    for endpoint in [Some(&element.low), element.high.as_ref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        match self.check_const_expr(endpoint) {
+                            Some(Type::Integer) => {}
+                            Some(found) => {
+                                self.diags.push(Diagnostic::new(
+                                    endpoint.pos(),
+                                    format!("set element must be INTEGER, found {found}"),
+                                ));
+                                ok = false;
+                            }
+                            None => ok = false,
+                        }
+                    }
+                }
+                ok.then_some(Type::Set)
+            }
             // A variable is not a constant, but its type still has to be known
             // so the rest of the expression can be checked. eval_const is what
             // reports that it cannot be folded.
@@ -93,6 +132,7 @@ impl Analyzer {
                     (ast::UnOp::Plus, Type::Integer) | (ast::UnOp::Neg, Type::Integer) => {
                         Some(found)
                     }
+                    (ast::UnOp::Neg, Type::Set) => Some(Type::Set),
                     (ast::UnOp::Not, Type::Boolean) => Some(Type::Boolean),
                     _ => {
                         self.diags.push(unary_type_error(*pos, *op, &found));
@@ -108,7 +148,7 @@ impl Analyzer {
                 };
                 use ast::BinOp;
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Slash => {
                         check_arith_types(*pos, *op, lhs, rhs, &mut self.diags)
                     }
                     BinOp::Div | BinOp::Mod => check_binary_types(
@@ -120,6 +160,19 @@ impl Analyzer {
                         Type::Integer,
                         &mut self.diags,
                     ),
+                    BinOp::In => {
+                        if lhs == Type::Integer && rhs == Type::Set {
+                            Some(Type::Boolean)
+                        } else {
+                            self.diags.push(Diagnostic::new(
+                                *pos,
+                                format!(
+                                    "operator 'IN' requires INTEGER and SET, found {lhs} and {rhs}"
+                                ),
+                            ));
+                            None
+                        }
+                    }
                     BinOp::And | BinOp::Or => check_binary_types(
                         *pos,
                         bin_op_name(*op),
@@ -324,6 +377,11 @@ impl Analyzer {
                 .ok_or_else(|| Diagnostic::new(pos, "constant expression overflows")),
             (Builtin::Odd, [ConstValue::Int(value)]) => Ok(ConstValue::Bool(value % 2 != 0)),
             (Builtin::Ord, [ConstValue::Bool(value)]) => Ok(ConstValue::Int(i32::from(*value))),
+            // Report 10.2 calls this the ordinal number of a SET but does not
+            // say how 32 elements map onto a signed INTEGER. Reinterpreting
+            // the bit pattern keeps the folded and runtime forms identical
+            // and matches Project Oberon, where ORD emits nothing at all.
+            (Builtin::Ord, [ConstValue::Set(bits)]) => Ok(ConstValue::Int(*bits as i32)),
             (
                 Builtin::Lsl | Builtin::Asr | Builtin::Ror,
                 [ConstValue::Int(x), ConstValue::Int(n)],
@@ -352,6 +410,19 @@ impl Analyzer {
                 .map(ConstValue::Int)
                 .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
             ast::Expr::Bool { value, .. } => Ok(ConstValue::Bool(*value)),
+            ast::Expr::Set { elements, .. } => {
+                let mut bits = 0;
+                for element in elements {
+                    let low = self.const_set_element(&element.low)?;
+                    bits |= match &element.high {
+                        // Both endpoints are checked before the reversed-range
+                        // rule applies, so {32 .. 0} is an error and not empty.
+                        Some(high) => set_range_bits(low, self.const_set_element(high)?),
+                        None => 1 << low,
+                    };
+                }
+                Ok(ConstValue::Set(bits))
+            }
             ast::Expr::Name(designator) => match self.qualident(designator)? {
                 (Symbol::Const(value), []) => Ok(value),
                 _ => Err(Diagnostic::new(
@@ -376,6 +447,7 @@ impl Analyzer {
                         .checked_neg()
                         .map(ConstValue::Int)
                         .ok_or_else(|| Diagnostic::new(*pos, "constant expression overflows")),
+                    (ast::UnOp::Neg, ConstValue::Set(bits)) => Ok(ConstValue::Set(bits ^ SET_FULL)),
                     (ast::UnOp::Not, ConstValue::Bool(value)) => Ok(ConstValue::Bool(!value)),
                     _ => unreachable!("constant expression was type-checked"),
                 }
@@ -400,10 +472,62 @@ impl Analyzer {
                 ConstValue::Bool(false) => self.eval_const(rhs),
                 _ => unreachable!("constant expression was type-checked"),
             },
+            ast::Expr::Binary {
+                op: ast::BinOp::In,
+                lhs,
+                rhs,
+                ..
+            } => {
+                let element = self.const_set_element(lhs)?;
+                let ConstValue::Set(bits) = self.eval_const(rhs)? else {
+                    unreachable!("constant expression was type-checked");
+                };
+                Ok(ConstValue::Bool(bits & (1 << element) != 0))
+            }
             ast::Expr::Binary { op, lhs, rhs, pos } => {
                 let lhs = self.eval_const(lhs)?;
                 let rhs = self.eval_const(rhs)?;
                 eval_const_binary(*op, lhs, rhs, *pos)
+            }
+        }
+    }
+
+    // Optional constant evaluation has three outcomes. A value can be folded,
+    // an expression containing a variable or user procedure must run, and an
+    // invalid expression made entirely from constants keeps its diagnostic.
+    pub(super) fn try_eval_const(
+        &self,
+        expr: &ast::Expr,
+    ) -> Result<Option<ConstValue>, Diagnostic> {
+        match self.eval_const(expr) {
+            Ok(value) => Ok(Some(value)),
+            Err(diag) if self.is_const_expr(expr) => Err(diag),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn is_const_expr(&self, expr: &ast::Expr) -> bool {
+        match expr {
+            ast::Expr::Int { .. } | ast::Expr::Bool { .. } => true,
+            ast::Expr::Set { elements, .. } => elements.iter().all(|element| {
+                self.is_const_expr(&element.low)
+                    && element
+                        .high
+                        .as_ref()
+                        .is_none_or(|high| self.is_const_expr(high))
+            }),
+            ast::Expr::Name(designator) => {
+                matches!(self.resolve(designator), Ok(Symbol::Const(_)))
+            }
+            ast::Expr::Apply { callee, args, .. } => {
+                matches!(
+                    self.resolve(callee),
+                    Ok(Symbol::Builtin(builtin)) if builtin_signature(builtin).is_some()
+                ) && args.iter().all(|arg| self.is_const_expr(arg))
+            }
+            ast::Expr::Unary { expr, .. } => self.is_const_expr(expr),
+            ast::Expr::Binary { lhs, rhs, .. } => {
+                self.is_const_expr(lhs) && self.is_const_expr(rhs)
             }
         }
     }
@@ -452,5 +576,18 @@ impl Analyzer {
             pos,
             format!("cannot select '{name}' from {ty}: only a record has fields"),
         ))
+    }
+
+    // The static half of the one element-domain rule; Analyzer::
+    // check_set_element is the runtime half, and the two must stay in step.
+    fn const_set_element(&self, expr: &ast::Expr) -> Result<i32, Diagnostic> {
+        let ConstValue::Int(element) = self.eval_const(expr)? else {
+            unreachable!("constant expression was type-checked");
+        };
+        if (0..=SET_MAX).contains(&element) {
+            Ok(element)
+        } else {
+            Err(set_element_range_error(expr.pos(), element))
+        }
     }
 }

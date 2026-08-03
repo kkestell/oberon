@@ -553,6 +553,7 @@ impl Parser {
             Tok::Le => BinOp::Le,
             Tok::Gt => BinOp::Gt,
             Tok::Ge => BinOp::Ge,
+            Tok::In => BinOp::In,
             _ => return Ok(lhs),
         };
         let pos = self.pos();
@@ -625,6 +626,7 @@ impl Parser {
                 Tok::Star => BinOp::Mul,
                 Tok::Div => BinOp::Div,
                 Tok::Mod => BinOp::Mod,
+                Tok::Slash => BinOp::Slash,
                 Tok::Amp => BinOp::And,
                 _ => break,
             };
@@ -682,7 +684,35 @@ impl Parser {
                 self.expect(Tok::RParen, "')'")?;
                 Ok(e)
             }
+            Tok::LBrace => self.set(),
             other => Err(self.error(format!("expected expression, found {other:?}"))),
         }
+    }
+
+    // set = "{" [element {"," element}] "}"
+    // element = expression [".." expression]
+    fn set(&mut self) -> PResult<Expr> {
+        let pos = self.pos();
+        self.expect(Tok::LBrace, "'{'")?;
+        let mut elements = Vec::new();
+        if *self.peek() != Tok::RBrace {
+            loop {
+                let low = self.expression()?;
+                let high = if *self.peek() == Tok::DotDot {
+                    self.advance();
+                    Some(self.expression()?)
+                } else {
+                    None
+                };
+                elements.push(SetElement { low, high });
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(Tok::RBrace, "'}'")?;
+        Ok(Expr::Set { elements, pos })
     }
 }

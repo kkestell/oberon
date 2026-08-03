@@ -11,6 +11,9 @@ pub(super) type Scope = HashMap<String, Symbol>;
 pub enum ConstValue {
     Int(i32),
     Bool(bool),
+    // Unsigned so complement covers exactly the 32 supported elements and no
+    // set operation can overflow a signed INTEGER.
+    Set(u32),
 }
 
 impl ConstValue {
@@ -18,6 +21,7 @@ impl ConstValue {
         match self {
             ConstValue::Int(_) => Type::Integer,
             ConstValue::Bool(_) => Type::Boolean,
+            ConstValue::Set(_) => Type::Set,
         }
     }
 
@@ -25,6 +29,7 @@ impl ConstValue {
         match self {
             ConstValue::Int(v) => ir::Value::Int(*v),
             ConstValue::Bool(v) => ir::Value::Bool(*v),
+            ConstValue::Set(v) => ir::Value::Set(*v),
         }
     }
 }
@@ -102,6 +107,8 @@ pub(super) enum Builtin {
     Ord,
     Inc,
     Dec,
+    Incl,
+    Excl,
     Assert,
 }
 
@@ -109,6 +116,7 @@ pub(super) fn universe_scope() -> Scope {
     let mut scope = Scope::new();
     scope.insert("INTEGER".into(), Symbol::TypeName(Type::Integer));
     scope.insert("BOOLEAN".into(), Symbol::TypeName(Type::Boolean));
+    scope.insert("SET".into(), Symbol::TypeName(Type::Set));
     for (name, builtin) in [
         ("ABS", Builtin::Abs),
         ("ODD", Builtin::Odd),
@@ -118,6 +126,8 @@ pub(super) fn universe_scope() -> Scope {
         ("ORD", Builtin::Ord),
         ("INC", Builtin::Inc),
         ("DEC", Builtin::Dec),
+        ("INCL", Builtin::Incl),
+        ("EXCL", Builtin::Excl),
         ("ASSERT", Builtin::Assert),
     ] {
         scope.insert(name.into(), Symbol::Builtin(builtin));
@@ -180,9 +190,10 @@ impl BuiltinResult {
 }
 
 // Argument types and result type of the function-like predefined operations.
-// Each parameter carries the types it accepts. INC, DEC, and ASSERT are proper
-// procedures and have no entry: a None here is what makes them "cannot be
-// used as a value" in an expression.
+// Each parameter carries the types it accepts, which is one type everywhere
+// except ABS and ORD: Report 10.2 gives ORD a BOOLEAN form and a SET form.
+// INC, DEC, INCL, EXCL, and ASSERT are proper procedures and have no entry: a
+// None here is what makes them "cannot be used as a value" in an expression.
 pub(super) fn builtin_signature(
     builtin: Builtin,
 ) -> Option<(&'static [&'static [Type]], BuiltinResult)> {
@@ -193,8 +204,8 @@ pub(super) fn builtin_signature(
         Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
             Some((&[&[Type::Integer], &[Type::Integer]], Fixed(Type::Integer)))
         }
-        Builtin::Ord => Some((&[&[Type::Boolean]], Fixed(Type::Integer))),
-        Builtin::Inc | Builtin::Dec | Builtin::Assert => None,
+        Builtin::Ord => Some((&[&[Type::Boolean, Type::Set]], Fixed(Type::Integer))),
+        Builtin::Inc | Builtin::Dec | Builtin::Incl | Builtin::Excl | Builtin::Assert => None,
     }
 }
 

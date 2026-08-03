@@ -242,7 +242,7 @@ fn arg(arg: &ir::Arg, names: &Names, slots: &HashMap<&str, String>) -> String {
 
 fn class(ty: ir::Ty) -> &'static str {
     match ty {
-        ir::Ty::Int | ir::Ty::Bool => "w",
+        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "w",
         ir::Ty::Pointer => "l",
     }
 }
@@ -250,14 +250,14 @@ fn class(ty: ir::Ty) -> &'static str {
 // The memory mnemonics come from the type, not from its register class.
 fn load_op(ty: ir::Ty) -> &'static str {
     match ty {
-        ir::Ty::Int | ir::Ty::Bool => "loadw",
+        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "loadw",
         ir::Ty::Pointer => "loadl",
     }
 }
 
 fn store_op(ty: ir::Ty) -> &'static str {
     match ty {
-        ir::Ty::Int | ir::Ty::Bool => "storew",
+        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "storew",
         ir::Ty::Pointer => "storel",
     }
 }
@@ -283,6 +283,9 @@ fn value(value: &ir::Value, names: &Names) -> String {
     match value {
         ir::Value::Int(value) => value.to_string(),
         ir::Value::Bool(value) => usize::from(*value).to_string(),
+        // QBE parses a word immediate as a signed 32-bit number, so a set
+        // with bit 31 in it has to be spelled negative. The bits are the same.
+        ir::Value::Set(bits) => (*bits as i32).to_string(),
         ir::Value::Symbol(symbol) => format!("${}", names.symbol(symbol)),
         ir::Value::Temp(id) => temp(*id),
     }
@@ -345,5 +348,6 @@ fn bin_op(op: ir::BinOp) -> &'static str {
         ir::BinOp::Sar => "sar",
         ir::BinOp::BitAnd => "and",
         ir::BinOp::BitOr => "or",
+        ir::BinOp::BitXor => "xor",
     }
 }

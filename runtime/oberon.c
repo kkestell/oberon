@@ -46,3 +46,8 @@ void oberon_shift_range(const char *module, int32_t line, int32_t col)
 {
     oberon_fail("shift count out of range", module, line, col);
 }
+
+void oberon_set_element_range(const char *module, int32_t line, int32_t col)
+{
+    oberon_fail("SET element out of range", module, line, col);
+}

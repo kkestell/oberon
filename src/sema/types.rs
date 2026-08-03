@@ -10,6 +10,8 @@ pub(super) fn bin_op_name(op: ast::BinOp) -> &'static str {
         ast::BinOp::Add => "+",
         ast::BinOp::Sub => "-",
         ast::BinOp::Mul => "*",
+        ast::BinOp::Slash => "/",
+        ast::BinOp::In => "IN",
         ast::BinOp::Div => "DIV",
         ast::BinOp::Mod => "MOD",
         ast::BinOp::Eq => "=",
@@ -39,7 +41,10 @@ pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
     None
 }
 
-// Report 8.2: "+", "-", and "*" take two INTEGERs.
+// Report 8.2 overloads "+", "-", "*", and "/". The first three take two
+// INTEGERs or two SETs; "/" means symmetric set difference and has no INTEGER
+// meaning. The operation is chosen from the operand types, not from the
+// token, so the AST keeps the source operator.
 
 pub(super) fn check_arith_types(
     pos: Pos,
@@ -48,12 +53,17 @@ pub(super) fn check_arith_types(
     rhs: Type,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
-    check_operand_types(pos, op, &[Type::Integer], lhs, rhs, diags)
+    let accepted: &[Type] = if op == ast::BinOp::Slash {
+        &[Type::Set]
+    } else {
+        &[Type::Integer, Type::Set]
+    };
+    check_operand_types(pos, op, accepted, lhs, rhs, diags)
 }
 
-// Report 8.2.4 orders INTEGER; BOOLEAN has equality and inequality only. The
-// operand type is returned rather than BOOLEAN, because the comparison
-// instruction is chosen from it.
+// Report 8.2.4 orders INTEGER; SET and BOOLEAN have equality and inequality
+// only. The operand type is returned rather than
+// BOOLEAN, because the comparison instruction is chosen from it.
 pub(super) fn check_order_types(
     pos: Pos,
     op: ast::BinOp,
@@ -119,6 +129,7 @@ pub(super) fn check_binary_types(
 pub enum Type {
     Integer,
     Boolean,
+    Set,
     // A declared procedure's signature. No source names it, so it has no
     // value and no storage.
     Procedure(Rc<ProcedureType>),
@@ -142,6 +153,7 @@ impl Type {
         match self {
             Type::Integer => Some(ir::Ty::Int),
             Type::Boolean => Some(ir::Ty::Bool),
+            Type::Set => Some(ir::Ty::Set),
             Type::Procedure(_) => None,
         }
     }
@@ -166,7 +178,9 @@ impl Type {
 impl PartialEq for Type {
     fn eq(&self, other: &Type) -> bool {
         match (self, other) {
-            (Type::Integer, Type::Integer) | (Type::Boolean, Type::Boolean) => true,
+            (Type::Integer, Type::Integer)
+            | (Type::Boolean, Type::Boolean)
+            | (Type::Set, Type::Set) => true,
             (Type::Procedure(a), Type::Procedure(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
@@ -178,6 +192,7 @@ impl fmt::Display for Type {
         match self {
             Type::Integer => write!(f, "INTEGER"),
             Type::Boolean => write!(f, "BOOLEAN"),
+            Type::Set => write!(f, "SET"),
             Type::Procedure(procedure) => {
                 write!(f, "PROCEDURE")?;
                 if !procedure.params.is_empty() || procedure.ret.is_some() {

@@ -1,0 +1,10 @@
+tests/errors/SetElementConst.Mod:10:9: set element -1 is out of range: must be between 0 and 31
+tests/errors/SetElementConst.Mod:11:9: set element 32 is out of range: must be between 0 and 31
+tests/errors/SetElementConst.Mod:12:9: set element 32 is out of range: must be between 0 and 31
+tests/errors/SetElementConst.Mod:13:14: set element 32 is out of range: must be between 0 and 31
+tests/errors/SetElementConst.Mod:14:9: set element 33 is out of range: must be between 0 and 31
+tests/errors/SetElementConst.Mod:14:15: set element 40 is out of range: must be between 0 and 31
+tests/errors/SetElementConst.Mod:15:14: set element 32 is out of range: must be between 0 and 31
+tests/errors/SetElementConst.Mod:16:9: set element 32 is out of range: must be between 0 and 31
+tests/errors/SetElementConst.Mod:17:11: constant DIV or MOD by zero
+Error: 9 error(s)
