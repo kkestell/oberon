@@ -9,6 +9,7 @@ mod constant;
 mod symbols;
 mod types;
 
+use constant::floor_const;
 use symbols::{
     Builtin, ConstValue, Member, Scope, Symbol, builtin_signature, type_list, universe_scope,
 };
@@ -25,6 +26,13 @@ const MODULE_SCOPE: usize = 1;
 // records membership of element n. Project Oberon makes the same choice.
 const SET_MAX: i32 = 31;
 const SET_FULL: u32 = u32::MAX;
+
+// Report 10.2: FLOOR yields the largest INTEGER not greater than its
+// argument, so an argument only has a result while one exists. Both endpoints
+// are exact binary32 values, and the upper one is excluded because it is
+// MAX(INTEGER) + 1. The runtime check in oberon_floor uses the same pair.
+const FLOOR_MIN: f32 = -2147483648.0;
+const FLOOR_LIMIT: f32 = 2147483648.0;
 
 // Where a variable's storage is, what type it has there, and whether it may be
 // written. Report 8.1 builds this by applying selectors to a variable, and
@@ -912,6 +920,7 @@ impl Analyzer {
                     None
                 }
             },
+            ast::Expr::Real { value, .. } => Some((ir::Value::Real(*value), Type::Real)),
             ast::Expr::Bool { value, .. } => Some((ir::Value::Bool(*value), Type::Boolean)),
             ast::Expr::Set { elements, .. } => self.lower_set(elements),
             ast::Expr::Name(_) => {
@@ -935,10 +944,11 @@ impl Analyzer {
                 match (op, &found) {
                     // Report 8.2.2: unary "+" is the identity on a numeric
                     // operand, so it needs no instruction of its own.
-                    (ast::UnOp::Plus, Type::Integer) => Some((arg, found)),
-                    // INTEGER negation is the word operation, which wraps at
-                    // MIN(INTEGER).
-                    (ast::UnOp::Neg, Type::Integer) => {
+                    (ast::UnOp::Plus, Type::Integer | Type::Real) => Some((arg, found)),
+                    // REAL negation flips the binary32 sign; INTEGER negation
+                    // is the word operation, which still wraps at
+                    // MIN(INTEGER) as it did before this slice.
+                    (ast::UnOp::Neg, Type::Integer | Type::Real) => {
                         let dst = self.temp();
                         self.emit(ir::Inst::Un {
                             dst,
@@ -1272,6 +1282,11 @@ impl Analyzer {
                     BinOp::Add => ir::BinOp::Add,
                     BinOp::Sub => ir::BinOp::Sub,
                     BinOp::Mul => ir::BinOp::Mul,
+                    // Only REAL reaches this: "/" on two INTEGERs is not an
+                    // Oberon operation, and the SET form returned above.
+                    // IEEE division by zero yields an infinity or a NaN and
+                    // is not a trap, unlike DIV and MOD.
+                    BinOp::Slash => ir::BinOp::Div,
                     _ => unreachable!(),
                 },
                 operand_ty.ir(),
@@ -1282,8 +1297,8 @@ impl Analyzer {
         Some((value, result_ty))
     }
 
-    // Report 8.2.4. The relations order INTEGER, and compare SET and BOOLEAN
-    // for equality.
+    // Report 8.2.4. The relations order INTEGER and REAL, and compare SET and
+    // BOOLEAN for equality.
     fn lower_relation(
         &mut self,
         op: ast::BinOp,
@@ -1476,6 +1491,8 @@ impl Analyzer {
         match builtin {
             Builtin::Inc | Builtin::Dec => return self.lower_inc_dec(builtin, actuals, pos),
             Builtin::Incl | Builtin::Excl => return self.lower_incl_excl(builtin, actuals, pos),
+            Builtin::Pack => return self.lower_pack(actuals, pos),
+            Builtin::Unpk => return self.lower_unpk(actuals, pos),
             Builtin::Assert => return self.lower_assert(actuals, pos),
             _ => {}
         }
@@ -1499,7 +1516,15 @@ impl Analyzer {
         }
 
         let value = match builtin {
-            Builtin::Abs => self.lower_abs_int(args[0].0.clone(), pos),
+            Builtin::Abs => match args[0].1 {
+                Type::Integer => self.lower_abs_int(args[0].0.clone(), pos),
+                Type::Real => self.call_runtime(
+                    "oberon_abs_real",
+                    vec![ir::Arg::Val(ir::Ty::Real, args[0].0.clone())],
+                    ir::Ty::Real,
+                ),
+                _ => unreachable!("ABS was type-checked as INTEGER or REAL"),
+            },
             // Truncating remainder, so the test must be against zero and not
             // against one: -3 rem 2 is -1. This agrees with the Report's
             // "x MOD 2 = 1" under the floored MOD the compiler implements.
@@ -1512,6 +1537,26 @@ impl Analyzer {
                 );
                 self.bin(ir::BinOp::Ne, ir::Ty::Int, rem, ir::Value::Int(0))
             }
+            // The rounded argument has to be inside the INTEGER range for a
+            // result to exist, and neither QBE nor C defines a conversion
+            // that is out of range, so the wrapper checks the domain itself.
+            Builtin::Floor => {
+                self.check_floor_argument(&actuals[0])?;
+                let mut floor_args = vec![ir::Arg::Val(ir::Ty::Real, args[0].0.clone())];
+                floor_args.extend(self.site(pos).args());
+                self.call_runtime("oberon_floor", floor_args, ir::Ty::Int)
+            }
+            // The one conversion between machine classes. It rounds to the
+            // nearest binary32 value, so an INTEGER near the top of the range
+            // does not survive the trip.
+            Builtin::Flt => {
+                let dst = self.temp();
+                self.emit(ir::Inst::IntToReal {
+                    dst,
+                    arg: args[0].0.clone(),
+                });
+                ir::Value::Temp(dst)
+            }
             // BOOLEAN is already 0 or 1 in a word and a SET is already its
             // own bit pattern, so the value passes through with only its type
             // changed. cf. Project Oberon, where ORD lowers to nothing.
@@ -1519,11 +1564,66 @@ impl Analyzer {
             Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
                 self.lower_shift(builtin, args[0].0.clone(), args[1].0.clone(), &actuals[1])?
             }
-            Builtin::Inc | Builtin::Dec | Builtin::Incl | Builtin::Excl | Builtin::Assert => {
-                unreachable!("handled above")
-            }
+            Builtin::Inc
+            | Builtin::Dec
+            | Builtin::Incl
+            | Builtin::Excl
+            | Builtin::Pack
+            | Builtin::Unpk
+            | Builtin::Assert => unreachable!("handled above"),
         };
         Some((Some(value), Some(result.ty(args[0].1.clone()))))
+    }
+
+    // Report 10.2: PACK(x, n) is x := x * 2^n on a writable REAL variable.
+    // The address is resolved before the exponent is lowered, so the two
+    // arguments are evaluated left to right and each exactly once.
+    fn lower_pack(
+        &mut self,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        if !self.builtin_arity(actuals, 2, pos) {
+            return None;
+        }
+        let target = self.modified_actual(&actuals[0], 1, Type::Real);
+        let exponent = self
+            .builtin_arg(&actuals[1], 2, &[Type::Integer])
+            .map(|(value, _)| value);
+        if let (Some(addr), Some(exponent)) = (target, exponent) {
+            self.emit(ir::Inst::Call {
+                dst: None,
+                symbol: "oberon_pack".into(),
+                args: vec![ir::Arg::Ref(addr), ir::Arg::Val(ir::Ty::Int, exponent)],
+            });
+        }
+        Some((None, None))
+    }
+
+    // Report 10.2: UNPK(x, n) splits x into a fraction and an exponent, so
+    // both arguments are writable variables and both reach the runtime as
+    // addresses.
+    fn lower_unpk(
+        &mut self,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        if !self.builtin_arity(actuals, 2, pos) {
+            return None;
+        }
+        let fraction = self.modified_actual(&actuals[0], 1, Type::Real);
+        let exponent = self.modified_actual(&actuals[1], 2, Type::Integer);
+        if let (Some(fraction), Some(exponent)) = (fraction, exponent) {
+            self.emit(ir::Inst::Call {
+                dst: None,
+                symbol: "oberon_unpk".into(),
+                args: [ir::Arg::Ref(fraction), ir::Arg::Ref(exponent)]
+                    .into_iter()
+                    .chain(self.site(pos).args())
+                    .collect(),
+            });
+        }
+        Some((None, None))
     }
 
     // The argument of a predefined operation that changes it: a variable of
@@ -1548,8 +1648,44 @@ impl Analyzer {
         }
     }
 
+    // A predefined operation the C runtime implements. The call names the
+    // exact value type of every argument and of the result, so QBE emits the
+    // native calling classes.
+    fn call_runtime(&mut self, symbol: &str, args: Vec<ir::Arg>, ret: ir::Ty) -> ir::Value {
+        let dst = self.temp();
+        self.emit(ir::Inst::Call {
+            dst: Some((dst, ret)),
+            symbol: symbol.into(),
+            args,
+        });
+        ir::Value::Temp(dst)
+    }
+
+    // A known FLOOR argument outside the INTEGER result domain is a source
+    // error even in an executable expression. A dynamic argument keeps the
+    // runtime check. Valid constants also keep the ordinary runtime lowering,
+    // because this compiler has no optimization pass.
+    fn check_floor_argument(&mut self, actual: &ast::Expr) -> Option<()> {
+        match self.try_eval_const(actual) {
+            Ok(Some(ConstValue::Real(value))) => match floor_const(value, actual.pos()) {
+                Ok(_) => Some(()),
+                Err(diag) => {
+                    self.diags.push(diag);
+                    None
+                }
+            },
+            Ok(Some(_)) => unreachable!("FLOOR argument was type-checked as REAL"),
+            Ok(None) => Some(()),
+            Err(diag) => {
+                self.diags.push(diag);
+                None
+            }
+        }
+    }
+
     // MIN(INTEGER) has no absolute value. Folding rejects it, so the runtime
-    // form must not quietly wrap the way unary minus still does.
+    // form must not quietly wrap the way unary minus still does. The REAL
+    // form has no such hole and is an ordinary runtime call.
     fn lower_abs_int(&mut self, arg: ir::Value, pos: Pos) -> ir::Value {
         let overflows = self.bin(
             ir::BinOp::Eq,
@@ -2138,8 +2274,8 @@ impl Analyzer {
         self.builder().proc.insts.push(inst);
     }
 
-    // `ty` is the operand type, which is what the emitter needs to choose the
-    // instruction's class.
+    // `ty` is the operand type, which is what the emitter needs to choose
+    // between a word and a single-precision instruction.
     fn bin(&mut self, op: ir::BinOp, ty: ir::Ty, lhs: ir::Value, rhs: ir::Value) -> ir::Value {
         let dst = self.temp();
         self.emit(ir::Inst::Bin {
@@ -2301,8 +2437,8 @@ fn label_text(low: i32, high: i32) -> String {
 
 fn unary_type_error(pos: Pos, op: ast::UnOp, found: &Type) -> Diagnostic {
     let (name, expected) = match op {
-        ast::UnOp::Plus => ("+", "INTEGER"),
-        ast::UnOp::Neg => ("-", "INTEGER or SET"),
+        ast::UnOp::Plus => ("+", "INTEGER or REAL"),
+        ast::UnOp::Neg => ("-", "INTEGER, REAL, or SET"),
         ast::UnOp::Not => ("~", "BOOLEAN"),
     };
     Diagnostic::new(

@@ -20,6 +20,30 @@ fn eval_const_binary(
             _ => unreachable!(),
         }));
     }
+    // Every source operator rounds at binary32, so a folded expression takes
+    // the same rounding steps as the same expression computed at run time.
+    // IEEE behaviour is the whole answer here: overflow yields an infinity,
+    // division by zero yields an infinity or a NaN, and neither is a
+    // diagnostic. A NaN is unequal to everything, itself included, and every
+    // ordering comparison against one is false.
+    if let (ConstValue::Real(lhs), ConstValue::Real(rhs)) = (&lhs, &rhs) {
+        let (lhs, rhs) = (*lhs, *rhs);
+        return Ok(match op {
+            BinOp::Add => ConstValue::Real(lhs + rhs),
+            BinOp::Sub => ConstValue::Real(lhs - rhs),
+            BinOp::Mul => ConstValue::Real(lhs * rhs),
+            BinOp::Slash => ConstValue::Real(lhs / rhs),
+            BinOp::Eq => ConstValue::Bool(lhs == rhs),
+            BinOp::Ne => ConstValue::Bool(lhs != rhs),
+            BinOp::Lt => ConstValue::Bool(lhs < rhs),
+            BinOp::Le => ConstValue::Bool(lhs <= rhs),
+            BinOp::Gt => ConstValue::Bool(lhs > rhs),
+            BinOp::Ge => ConstValue::Bool(lhs >= rhs),
+            BinOp::Div | BinOp::Mod | BinOp::In | BinOp::And | BinOp::Or => {
+                unreachable!("constant expression was type-checked")
+            }
+        });
+    }
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let (ConstValue::Int(lhs), ConstValue::Int(rhs)) = (lhs, rhs) else {
@@ -85,6 +109,17 @@ fn eval_const_binary(
     }
 }
 
+pub(super) fn floor_const(value: f32, pos: Pos) -> Result<i32, Diagnostic> {
+    if !value.is_finite() || !(FLOOR_MIN..FLOOR_LIMIT).contains(&value) {
+        Err(Diagnostic::new(
+            pos,
+            "constant FLOOR result is outside INTEGER range",
+        ))
+    } else {
+        Ok(value.floor() as i32)
+    }
+}
+
 impl Analyzer {
     pub(super) fn check_const_expr(&mut self, expr: &ast::Expr) -> Option<Type> {
         match expr {
@@ -96,6 +131,7 @@ impl Analyzer {
                     None
                 }
             },
+            ast::Expr::Real { .. } => Some(Type::Real),
             ast::Expr::Bool { .. } => Some(Type::Boolean),
             ast::Expr::Set { elements, .. } => {
                 // Only the element types are checked here. The domain check
@@ -129,9 +165,8 @@ impl Analyzer {
             ast::Expr::Unary { op, expr, pos } => {
                 let found = self.check_const_expr(expr)?;
                 match (op, &found) {
-                    (ast::UnOp::Plus, Type::Integer) | (ast::UnOp::Neg, Type::Integer) => {
-                        Some(found)
-                    }
+                    (ast::UnOp::Plus, Type::Integer | Type::Real)
+                    | (ast::UnOp::Neg, Type::Integer | Type::Real) => Some(found),
                     (ast::UnOp::Neg, Type::Set) => Some(Type::Set),
                     (ast::UnOp::Not, Type::Boolean) => Some(Type::Boolean),
                     _ => {
@@ -375,7 +410,16 @@ impl Analyzer {
                 .checked_abs()
                 .map(ConstValue::Int)
                 .ok_or_else(|| Diagnostic::new(pos, "constant expression overflows")),
+            // Clears the sign of a negative zero, leaves an infinity alone,
+            // and returns a NaN for a NaN, exactly as fabsf does at run time.
+            (Builtin::Abs, [ConstValue::Real(value)]) => Ok(ConstValue::Real(value.abs())),
             (Builtin::Odd, [ConstValue::Int(value)]) => Ok(ConstValue::Bool(value % 2 != 0)),
+            // The rounding is what makes FLT(MAX(INTEGER)) equal 2147483648.0
+            // and therefore outside the FLOOR domain below.
+            (Builtin::Flt, [ConstValue::Int(value)]) => Ok(ConstValue::Real(*value as f32)),
+            (Builtin::Floor, [ConstValue::Real(value)]) => {
+                floor_const(*value, actuals[0].pos()).map(ConstValue::Int)
+            }
             (Builtin::Ord, [ConstValue::Bool(value)]) => Ok(ConstValue::Int(i32::from(*value))),
             // Report 10.2 calls this the ordinal number of a SET but does not
             // say how 32 elements map onto a signed INTEGER. Reinterpreting
@@ -409,6 +453,7 @@ impl Analyzer {
             ast::Expr::Int { value, pos } => i32::try_from(*value)
                 .map(ConstValue::Int)
                 .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
+            ast::Expr::Real { value, .. } => Ok(ConstValue::Real(*value)),
             ast::Expr::Bool { value, .. } => Ok(ConstValue::Bool(*value)),
             ast::Expr::Set { elements, .. } => {
                 let mut bits = 0;
@@ -442,11 +487,16 @@ impl Analyzer {
             ast::Expr::Unary { op, expr, pos } => {
                 let value = self.eval_const(expr)?;
                 match (op, value) {
-                    (ast::UnOp::Plus, value @ ConstValue::Int(_)) => Ok(value),
+                    (ast::UnOp::Plus, value @ (ConstValue::Int(_) | ConstValue::Real(_))) => {
+                        Ok(value)
+                    }
                     (ast::UnOp::Neg, ConstValue::Int(value)) => value
                         .checked_neg()
                         .map(ConstValue::Int)
                         .ok_or_else(|| Diagnostic::new(*pos, "constant expression overflows")),
+                    // Flipping the binary32 sign, so -0.0 is a value the
+                    // source can write and the emitted immediate preserves.
+                    (ast::UnOp::Neg, ConstValue::Real(value)) => Ok(ConstValue::Real(-value)),
                     (ast::UnOp::Neg, ConstValue::Set(bits)) => Ok(ConstValue::Set(bits ^ SET_FULL)),
                     (ast::UnOp::Not, ConstValue::Bool(value)) => Ok(ConstValue::Bool(!value)),
                     _ => unreachable!("constant expression was type-checked"),
@@ -508,7 +558,7 @@ impl Analyzer {
 
     fn is_const_expr(&self, expr: &ast::Expr) -> bool {
         match expr {
-            ast::Expr::Int { .. } | ast::Expr::Bool { .. } => true,
+            ast::Expr::Int { .. } | ast::Expr::Real { .. } | ast::Expr::Bool { .. } => true,
             ast::Expr::Set { elements, .. } => elements.iter().all(|element| {
                 self.is_const_expr(&element.low)
                     && element

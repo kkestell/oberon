@@ -1,0 +1,7 @@
+tests/errors/FloorConstRange.Mod:8:19: constant FLOOR result is outside INTEGER range
+tests/errors/FloorConstRange.Mod:9:19: constant FLOOR result is outside INTEGER range
+tests/errors/FloorConstRange.Mod:10:21: constant FLOOR result is outside INTEGER range
+tests/errors/FloorConstRange.Mod:11:26: constant FLOOR result is outside INTEGER range
+tests/errors/FloorConstRange.Mod:12:28: constant FLOOR result is outside INTEGER range
+tests/errors/FloorConstRange.Mod:15:14: constant FLOOR result is outside INTEGER range
+Error: 6 error(s)

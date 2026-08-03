@@ -651,6 +651,12 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Int { value, pos })
             }
+            Tok::Real(value) => {
+                let value = *value;
+                let pos = self.pos();
+                self.advance();
+                Ok(Expr::Real { value, pos })
+            }
             Tok::True | Tok::False => {
                 let value = *self.peek() == Tok::True;
                 let pos = self.pos();

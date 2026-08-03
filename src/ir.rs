@@ -91,7 +91,7 @@ impl Storage {
 
 pub fn scalar_size(ty: Ty) -> i64 {
     match ty {
-        Ty::Int | Ty::Bool | Ty::Set => 4,
+        Ty::Int | Ty::Bool | Ty::Set | Ty::Real => 4,
         Ty::Pointer => 8,
     }
 }
@@ -108,12 +108,15 @@ pub enum ParamPass {
     Ref,
 }
 
-// Int, Bool, and Set are four bytes and travel in a QBE word.
+// Int, Bool, and Set are four bytes and travel in a QBE word; Real is IEEE
+// 754 binary32 and travels in a QBE single, which is a distinct calling class
+// and a distinct set of arithmetic and comparison operations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ty {
     Int,
     Bool,
     Set,
+    Real,
     Pointer,
 }
 
@@ -124,6 +127,7 @@ pub enum Value {
     Int(i32),
     Bool(bool),
     Set(u32),
+    Real(f32),
     Symbol(String),
     Temp(usize),
 }
@@ -153,7 +157,9 @@ pub enum Inst {
         ty: Ty,
         src: Value,
     },
-    // `ty` is the operand type, which is also the result type.
+    // `ty` is the operand type, which is also the result type: negation of a
+    // REAL is a single-precision operation and negation of an INTEGER is a
+    // word one.
     Un {
         dst: usize,
         op: UnOp,
@@ -170,6 +176,12 @@ pub enum Inst {
         ty: Ty,
         lhs: Value,
         rhs: Value,
+    },
+    // Report 10.2 FLT: the only conversion between machine classes this
+    // compiler has, so it needs no general conversion matrix.
+    IntToReal {
+        dst: usize,
+        arg: Value,
     },
     Call {
         dst: Option<(usize, Ty)>,

@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,45 @@ static void oberon_fail(const char *message, const char *module, int32_t line, i
 /* Oakwood Out.Int(i, n): right-justified in a field of at least n spaces. */
 void oberon_out_int(int32_t v, int32_t n) { printf("%*d", (int)n, (int)v); }
 void oberon_out_ln(void)                  { putchar('\n'); }
+
+/* Report 10.2 REAL operations. REAL is IEEE 754 binary32, so every one of
+   these is the C float form of the same operation. */
+
+float oberon_abs_real(float x) { return fabsf(x); }
+
+/* FLOOR yields the largest INTEGER not greater than x, so a result must exist
+   in the signed 32-bit range. The domain is checked here rather than left to
+   the float-to-integer conversion, which no target has to define. Both
+   endpoints are exact binary32 values. */
+int32_t oberon_floor(float x, const char *module, int32_t line, int32_t col)
+{
+    if (!isfinite(x) || x < -2147483648.0f || x >= 2147483648.0f) {
+        oberon_fail("FLOOR result is outside INTEGER range", module, line, col);
+    }
+    return (int32_t)floorf(x);
+}
+
+void oberon_pack(float *x, int32_t n) { *x = ldexpf(*x, (int)n); }
+
+/* Report 10.2 normalizes the magnitude to [1, 2), while frexpf normalizes it
+   to [0.5, 1), so the fraction doubles and the exponent drops by one. Zero
+   satisfies no normalization interval; storing positive zero and a zero
+   exponent round-trips through PACK and needs no invented exponent. */
+void oberon_unpk(float *x, int32_t *n, const char *module, int32_t line, int32_t col)
+{
+    int exponent;
+
+    if (!isfinite(*x)) {
+        oberon_fail("UNPK argument is not finite", module, line, col);
+    }
+    if (*x == 0.0f) {
+        *x = 0.0f;
+        *n = 0;
+        return;
+    }
+    *x = frexpf(*x, &exponent) * 2.0f;
+    *n = (int32_t)(exponent - 1);
+}
 
 /* Traps. Generated code has already branched on the failing condition, so
    each one only reports where it came from. */

@@ -42,9 +42,10 @@ pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
 }
 
 // Report 8.2 overloads "+", "-", "*", and "/". The first three take two
-// INTEGERs or two SETs; "/" means symmetric set difference and has no INTEGER
-// meaning. The operation is chosen from the operand types, not from the
-// token, so the AST keeps the source operator.
+// INTEGERs, two REALs, or two SETs; "/" means REAL quotient or symmetric set
+// difference and has no INTEGER meaning. INTEGER and REAL never mix
+// implicitly, here or anywhere else. The operation is chosen from the operand
+// types, not from the token, so the AST keeps the source operator.
 
 pub(super) fn check_arith_types(
     pos: Pos,
@@ -54,15 +55,15 @@ pub(super) fn check_arith_types(
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
     let accepted: &[Type] = if op == ast::BinOp::Slash {
-        &[Type::Set]
+        &[Type::Real, Type::Set]
     } else {
-        &[Type::Integer, Type::Set]
+        &[Type::Integer, Type::Real, Type::Set]
     };
     check_operand_types(pos, op, accepted, lhs, rhs, diags)
 }
 
-// Report 8.2.4 orders INTEGER; SET and BOOLEAN have equality and inequality
-// only. The operand type is returned rather than
+// Report 8.2.4 orders the numeric types; SET and BOOLEAN have
+// equality and inequality only. The operand type is returned rather than
 // BOOLEAN, because the comparison instruction is chosen from it.
 pub(super) fn check_order_types(
     pos: Pos,
@@ -71,7 +72,7 @@ pub(super) fn check_order_types(
     rhs: Type,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
-    check_operand_types(pos, op, &[Type::Integer], lhs, rhs, diags)
+    check_operand_types(pos, op, &[Type::Integer, Type::Real], lhs, rhs, diags)
 }
 
 pub(super) fn check_operand_types(
@@ -128,6 +129,7 @@ pub(super) fn check_binary_types(
 #[derive(Debug, Clone)]
 pub enum Type {
     Integer,
+    Real,
     Boolean,
     Set,
     // A declared procedure's signature. No source names it, so it has no
@@ -152,6 +154,7 @@ impl Type {
     pub(super) fn scalar(&self) -> Option<ir::Ty> {
         match self {
             Type::Integer => Some(ir::Ty::Int),
+            Type::Real => Some(ir::Ty::Real),
             Type::Boolean => Some(ir::Ty::Bool),
             Type::Set => Some(ir::Ty::Set),
             Type::Procedure(_) => None,
@@ -179,6 +182,7 @@ impl PartialEq for Type {
     fn eq(&self, other: &Type) -> bool {
         match (self, other) {
             (Type::Integer, Type::Integer)
+            | (Type::Real, Type::Real)
             | (Type::Boolean, Type::Boolean)
             | (Type::Set, Type::Set) => true,
             (Type::Procedure(a), Type::Procedure(b)) => Rc::ptr_eq(a, b),
@@ -191,6 +195,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Integer => write!(f, "INTEGER"),
+            Type::Real => write!(f, "REAL"),
             Type::Boolean => write!(f, "BOOLEAN"),
             Type::Set => write!(f, "SET"),
             Type::Procedure(procedure) => {

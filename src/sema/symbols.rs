@@ -10,6 +10,10 @@ pub(super) type Scope = HashMap<String, Symbol>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
     Int(i32),
+    // Folded at binary32 precision at every source operator, so a constant
+    // expression and the same expression computed at run time round the same
+    // way at the same points.
+    Real(f32),
     Bool(bool),
     // Unsigned so complement covers exactly the 32 supported elements and no
     // set operation can overflow a signed INTEGER.
@@ -20,6 +24,7 @@ impl ConstValue {
     pub(super) fn ty(&self) -> Type {
         match self {
             ConstValue::Int(_) => Type::Integer,
+            ConstValue::Real(_) => Type::Real,
             ConstValue::Bool(_) => Type::Boolean,
             ConstValue::Set(_) => Type::Set,
         }
@@ -28,6 +33,7 @@ impl ConstValue {
     pub(super) fn ir(&self) -> ir::Value {
         match self {
             ConstValue::Int(v) => ir::Value::Int(*v),
+            ConstValue::Real(v) => ir::Value::Real(*v),
             ConstValue::Bool(v) => ir::Value::Bool(*v),
             ConstValue::Set(v) => ir::Value::Set(*v),
         }
@@ -101,6 +107,8 @@ impl Member {
 pub(super) enum Builtin {
     Abs,
     Odd,
+    Floor,
+    Flt,
     Lsl,
     Asr,
     Ror,
@@ -109,17 +117,22 @@ pub(super) enum Builtin {
     Dec,
     Incl,
     Excl,
+    Pack,
+    Unpk,
     Assert,
 }
 
 pub(super) fn universe_scope() -> Scope {
     let mut scope = Scope::new();
     scope.insert("INTEGER".into(), Symbol::TypeName(Type::Integer));
+    scope.insert("REAL".into(), Symbol::TypeName(Type::Real));
     scope.insert("BOOLEAN".into(), Symbol::TypeName(Type::Boolean));
     scope.insert("SET".into(), Symbol::TypeName(Type::Set));
     for (name, builtin) in [
         ("ABS", Builtin::Abs),
         ("ODD", Builtin::Odd),
+        ("FLOOR", Builtin::Floor),
+        ("FLT", Builtin::Flt),
         ("LSL", Builtin::Lsl),
         ("ASR", Builtin::Asr),
         ("ROR", Builtin::Ror),
@@ -128,6 +141,8 @@ pub(super) fn universe_scope() -> Scope {
         ("DEC", Builtin::Dec),
         ("INCL", Builtin::Incl),
         ("EXCL", Builtin::Excl),
+        ("PACK", Builtin::Pack),
+        ("UNPK", Builtin::Unpk),
         ("ASSERT", Builtin::Assert),
     ] {
         scope.insert(name.into(), Symbol::Builtin(builtin));
@@ -171,9 +186,9 @@ fn procedure_type(params: Vec<(bool, Type)>, ret: Option<Type>) -> Type {
     }))
 }
 
-// Report 10.2 gives ABS a result of whichever type it was given. Nothing else
-// here is generic in its result, so the two cases are named directly instead
-// of through a signature framework.
+// Report 10.2 gives ABS one INTEGER form and one REAL form, and its result is
+// whichever type it was given. Nothing else here is generic in its result, so
+// the two cases are named directly instead of through a signature framework.
 #[derive(Debug, Clone)]
 pub(super) enum BuiltinResult {
     Fixed(Type),
@@ -192,20 +207,29 @@ impl BuiltinResult {
 // Argument types and result type of the function-like predefined operations.
 // Each parameter carries the types it accepts, which is one type everywhere
 // except ABS and ORD: Report 10.2 gives ORD a BOOLEAN form and a SET form.
-// INC, DEC, INCL, EXCL, and ASSERT are proper procedures and have no entry: a
-// None here is what makes them "cannot be used as a value" in an expression.
+// INC, DEC, INCL, EXCL, PACK, UNPK, and ASSERT are proper procedures and have
+// no entry: a None here is what makes them "cannot be used as a value" in an
+// expression.
 pub(super) fn builtin_signature(
     builtin: Builtin,
 ) -> Option<(&'static [&'static [Type]], BuiltinResult)> {
     use BuiltinResult::{Argument, Fixed};
     match builtin {
-        Builtin::Abs => Some((&[&[Type::Integer]], Argument)),
+        Builtin::Abs => Some((&[&[Type::Integer, Type::Real]], Argument)),
         Builtin::Odd => Some((&[&[Type::Integer]], Fixed(Type::Boolean))),
+        Builtin::Floor => Some((&[&[Type::Real]], Fixed(Type::Integer))),
+        Builtin::Flt => Some((&[&[Type::Integer]], Fixed(Type::Real))),
         Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
             Some((&[&[Type::Integer], &[Type::Integer]], Fixed(Type::Integer)))
         }
         Builtin::Ord => Some((&[&[Type::Boolean, Type::Set]], Fixed(Type::Integer))),
-        Builtin::Inc | Builtin::Dec | Builtin::Incl | Builtin::Excl | Builtin::Assert => None,
+        Builtin::Inc
+        | Builtin::Dec
+        | Builtin::Incl
+        | Builtin::Excl
+        | Builtin::Pack
+        | Builtin::Unpk
+        | Builtin::Assert => None,
     }
 }
 

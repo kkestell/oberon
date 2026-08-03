@@ -4,7 +4,8 @@ use crate::diag::{Diagnostic, Pos};
 pub enum Tok {
     // Literals
     Ident(String),
-    Int(i64), // i64 so an oversized decimal literal lexes; sema range-checks to i32
+    Int(i64),  // i64 so an oversized decimal literal lexes; sema range-checks to i32
+    Real(f32), // REAL is IEEE 754 binary32, so the literal rounds once, here
     // Keywords
     Array,
     Begin,
@@ -223,8 +224,10 @@ impl Lexer {
     }
 
     // number = digit {digit} | digit {hexDigit} "H"
+    //        | digit {digit} "." {digit} [ScaleFactor]
     // Hex digits are uppercase only, and hex literals start with a decimal digit.
     fn number(&mut self, pos: Pos, diags: &mut Vec<Diagnostic>) -> Option<Tok> {
+        let start = self.i;
         let mut s = String::new();
         while matches!(self.peek(), Some(c) if c.is_ascii_digit() || ('A'..='F').contains(&c)) {
             s.push(self.bump().unwrap());
@@ -254,18 +257,78 @@ impl Lexer {
                     ));
                     return None;
                 }
-                match s.parse::<i64>() {
-                    Ok(v) => Some(Tok::Int(v)),
-                    Err(_) => {
-                        diags.push(Diagnostic::new(
-                            pos,
-                            format!("integer literal '{s}' too large"),
-                        ));
-                        None
+                // digit "." "." ends the integer and leaves DotDot for `1..2`
+                if self.peek() == Some('.') && self.peek2() != Some('.') {
+                    self.bump();
+                    self.real(s, start, pos, diags)
+                } else {
+                    match s.parse::<i64>() {
+                        Ok(v) => Some(Tok::Int(v)),
+                        Err(_) => {
+                            diags.push(Diagnostic::new(
+                                pos,
+                                format!("integer literal '{s}' too large"),
+                            ));
+                            None
+                        }
                     }
                 }
             }
         }
+    }
+
+    // Fraction digits and scale factor are both optional; normalize into a
+    // form f32::from_str is guaranteed to accept.
+    fn real(
+        &mut self,
+        int_part: String,
+        start: usize,
+        pos: Pos,
+        diags: &mut Vec<Diagnostic>,
+    ) -> Option<Tok> {
+        let mut text = int_part;
+        text.push('.');
+        let mut any = false;
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+            text.push(self.bump().unwrap());
+            any = true;
+        }
+        if !any {
+            text.push('0');
+        }
+        if self.peek() == Some('E') {
+            self.bump();
+            text.push('e');
+            if matches!(self.peek(), Some('+') | Some('-')) {
+                text.push(self.bump().unwrap());
+            }
+            let mut any = false;
+            while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                text.push(self.bump().unwrap());
+                any = true;
+            }
+            if !any {
+                diags.push(Diagnostic::new(pos, "malformed scale factor"));
+                return None;
+            }
+        }
+        // Straight to binary32, so the value the AST carries is the one the
+        // generated code uses: parsing to binary64 first would round twice.
+        // A magnitude too large to represent becomes an infinity, which the
+        // source has no way to mean; one too small rounds to zero, which is
+        // the ordinary IEEE result and not an error. cf. Project Oberon's
+        // ORS.Mod, which rejects an exponent above its range and returns zero
+        // for one below it.
+        let value: f32 = text.parse().expect("constructed a valid float literal");
+        if !value.is_finite() {
+            let raw: String = self.chars[start..self.i].iter().collect();
+            diags.push(Diagnostic::new(
+                pos,
+                format!("real literal '{raw}' is too large"),
+            ));
+            return None;
+        }
+        Some(Tok::Real(value))
     }
 
     fn operator(&mut self, pos: Pos, diags: &mut Vec<Diagnostic>) -> Option<Tok> {
@@ -356,6 +419,50 @@ mod tests {
     }
 
     #[test]
+    fn reals_and_scale_factors() {
+        assert_eq!(
+            toks("1.5 2.0E3 1.E-2 37.4E5 1.0E+3"),
+            vec![
+                Tok::Real(1.5),
+                Tok::Real(2000.0),
+                Tok::Real(0.01),
+                Tok::Real(3740000.0),
+                Tok::Real(1000.0),
+                Tok::Eof
+            ]
+        );
+    }
+
+    // The whole token rounds once, so the largest accepted literal is the one
+    // whose binary32 value is still finite.
+    #[test]
+    fn largest_real_is_accepted() {
+        assert_eq!(toks("3.4E38"), vec![Tok::Real(3.4e38), Tok::Eof]);
+    }
+
+    #[test]
+    fn overflowing_real_diagnoses() {
+        let mut diags = Vec::new();
+        lex("3.5E38", &mut diags);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].msg, "real literal '3.5E38' is too large");
+    }
+
+    // Underflow is the ordinary IEEE result, not an error.
+    #[test]
+    fn underflowing_real_is_zero() {
+        assert_eq!(toks("1.0E-60"), vec![Tok::Real(0.0), Tok::Eof]);
+    }
+
+    #[test]
+    fn missing_exponent_digit_diagnoses() {
+        let mut diags = Vec::new();
+        lex("1.0E", &mut diags);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].msg, "malformed scale factor");
+    }
+
+    #[test]
     fn hex_literals_are_32_bit_patterns() {
         assert_eq!(
             toks("0FFFFFFFFH 080000000H 07FFFFFFFH"),
@@ -366,6 +473,15 @@ mod tests {
                 Tok::Eof
             ]
         );
+    }
+
+    #[test]
+    fn integer_range_disambiguation() {
+        assert_eq!(
+            toks("1..2"),
+            vec![Tok::Int(1), Tok::DotDot, Tok::Int(2), Tok::Eof]
+        );
+        assert_eq!(toks("1.5"), vec![Tok::Real(1.5), Tok::Eof]);
     }
 
     #[test]

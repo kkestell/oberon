@@ -183,11 +183,14 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
                 out,
                 "\t{} ={result} {} {}, {}",
                 temp(*dst),
-                bin_op(*op),
+                bin_op(*op, *ty),
                 value(lhs, names),
                 value(rhs, names)
             )
             .unwrap();
+        }
+        ir::Inst::IntToReal { dst, arg } => {
+            writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg, names)).unwrap();
         }
         ir::Inst::Call {
             dst,
@@ -240,9 +243,12 @@ fn arg(arg: &ir::Arg, names: &Names, slots: &HashMap<&str, String>) -> String {
     }
 }
 
+// QBE passes an `s` in the platform's floating-point class and a `w` in its
+// integer class, which is the native C float and int32_t ABI.
 fn class(ty: ir::Ty) -> &'static str {
     match ty {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "w",
+        ir::Ty::Real => "s",
         ir::Ty::Pointer => "l",
     }
 }
@@ -251,6 +257,7 @@ fn class(ty: ir::Ty) -> &'static str {
 fn load_op(ty: ir::Ty) -> &'static str {
     match ty {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "loadw",
+        ir::Ty::Real => "loads",
         ir::Ty::Pointer => "loadl",
     }
 }
@@ -258,6 +265,7 @@ fn load_op(ty: ir::Ty) -> &'static str {
 fn store_op(ty: ir::Ty) -> &'static str {
     match ty {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "storew",
+        ir::Ty::Real => "stores",
         ir::Ty::Pointer => "storel",
     }
 }
@@ -286,6 +294,12 @@ fn value(value: &ir::Value, names: &Names) -> String {
         // QBE parses a word immediate as a signed 32-bit number, so a set
         // with bit 31 in it has to be spelled negative. The bits are the same.
         ir::Value::Set(bits) => (*bits as i32).to_string(),
+        // A QBE constant is an untyped bit string, so in an `s` context the
+        // signed spelling of the binary32 pattern reproduces the value
+        // exactly. That covers negative zero and the infinities and NaNs
+        // constant arithmetic can produce, none of which a decimal spelling
+        // states directly.
+        ir::Value::Real(v) => (v.to_bits() as i32).to_string(),
         ir::Value::Symbol(symbol) => format!("${}", names.symbol(symbol)),
         ir::Value::Temp(id) => temp(*id),
     }
@@ -330,13 +344,24 @@ impl Names {
     }
 }
 
-fn bin_op(op: ir::BinOp) -> &'static str {
+// The arithmetic mnemonics are shared: `div` on two singles is already the
+// floating quotient. Only comparisons differ, because QBE names the operand
+// class in the instruction and gives a signedness to the integer forms only.
+// The remaining operations are word-only and never see a REAL operand.
+fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
+    let real = ty == ir::Ty::Real;
     match op {
         ir::BinOp::Add => "add",
         ir::BinOp::Sub => "sub",
         ir::BinOp::Mul => "mul",
         ir::BinOp::Div => "div",
         ir::BinOp::Rem => "rem",
+        ir::BinOp::Eq if real => "ceqs",
+        ir::BinOp::Ne if real => "cnes",
+        ir::BinOp::Lt if real => "clts",
+        ir::BinOp::Le if real => "cles",
+        ir::BinOp::Gt if real => "cgts",
+        ir::BinOp::Ge if real => "cges",
         ir::BinOp::Eq => "ceqw",
         ir::BinOp::Ne => "cnew",
         ir::BinOp::Lt => "csltw",
