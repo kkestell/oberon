@@ -37,6 +37,10 @@ pub fn build(source: &Path, output: &Path) -> Result<()> {
         modules: build.modules,
     };
     tracing::debug!("{program:#?}");
+    // Each module's own globals already fit the target limit, but a build is
+    // one data image and several modules can cross it together. Catching that
+    // here keeps it a compiler error rather than a linker relocation failure.
+    check_static_data(&program)?;
     let il = qbe::emit(&program);
 
     // The intermediates are not a product of the build, so they live only as
@@ -213,6 +217,32 @@ impl Build {
         chain.push(name);
         Some(chain.join(" -> "))
     }
+}
+
+// The whole program's static data, each global padded to its own alignment.
+// The running total stops at the first global that crosses the limit, and
+// every global is itself within it, so the sum cannot run away. This error has
+// no source position: it belongs to the build, not to any one declaration.
+fn check_static_data(program: &ir::Program) -> Result<()> {
+    let mut total: i64 = 0;
+    for module in &program.modules {
+        for global in &module.globals {
+            let align = global.ty.align();
+            total = (total + align - 1) / align * align + global.ty.size();
+            if total > ir::MAX_OBJECT_SIZE {
+                bail!("program static data exceeds target object-size limit");
+            }
+        }
+        // String literals are data too. Each is byte-aligned and one byte
+        // longer than its characters, for the terminator.
+        for literal in &module.literals {
+            total += literal.bytes.len() as i64 + 1;
+            if total > ir::MAX_OBJECT_SIZE {
+                bail!("program static data exceeds target object-size limit");
+            }
+        }
+    }
+    Ok(())
 }
 
 // Report 11 leaves module lookup to the implementation. Two fixed directories,

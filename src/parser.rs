@@ -182,7 +182,24 @@ impl Parser {
 
     // type = qualident | StrucType
     fn source_type(&mut self) -> PResult<TypeExpr> {
-        Ok(TypeExpr::Named(self.qualident("type name")?))
+        match self.peek() {
+            Tok::Array => self.array_type(),
+            _ => Ok(TypeExpr::Named(self.qualident("type name")?)),
+        }
+    }
+
+    // ArrayType = ARRAY length {"," length} OF type
+    fn array_type(&mut self) -> PResult<TypeExpr> {
+        let pos = self.pos();
+        self.expect(Tok::Array, "'ARRAY'")?;
+        let mut lengths = vec![self.expression()?];
+        while *self.peek() == Tok::Comma {
+            self.advance();
+            lengths.push(self.expression()?);
+        }
+        self.expect(Tok::Of, "'OF'")?;
+        let elem = Box::new(self.source_type()?);
+        Ok(TypeExpr::Array { lengths, elem, pos })
     }
 
     // qualident = [ident "."] ident. A type name takes no further selectors,
@@ -533,6 +550,20 @@ impl Parser {
                     let (name, fpos) = self.expect_ident("field name")?;
                     selectors.push(Selector::Field(name, fpos));
                 }
+                // selector = "[" ExpList "]". The list stays one selector:
+                // Report 8.1 makes a[i, j] mean a[i][j], and that expansion
+                // belongs to sema along with the types it needs.
+                Tok::LBrack => {
+                    let bracket = self.pos();
+                    self.advance();
+                    let mut exprs = vec![self.expression()?];
+                    while *self.peek() == Tok::Comma {
+                        self.advance();
+                        exprs.push(self.expression()?);
+                    }
+                    self.expect(Tok::RBrack, "']'")?;
+                    selectors.push(Selector::Index(exprs, bracket));
+                }
                 _ => break,
             }
         }
@@ -720,5 +751,147 @@ impl Parser {
         }
         self.expect(Tok::RBrace, "'}'")?;
         Ok(Expr::Set { elements, pos })
+    }
+}
+
+// The type and selector grammar is where this slice adds syntax, so these
+// tests check the shape the parser builds rather than going through a whole
+// compilation. Everything else stays end to end in tests/corpus.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer;
+
+    fn module(body: &str) -> Module {
+        let mut diags = Vec::new();
+        let toks = lexer::lex(&format!("MODULE M;\n{body}\nEND M.\n"), &mut diags);
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        parse(toks).expect("module parses")
+    }
+
+    fn error(body: &str) -> String {
+        let mut diags = Vec::new();
+        let toks = lexer::lex(&format!("MODULE M;\n{body}\nEND M.\n"), &mut diags);
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        parse(toks).expect_err("module does not parse").msg
+    }
+
+    // The shape of a source type, flattened so a test can state it in one
+    // line: "ARRAY 2, 3 OF INTEGER" prints its lengths as written.
+    fn shape(ty: &TypeExpr) -> String {
+        match ty {
+            TypeExpr::Named(d) => d.name(),
+            TypeExpr::Array { lengths, elem, .. } => {
+                let lengths: Vec<String> = lengths
+                    .iter()
+                    .map(|length| match length {
+                        Expr::Int { value, .. } => value.to_string(),
+                        Expr::Name(d) => d.name(),
+                        _ => "?".into(),
+                    })
+                    .collect();
+                format!("ARRAY {} OF {}", lengths.join(", "), shape(elem))
+            }
+        }
+    }
+
+    #[test]
+    fn exported_type_alias_and_arrays() {
+        let m = module("TYPE Row* = ARRAY 8 OF INTEGER; Alias = Row; Grid = ARRAY 2 OF Row;");
+        let shapes: Vec<_> = m
+            .types
+            .iter()
+            .map(|t| (t.id.name.as_str(), t.id.export, shape(&t.ty)))
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                ("Row", true, "ARRAY 8 OF INTEGER".to_string()),
+                ("Alias", false, "Row".to_string()),
+                ("Grid", false, "ARRAY 2 OF Row".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_and_nested_array_variables() {
+        let m = module("VAR a: ARRAY 4 OF INTEGER; b: ARRAY 2 OF ARRAY 3 OF REAL;");
+        let shapes: Vec<_> = m.vars.iter().map(|v| shape(&v.ty)).collect();
+        assert_eq!(
+            shapes,
+            vec![
+                "ARRAY 4 OF INTEGER".to_string(),
+                "ARRAY 2 OF ARRAY 3 OF REAL".to_string(),
+            ]
+        );
+    }
+
+    // Report 6.2: the comma list stays one constructor here. Sema is what
+    // turns it into nested arrays, so the parser must not flatten it away.
+    #[test]
+    fn comma_dimensions_stay_one_constructor() {
+        let m = module("VAR g: ARRAY 2, 3, N OF INTEGER;");
+        assert_eq!(shape(&m.vars[0].ty), "ARRAY 2, 3, N OF INTEGER");
+    }
+
+    #[test]
+    fn repeated_bracket_selectors() {
+        let m = module("VAR x: INTEGER;\nBEGIN x := g[1][i, j].f[0]");
+        let Stmt::Assign { rhs, .. } = &m.body[0] else {
+            panic!("expected an assignment");
+        };
+        let Expr::Name(d) = rhs else {
+            panic!("expected a designator");
+        };
+        assert_eq!(d.name(), "g[...][...].f[...]");
+        let counts: Vec<usize> = d
+            .selectors
+            .iter()
+            .filter_map(|s| match s {
+                Selector::Index(exprs, _) => Some(exprs.len()),
+                Selector::Field(..) => None,
+            })
+            .collect();
+        assert_eq!(counts, vec![1, 2, 1]);
+    }
+
+    #[test]
+    fn malformed_length() {
+        assert_eq!(
+            error("VAR a: ARRAY OF INTEGER;"),
+            "expected expression, found Of"
+        );
+    }
+
+    #[test]
+    fn empty_index_list() {
+        assert_eq!(
+            error("VAR x: INTEGER;\nBEGIN x := a[]"),
+            "expected expression, found RBrack"
+        );
+    }
+
+    #[test]
+    fn missing_of() {
+        assert_eq!(
+            error("VAR a: ARRAY 4 INTEGER;"),
+            "expected 'OF', found Ident(\"INTEGER\")"
+        );
+    }
+
+    #[test]
+    fn missing_closing_bracket() {
+        assert_eq!(
+            error("VAR x: INTEGER;\nBEGIN x := a[1"),
+            "expected ']', found End"
+        );
+    }
+
+    #[test]
+    fn declaration_sections_must_be_ordered() {
+        assert_eq!(
+            error("VAR a: INTEGER; TYPE T = ARRAY 1 OF INTEGER;"),
+            "expected 'END', found Type"
+        );
     }
 }

@@ -1,0 +1,2 @@
+tests/errors/ArrayObjectTooLarge.Mod:4:14: array type exceeds target object-size limit
+Error: 1 error(s)

@@ -300,9 +300,9 @@ impl Analyzer {
             let found = self.check_const_expr(actual);
             if let (Some(found), Some(formal)) = (found, procedure.params.get(i))
                 // The same identical-type rule as the executable path for
-                // reference formals, so the constant precheck cannot accept
-                // what lowering rejects.
-                && if formal.var {
+                // reference formals, structured value formals included, so
+                // the constant precheck cannot accept what lowering rejects.
+                && if formal.var || formal.ty.structured() {
                     found != formal.ty
                 } else {
                     assign_kind(&formal.ty, &found).is_none()
@@ -337,6 +337,9 @@ impl Analyzer {
         actuals: &[ast::Expr],
         pos: Pos,
     ) -> Option<Type> {
+        if builtin == Builtin::Len {
+            return self.check_const_len(actuals, pos);
+        }
         let Some((params, result)) = builtin_signature(builtin) else {
             for actual in actuals {
                 let _ = self.check_const_expr(actual);
@@ -388,6 +391,40 @@ impl Analyzer {
         ok.then(|| result.ty(first.expect("a function-like builtin takes an argument")))
     }
 
+    // LEN in a required constant context, such as a constant declaration or
+    // another array's length. Its argument is a designator rather than a
+    // constant expression, so it is checked here instead of through the
+    // signature table.
+    fn check_const_len(&mut self, actuals: &[ast::Expr], pos: Pos) -> Option<Type> {
+        if actuals.len() != 1 {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "wrong number of arguments: expected 1, found {}",
+                    actuals.len()
+                ),
+            ));
+            return None;
+        }
+        let ast::Expr::Name(designator) = &actuals[0] else {
+            self.diags.push(Diagnostic::new(
+                actuals[0].pos(),
+                "argument 1 must be an array variable",
+            ));
+            return None;
+        };
+        let ty = self.check_len_designator_type(designator)?;
+        if ty.is_array() {
+            Some(Type::Integer)
+        } else {
+            self.diags.push(Diagnostic::new(
+                designator.pos,
+                format!("argument 1 has type {ty}, expected an array"),
+            ));
+            None
+        }
+    }
+
     fn eval_const_builtin(
         &self,
         builtin: Builtin,
@@ -395,6 +432,12 @@ impl Analyzer {
         actuals: &[ast::Expr],
         pos: Pos,
     ) -> Result<ConstValue, Diagnostic> {
+        if builtin == Builtin::Len {
+            let [ast::Expr::Name(designator)] = actuals else {
+                return Err(Diagnostic::new(pos, "argument 1 must be an array variable"));
+            };
+            return Ok(ConstValue::Int(self.const_array_type(designator)?.len));
+        }
         if builtin_signature(builtin).is_none() {
             return Err(Diagnostic::new(
                 pos,
@@ -569,6 +612,18 @@ impl Analyzer {
             ast::Expr::Name(designator) => {
                 matches!(self.resolve(designator), Ok(Symbol::Const(_)))
             }
+            // LEN is a constant when it can see the length without running
+            // anything: the argument names an array variable and every
+            // selector on it is itself constant. A dynamic selector makes the
+            // call nonconstant even though its result is statically known.
+            ast::Expr::Apply { callee, args, .. }
+                if matches!(self.resolve(callee), Ok(Symbol::Builtin(Builtin::Len))) =>
+            {
+                let [ast::Expr::Name(designator)] = args.as_slice() else {
+                    return false;
+                };
+                matches!(self.len_designator_type(designator), Ok(ty) if ty.array().is_some())
+            }
             ast::Expr::Apply { callee, args, .. } => {
                 matches!(
                     self.resolve(callee),
@@ -614,9 +669,168 @@ impl Analyzer {
                         return None;
                     }
                 },
+                ast::Selector::Index(exprs, pos) => {
+                    for expr in exprs {
+                        let Some(elem) = ty.array_elem().cloned() else {
+                            self.diags.push(Diagnostic::new(
+                                *pos,
+                                format!("cannot index {ty}: only an array can be indexed"),
+                            ));
+                            return None;
+                        };
+                        match self.check_const_expr(expr) {
+                            Some(Type::Integer) => {}
+                            Some(found) => {
+                                self.diags.push(Diagnostic::new(
+                                    expr.pos(),
+                                    format!("array index must be INTEGER, found {found}"),
+                                ));
+                                return None;
+                            }
+                            None => return None,
+                        }
+                        let value = match self.eval_const(expr) {
+                            Ok(ConstValue::Int(value)) => value,
+                            Ok(_) => unreachable!("array index was type-checked as INTEGER"),
+                            Err(diag) => {
+                                self.diags.push(diag);
+                                return None;
+                            }
+                        };
+                        if let Some(array) = ty.array()
+                            && !(0..array.len).contains(&value)
+                        {
+                            self.diags
+                                .push(index_range_error(expr.pos(), value, array.len));
+                            return None;
+                        }
+                        ty = elem;
+                    }
+                }
             }
         }
         Some(ty)
+    }
+
+    // Fixed LEN in a required constant context needs only the selected
+    // array's declared type. Selectors are still type-checked, and a constant
+    // index is still checked against its bound, but a dynamic INTEGER index
+    // performs no work and does not prevent folding the length. A call in an
+    // index is the one dynamic form this path refuses; see const_index_call.
+    fn check_len_designator_type(&mut self, designator: &ast::Designator) -> Option<Type> {
+        let (symbol, rest) = match self.qualident(designator) {
+            Ok(found) => found,
+            Err(diag) => {
+                self.diags.push(diag);
+                return None;
+            }
+        };
+        let mut ty = match symbol {
+            Symbol::Var { ty, .. } => ty,
+            _ => {
+                self.diags.push(Diagnostic::new(
+                    designator.pos,
+                    "argument 1 must be an array variable",
+                ));
+                return None;
+            }
+        };
+        for selector in rest {
+            match selector {
+                ast::Selector::Field(name, pos) => match self.const_field(&ty, name, *pos) {
+                    Ok(field) => ty = field,
+                    Err(diag) => {
+                        self.diags.push(diag);
+                        return None;
+                    }
+                },
+                ast::Selector::Index(exprs, pos) => {
+                    for expr in exprs {
+                        let Some(elem) = ty.array_elem().cloned() else {
+                            self.diags.push(Diagnostic::new(
+                                *pos,
+                                format!("cannot index {ty}: only an array can be indexed"),
+                            ));
+                            return None;
+                        };
+                        if let Some(diag) = self.const_index_call(expr) {
+                            self.diags.push(diag);
+                            return None;
+                        }
+                        match self.check_const_expr(expr) {
+                            Some(Type::Integer) => {}
+                            Some(found) => {
+                                self.diags.push(Diagnostic::new(
+                                    expr.pos(),
+                                    format!("array index must be INTEGER, found {found}"),
+                                ));
+                                return None;
+                            }
+                            None => return None,
+                        }
+                        match self.try_eval_const(expr) {
+                            Ok(Some(ConstValue::Int(value))) => {
+                                if let Some(array) = ty.array()
+                                    && !(0..array.len).contains(&value)
+                                {
+                                    self.diags.push(index_range_error(
+                                        expr.pos(),
+                                        value,
+                                        array.len,
+                                    ));
+                                    return None;
+                                }
+                            }
+                            Ok(None) => {}
+                            Ok(Some(_)) => unreachable!("index was type-checked as INTEGER"),
+                            Err(diag) => {
+                                self.diags.push(diag);
+                                return None;
+                            }
+                        }
+                        ty = elem;
+                    }
+                }
+            }
+        }
+        Some(ty)
+    }
+
+    // The same walk without diagnostics, for deciding whether a LEN call is
+    // constant and for folding it. It has to reach the same verdict as
+    // check_len_designator_type on every program, or a constant declaration
+    // would be checked under one rule and evaluated under another.
+    fn len_designator_type(&self, designator: &ast::Designator) -> Result<Type, Diagnostic> {
+        let (symbol, rest) = self.qualident(designator)?;
+        let mut ty = match symbol {
+            Symbol::Var { ty, .. } => ty,
+            _ => {
+                return Err(Diagnostic::new(
+                    designator.pos,
+                    "argument 1 must be an array variable",
+                ));
+            }
+        };
+        for selector in rest {
+            match selector {
+                ast::Selector::Field(name, pos) => ty = self.const_field(&ty, name, *pos)?,
+                ast::Selector::Index(exprs, pos) => {
+                    for expr in exprs {
+                        let Some(elem) = ty.array_elem() else {
+                            return Err(Diagnostic::new(
+                                *pos,
+                                format!("cannot index {ty}: only an array can be indexed"),
+                            ));
+                        };
+                        if let Some(diag) = self.const_index_call(expr) {
+                            return Err(diag);
+                        }
+                        ty = elem.clone();
+                    }
+                }
+            }
+        }
+        Ok(ty)
     }
 
     // The field selector in the constant world, with the same answer as
@@ -626,6 +840,67 @@ impl Analyzer {
             pos,
             format!("cannot select '{name}' from {ty}: only a record has fields"),
         ))
+    }
+
+    // Report 8: a constant expression is one a mere textual scan can evaluate
+    // without executing the program. The required-constant LEN walk answers
+    // from the declared array type and never evaluates an index, so a call
+    // written in one would be discarded rather than performed. It is rejected
+    // instead, with the same message a call anywhere else in a constant
+    // expression already gets. A variable index stays legal: skipping a read
+    // is unobservable, and skipping a call is not.
+    fn const_index_call(&self, expr: &ast::Expr) -> Option<Diagnostic> {
+        match expr {
+            ast::Expr::Int { .. } | ast::Expr::Real { .. } | ast::Expr::Bool { .. } => None,
+            ast::Expr::Set { elements, .. } => elements.iter().find_map(|element| {
+                self.const_index_call(&element.low).or_else(|| {
+                    element
+                        .high
+                        .as_ref()
+                        .and_then(|high| self.const_index_call(high))
+                })
+            }),
+            // A designator carries index selectors of its own, and LEN of one
+            // array can be the index into another.
+            ast::Expr::Name(designator) => self.const_selector_call(designator),
+            ast::Expr::Apply { callee, args, pos } => {
+                if !matches!(self.resolve(callee), Ok(Symbol::Builtin(_))) {
+                    return Some(Diagnostic::new(
+                        *pos,
+                        "constant expression contains a procedure call",
+                    ));
+                }
+                args.iter().find_map(|arg| self.const_index_call(arg))
+            }
+            ast::Expr::Unary { expr, .. } => self.const_index_call(expr),
+            ast::Expr::Binary { lhs, rhs, .. } => self
+                .const_index_call(lhs)
+                .or_else(|| self.const_index_call(rhs)),
+        }
+    }
+
+    fn const_selector_call(&self, designator: &ast::Designator) -> Option<Diagnostic> {
+        designator
+            .selectors
+            .iter()
+            .find_map(|selector| match selector {
+                ast::Selector::Index(exprs, _) => {
+                    exprs.iter().find_map(|expr| self.const_index_call(expr))
+                }
+                ast::Selector::Field(..) => None,
+            })
+    }
+
+    // The array a folded LEN is about. The variable itself need not be a
+    // constant: a fixed length is a property of its type.
+    fn const_array_type(&self, designator: &ast::Designator) -> Result<Rc<ArrayType>, Diagnostic> {
+        let ty = self.len_designator_type(designator)?;
+        ty.array().cloned().ok_or_else(|| {
+            Diagnostic::new(
+                designator.pos,
+                format!("argument 1 has type {ty}, expected an array"),
+            )
+        })
     }
 
     // The static half of the one element-domain rule; Analyzer::

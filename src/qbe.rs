@@ -11,6 +11,8 @@ pub fn emit(program: &ir::Program) -> String {
     let names = Names::new(program);
     for module in &program.modules {
         for global in &module.globals {
+            // A zero-length array reserves nothing; QBE accepts `z 0` and the
+            // assembler emits an empty, still-addressable object.
             writeln!(
                 out,
                 "data ${} = align {} {{ z {} }}",
@@ -191,6 +193,46 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         }
         ir::Inst::IntToReal { dst, arg } => {
             writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg, names)).unwrap();
+        }
+        // The check is a call, so it is textually and dynamically ahead of
+        // every part of the address calculation: nothing scales or adds an
+        // index the runtime has not accepted. The two intermediate temporaries
+        // are named from the destination number, so they cannot collide with
+        // the value temporaries, which are all `%.t<n>`.
+        ir::Inst::Index {
+            dst,
+            base,
+            index,
+            len,
+            stride,
+            site,
+        } => {
+            writeln!(
+                out,
+                "\t%.i{dst} =w call $oberon_check_index(w {}, w {}, {})",
+                value(index, names),
+                value(len, names),
+                args(&site.args(), names, slots)
+            )
+            .unwrap();
+            writeln!(out, "\t%.x{dst} =l extsw %.i{dst}").unwrap();
+            writeln!(out, "\t%.s{dst} =l mul %.x{dst}, {stride}").unwrap();
+            writeln!(
+                out,
+                "\t{} =l add {}, %.s{dst}",
+                temp(*dst),
+                address(base, names, slots)
+            )
+            .unwrap();
+        }
+        ir::Inst::CopyBytes { dst, src, size } => {
+            writeln!(
+                out,
+                "\tcall $oberon_copy(l {}, l {}, l {size})",
+                address(dst, names, slots),
+                address(src, names, slots)
+            )
+            .unwrap();
         }
         ir::Inst::Call {
             dst,

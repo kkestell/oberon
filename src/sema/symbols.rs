@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::ir;
 
-use super::types::{ProcedureParam, ProcedureType, Type};
+use super::types::{ProcedureParam, ProcedureType, Type, fixed_shape};
 
 pub(super) type Scope = HashMap<String, Symbol>;
 
@@ -46,6 +46,7 @@ pub(super) enum Symbol {
     Var {
         ty: Type,
         addr: ir::Addr,
+        shape: Vec<ir::Value>,
         // Set on an imported variable, and while a FOR statement's body is
         // being lowered so the body cannot move its own control variable.
         read_only: bool,
@@ -91,6 +92,7 @@ impl Member {
             Member::Var { ty, symbol } => Symbol::Var {
                 ty: ty.clone(),
                 addr: ir::Addr::Global(symbol.clone()),
+                shape: fixed_shape(ty),
                 read_only: true,
             },
             Member::Proc { symbol, ty } => Symbol::Proc {
@@ -106,6 +108,7 @@ impl Member {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Builtin {
     Abs,
+    Len,
     Odd,
     Floor,
     Flt,
@@ -130,6 +133,7 @@ pub(super) fn universe_scope() -> Scope {
     scope.insert("SET".into(), Symbol::TypeName(Type::Set));
     for (name, builtin) in [
         ("ABS", Builtin::Abs),
+        ("LEN", Builtin::Len),
         ("ODD", Builtin::Odd),
         ("FLOOR", Builtin::Floor),
         ("FLT", Builtin::Flt),
@@ -223,7 +227,11 @@ pub(super) fn builtin_signature(
             Some((&[&[Type::Integer], &[Type::Integer]], Fixed(Type::Integer)))
         }
         Builtin::Ord => Some((&[&[Type::Boolean, Type::Set]], Fixed(Type::Integer))),
-        Builtin::Inc
+        // LEN takes a designator rather than a value, so it has no entry in
+        // the value signature table either; lower_len and check_const_len
+        // handle it.
+        Builtin::Len
+        | Builtin::Inc
         | Builtin::Dec
         | Builtin::Incl
         | Builtin::Excl

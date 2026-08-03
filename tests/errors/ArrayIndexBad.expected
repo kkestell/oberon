@@ -1,0 +1,7 @@
+tests/errors/ArrayIndexBad.Mod:6:10: array index must be INTEGER, found BOOLEAN
+tests/errors/ArrayIndexBad.Mod:7:9: cannot index INTEGER: only an array can be indexed
+tests/errors/ArrayIndexBad.Mod:8:9: cannot index INTEGER: only an array can be indexed
+tests/errors/ArrayIndexBad.Mod:9:10: index -1 is out of bounds: the array has length 4
+tests/errors/ArrayIndexBad.Mod:10:10: index 4 is out of bounds: the array has length 4
+tests/errors/ArrayIndexBad.Mod:11:14: index 9 is out of bounds: the array has length 4
+Error: 6 error(s)

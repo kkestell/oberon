@@ -1,0 +1,5 @@
+tests/errors/modules/array-import-write/ArrayImportWrite.Mod:7:3: cannot assign to 'ArraySource.data': it is read-only
+tests/errors/modules/array-import-write/ArrayImportWrite.Mod:8:3: cannot assign to 'ArraySource.data[...]': it is read-only
+tests/errors/modules/array-import-write/ArrayImportWrite.Mod:9:3: cannot assign to 'ArraySource.grid[...]': it is read-only
+tests/errors/modules/array-import-write/ArrayImportWrite.Mod:10:7: argument 1 is read-only
+Error: 4 error(s)

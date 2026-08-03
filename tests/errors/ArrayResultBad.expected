@@ -1,0 +1,3 @@
+tests/errors/ArrayResultBad.Mod:7:21: a procedure cannot have the array result type ARRAY 3 OF INTEGER
+tests/errors/ArrayResultBad.Mod:9:10: 'shared' has type ARRAY 3 OF INTEGER and cannot be used as a value
+Error: 2 error(s)

@@ -41,6 +41,9 @@ const FLOOR_LIMIT: f32 = 2147483648.0;
 struct Place {
     addr: ir::Addr,
     ty: Type,
+    // One length for every array constructor reachable by indexing from this
+    // place, each an immediate. Indexing consumes the first entry.
+    shape: Vec<ir::Value>,
     read_only: bool,
 }
 
@@ -48,8 +51,11 @@ type ResolvedFormal = (bool, String, Pos, Type);
 type ResolvedProcedure = (Option<Type>, Vec<ResolvedFormal>, Option<Type>);
 
 // What the source of an assignment or a relation operand turned out to be.
+// An array or a record keeps its address because it has no scalar value to
+// load.
 enum Source {
     Value(ir::Value, Type),
+    Structured(Place),
 }
 
 impl Source {
@@ -57,6 +63,7 @@ impl Source {
     fn ty(&self) -> Type {
         match self {
             Source::Value(_, ty) => ty.clone(),
+            Source::Structured(place) => place.ty.clone(),
         }
     }
 }
@@ -76,6 +83,10 @@ struct Analyzer {
     scopes: Vec<Scope>,
     diags: Vec<Diagnostic>,
     globals: Vec<ir::Global>,
+    // The aligned bytes the module's globals have reserved so far, so the
+    // declaration that would take the data object past the target limit is the
+    // one that reports it.
+    globals_size: i64,
     literals: Vec<ir::Literal>,
     // The literal holding the module's name, which every runtime check
     // reports alongside its position.
@@ -96,6 +107,7 @@ impl Analyzer {
             scopes: vec![universe_scope(), Scope::new()],
             diags: Vec::new(),
             globals: Vec::new(),
+            globals_size: 0,
             literals: Vec::new(),
             site_module: String::new(),
             procs: Vec::new(),
@@ -255,9 +267,17 @@ impl Analyzer {
                     Symbol::Var {
                         ty: ty.clone(),
                         addr,
+                        shape: fixed_shape(&ty),
                         read_only: false,
                     },
                 ) {
+                    match reserve(self.globals_size, &ty) {
+                        Some(total) => self.globals_size = total,
+                        None => self.diags.push(Diagnostic::new(
+                            id.pos,
+                            "module storage exceeds target object-size limit",
+                        )),
+                    }
                     self.globals.push(ir::Global {
                         symbol: symbol.clone(),
                         ty: ty.storage(),
@@ -306,7 +326,17 @@ impl Analyzer {
             if !declared_formals.insert(name.clone()) {
                 continue;
             }
-            let by_ref = var;
+            // A structured parameter is a reference whichever kind it is:
+            // Report 10.1 confines "the formal is a local variable holding
+            // the value" to basic types, and 9.1 forbids assigning to a
+            // structured value parameter or its elements. That pairing
+            // licenses passing the address and copying nothing, and all
+            // three reference compilers do exactly that — Project Oberon
+            // reclassifies the parameter as a read-only reference, OBNC
+            // emits a const pointer, oberonc passes the JVM reference. The
+            // consequence is that aliasing is observable, which
+            // ParamAlias.Mod pins.
+            let by_ref = var || ty.structured();
             let temp = self.builder().temp();
             self.builder().proc.params.push(ir::Param {
                 temp,
@@ -321,17 +351,21 @@ impl Analyzer {
             } else {
                 ir::Addr::Slot(name.clone())
             };
+            let shape = fixed_shape(&ty);
             if self.declare(
                 &name,
                 pos,
                 Symbol::Var {
                     ty: ty.clone(),
                     addr: addr.clone(),
-                    read_only: false,
+                    shape,
+                    // Read-only in its entirety, all the way down: the place
+                    // walk carries the flag through every field and element.
+                    read_only: !var && ty.structured(),
                 },
             ) && !by_ref
             {
-                self.reserve_slot(&name, &ty);
+                self.reserve_slot(&name, &ty, pos);
                 self.emit(ir::Inst::Store {
                     ty: ty.ir(),
                     val: ir::Value::Temp(temp),
@@ -368,10 +402,11 @@ impl Analyzer {
                     Symbol::Var {
                         ty: ty.clone(),
                         addr,
+                        shape: fixed_shape(&ty),
                         read_only: false,
                     },
                 ) {
-                    self.reserve_slot(&id.name, &ty);
+                    self.reserve_slot(&id.name, &ty, id.pos);
                     // A local can never be exported, but the mark still has
                     // to be diagnosed rather than ignored.
                     self.check_export(id);
@@ -380,8 +415,18 @@ impl Analyzer {
         }
     }
 
-    // One local's storage.
-    fn reserve_slot(&mut self, name: &str, ty: &Type) {
+    // One local's storage, plus its share of the running frame total. Several
+    // individually valid locals must not add up to an activation record the
+    // target cannot address, so the declaration that crosses the limit is the
+    // one that reports it.
+    fn reserve_slot(&mut self, name: &str, ty: &Type, pos: Pos) {
+        match reserve(self.builder().frame, ty) {
+            Some(total) => self.builder().frame = total,
+            None => self.diags.push(Diagnostic::new(
+                pos,
+                "procedure storage exceeds target object-size limit",
+            )),
+        }
         self.builder()
             .proc
             .slots
@@ -475,12 +520,14 @@ impl Analyzer {
         }
     }
 
-    // Report 9.1. A scalar assignment stores one value. assign_kind names the
-    // outcomes, and the value parameter and the RETURN expression ask the same
-    // function.
+    // Report 9.1. A scalar assignment stores one value, and identical array
+    // types copy the whole representation. assign_kind names the outcomes, and
+    // the value parameter and the RETURN expression ask the same function.
     fn lower_assign(&mut self, lhs: &ast::Designator, rhs: &ast::Expr) {
         // The destination designator is resolved first and the source second,
-        // each exactly once.
+        // each exactly once, so both sides' index expressions run in source
+        // order and a selected row is copied from where it was when the
+        // statement started.
         let target = self.assign_target(lhs);
         let source = self.lower_source(rhs);
         let (Some(target), Some(source)) = (target, source) else {
@@ -494,6 +541,18 @@ impl Analyzer {
                     addr: target.addr,
                 });
             }
+            (Some(AssignKind::WholeCopy), Source::Structured(source)) => {
+                // A zero-length array or an empty record still resolved both
+                // designators and ran both sides' checks; only the byte count
+                // is zero. A record's count includes its padding, which no
+                // program can observe either way.
+                self.emit(ir::Inst::CopyBytes {
+                    dst: target.addr,
+                    src: source.addr,
+                    size: target.ty.size(),
+                });
+            }
+            (Some(_), _) => unreachable!("assign_kind agrees with the source's shape"),
             (None, source) => {
                 self.diags
                     .push(assign_error(rhs.pos(), &target.ty, &source.ty()));
@@ -516,7 +575,9 @@ impl Analyzer {
     }
 
     // The right-hand side of an assignment or one operand of a relation,
-    // evaluated exactly once.
+    // evaluated exactly once. An array designator has no scalar value, so it
+    // stays an address here rather than being rejected: whole-array
+    // assignment is the context that wants it.
     fn lower_source(&mut self, expr: &ast::Expr) -> Option<Source> {
         let ast::Expr::Name(designator) = expr else {
             let (value, ty) = self.lower_expr(expr)?;
@@ -536,14 +597,38 @@ impl Analyzer {
             designator,
             format!("'{}' cannot be used as a value", designator.name()),
         )?;
-        let value = self.load(place.addr, place.ty.ir());
-        Some(Source::Value(value, place.ty))
+        Some(match place.ty.scalar() {
+            Some(ty) => {
+                let value = self.load(place.addr, ty);
+                Source::Value(value, place.ty)
+            }
+            None => Source::Structured(place),
+        })
     }
 
-    // A source where the context needs one scalar value.
-    fn source_scalar(&mut self, source: Source) -> Option<(ir::Value, Type)> {
+    // A source where the context needs one scalar value. `expr` is the source
+    // text the value came from, for the diagnostics.
+    fn source_scalar(&mut self, expr: &ast::Expr, source: Source) -> Option<(ir::Value, Type)> {
         match source {
             Source::Value(value, ty) => Some((value, ty)),
+            // Report 8: an expression operates on values, and an array or
+            // record designator has none. That is the whole rejection of
+            // records in relations, in arithmetic, in conditions, in a CASE
+            // selector, and in every other value context.
+            Source::Structured(place) => {
+                let ast::Expr::Name(designator) = expr else {
+                    unreachable!("only a designator resolves to structured storage");
+                };
+                self.diags.push(Diagnostic::new(
+                    designator.pos,
+                    format!(
+                        "'{}' has type {} and cannot be used as a value",
+                        designator.name(),
+                        place.ty
+                    ),
+                ));
+                None
+            }
         }
     }
 
@@ -923,9 +1008,12 @@ impl Analyzer {
             ast::Expr::Real { value, .. } => Some((ir::Value::Real(*value), Type::Real)),
             ast::Expr::Bool { value, .. } => Some((ir::Value::Bool(*value), Type::Boolean)),
             ast::Expr::Set { elements, .. } => self.lower_set(elements),
+            // Report 8: an expression operates on values, and an array
+            // designator has none. Whole-array assignment is the one place
+            // that wants the array itself, and it uses lower_source directly.
             ast::Expr::Name(_) => {
                 let source = self.lower_source(expr)?;
-                self.source_scalar(source)
+                self.source_scalar(expr, source)
             }
             ast::Expr::Apply { callee, args, pos } => match self.lower_call(callee, args, *pos) {
                 Some((Some(value), Some(ty))) => Some((value, ty)),
@@ -1307,15 +1395,17 @@ impl Analyzer {
         pos: Pos,
     ) -> Option<(ir::Value, Type)> {
         use ast::BinOp;
-        // Both operands are resolved left to right and each exactly once.
+        // Both operands are resolved left to right and each exactly once, so
+        // an index expression in either runs once and is bounds-checked
+        // before the comparison.
         let lhs_src = self.lower_source(lhs);
         let rhs_src = self.lower_source(rhs);
         let (Some(lhs_src), Some(rhs_src)) = (lhs_src, rhs_src) else {
             return None;
         };
 
-        let lhs_value = self.source_scalar(lhs_src);
-        let rhs_value = self.source_scalar(rhs_src);
+        let lhs_value = self.source_scalar(lhs, lhs_src);
+        let rhs_value = self.source_scalar(rhs, rhs_src);
         let (Some((lhs_value, lhs_ty)), Some((rhs_value, rhs_ty))) = (lhs_value, rhs_value) else {
             return None;
         };
@@ -1431,11 +1521,16 @@ impl Analyzer {
             };
             let var = formal.var;
             let expected = formal.ty.clone();
-            // A VAR formal takes the address of its actual, so the actual must
-            // be a designator of the identical type: Report 10.1's rule.
-            if var {
-                // A VAR actual will be written, so a read-only designator may
-                // not be passed.
+            // A structured formal — value or VAR — takes the address of its
+            // actual, so the actual must be a designator of the identical
+            // type. For VAR that is Report 10.1's rule; for a structured
+            // value it is what remains of assignment compatibility once the
+            // actual must be addressable.
+            if var || expected.structured() {
+                // A structured value actual is a read, so a read-only
+                // designator — an imported variable, another structured value
+                // parameter — may be passed on. A VAR actual will be written
+                // and may not be.
                 match self.ref_actual(actual, i + 1, var) {
                     Some(place) => {
                         if place.ty == expected {
@@ -1489,6 +1584,7 @@ impl Analyzer {
         pos: Pos,
     ) -> Option<(Option<ir::Value>, Option<Type>)> {
         match builtin {
+            Builtin::Len => return self.lower_len(actuals, pos),
             Builtin::Inc | Builtin::Dec => return self.lower_inc_dec(builtin, actuals, pos),
             Builtin::Incl | Builtin::Excl => return self.lower_incl_excl(builtin, actuals, pos),
             Builtin::Pack => return self.lower_pack(actuals, pos),
@@ -1564,7 +1660,8 @@ impl Analyzer {
             Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
                 self.lower_shift(builtin, args[0].0.clone(), args[1].0.clone(), &actuals[1])?
             }
-            Builtin::Inc
+            Builtin::Len
+            | Builtin::Inc
             | Builtin::Dec
             | Builtin::Incl
             | Builtin::Excl
@@ -1573,6 +1670,49 @@ impl Analyzer {
             | Builtin::Assert => unreachable!("handled above"),
         };
         Some((Some(value), Some(result.ty(args[0].1.clone()))))
+    }
+
+    // Report 10.2: LEN(v) is the length of the array v. For a fixed array that
+    // length is a property of the type, so the result is an immediate — but
+    // the designator is still resolved, so `LEN(a[f()])` calls f once and
+    // checks its result before returning the inner length. cf. Project
+    // Oberon's ORP.StandFunc, which lowers the designator and then reads the
+    // length out of its type.
+    fn lower_len(
+        &mut self,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        // The arguments are deliberately not lowered when the arity is wrong:
+        // an array actual has no value, and reporting that on top of the arity
+        // would be two complaints about one mistake.
+        if actuals.len() != 1 {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "wrong number of arguments: expected 1, found {}",
+                    actuals.len()
+                ),
+            ));
+            return None;
+        }
+        let ast::Expr::Name(designator) = &actuals[0] else {
+            let _ = self.lower_expr(&actuals[0]);
+            self.diags.push(Diagnostic::new(
+                actuals[0].pos(),
+                "argument 1 must be an array variable",
+            ));
+            return None;
+        };
+        let place = self.place(designator, "argument 1 must be an array variable".into())?;
+        if !place.ty.is_array() {
+            self.diags.push(Diagnostic::new(
+                actuals[0].pos(),
+                format!("argument 1 has type {}, expected an array", place.ty),
+            ));
+            return None;
+        }
+        Some((Some(place.shape[0].clone()), Some(Type::Integer)))
     }
 
     // Report 10.2: PACK(x, n) is x := x * 2^n on a writable REAL variable.
@@ -1969,7 +2109,10 @@ impl Analyzer {
             .map(|place| (place.addr, place.ty))
     }
 
-    // The address an actual supplies to a reference formal.
+    // The address an actual supplies to a reference formal. `writable` is
+    // false only for a structured value actual, which is a read and therefore
+    // the one reference an imported variable or another structured value
+    // parameter can be.
     fn ref_actual(&mut self, actual: &ast::Expr, number: usize, writable: bool) -> Option<Place> {
         let place = match actual {
             ast::Expr::Name(designator) => {
@@ -1999,7 +2142,7 @@ impl Analyzer {
     // evaluates and checks every selector.
     fn designator_type(&self, designator: &ast::Designator) -> Result<Type, Diagnostic> {
         let (symbol, rest) = self.qualident(designator)?;
-        let ty = match symbol {
+        let mut ty = match symbol {
             Symbol::Var { ty, .. } => ty,
             Symbol::Proc { ty, .. } if rest.is_empty() => return Ok(ty),
             _ => {
@@ -2016,6 +2159,16 @@ impl Analyzer {
                         *pos,
                         format!("cannot select '{name}' from {ty}: only a record has fields"),
                     ));
+                }
+                ast::Selector::Index(exprs, pos) => {
+                    for _ in exprs {
+                        ty = ty.array_elem().cloned().ok_or_else(|| {
+                            Diagnostic::new(
+                                *pos,
+                                format!("cannot index {ty}: only an array can be indexed"),
+                            )
+                        })?;
+                    }
                 }
             }
         }
@@ -2037,6 +2190,7 @@ impl Analyzer {
         let Symbol::Var {
             ty,
             addr,
+            shape,
             read_only,
         } = symbol
         else {
@@ -2047,6 +2201,7 @@ impl Analyzer {
         let mut place = Place {
             addr,
             ty,
+            shape,
             read_only,
         };
         for selector in rest {
@@ -2055,6 +2210,13 @@ impl Analyzer {
                 // f of r.
                 ast::Selector::Field(name, pos) => {
                     place = self.field(place, name, *pos)?;
+                }
+                // Report 8.1: a[i, j] abbreviates a[i][j], so each expression
+                // of one bracket list is its own index selector.
+                ast::Selector::Index(exprs, pos) => {
+                    for expr in exprs {
+                        place = self.index(place, expr, *pos)?;
+                    }
                 }
             }
         }
@@ -2070,6 +2232,66 @@ impl Analyzer {
             ),
         ));
         None
+    }
+
+    // One dimension. The index is evaluated before anything is done with it,
+    // and the check the IR carries runs before the address is formed, so a
+    // later dimension's expression cannot run ahead of an earlier dimension's
+    // check and no invalid address is ever computed.
+    fn index(&mut self, base: Place, expr: &ast::Expr, pos: Pos) -> Option<Place> {
+        let index = self.lower_int(expr, "array index");
+        let Some(elem) = base.ty.array_elem().cloned() else {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!("cannot index {}: only an array can be indexed", base.ty),
+            ));
+            return None;
+        };
+        let index = index?;
+        // An index the compiler can fold is a source error, exactly as an
+        // out-of-range SET element is. A valid constant one still takes the
+        // ordinary checked lowering; there is no optimization pass, and one
+        // executable path is what makes the IR invariant literal.
+        if let Some(array) = base.ty.array() {
+            match self.try_eval_const(expr) {
+                Ok(Some(ConstValue::Int(value))) => {
+                    if !(0..array.len).contains(&value) {
+                        self.diags
+                            .push(index_range_error(expr.pos(), value, array.len));
+                        return None;
+                    }
+                }
+                Ok(Some(_)) => unreachable!("the index was type-checked as INTEGER"),
+                Ok(None) => {}
+                Err(diag) => {
+                    self.diags.push(diag);
+                    return None;
+                }
+            }
+        }
+        let len = base
+            .shape
+            .first()
+            .cloned()
+            .expect("an array place has a length");
+        let remaining_shape = base.shape[1..].to_vec();
+        let dst = self.temp();
+        self.emit(ir::Inst::Index {
+            dst,
+            base: base.addr,
+            index,
+            len,
+            stride: elem.size(),
+            site: self.site(expr.pos()),
+        });
+        Some(Place {
+            addr: ir::Addr::Temp(dst),
+            ty: elem,
+            shape: remaining_shape,
+            // Report 9.1: an imported variable is read-only, and selecting
+            // part of it does not make that part writable.
+            read_only: base.read_only,
+        })
     }
 
     fn assign_target(&mut self, designator: &ast::Designator) -> Option<Place> {
@@ -2103,6 +2325,23 @@ impl Analyzer {
                     None
                 }
             },
+            ast::TypeExpr::Array { lengths, elem, pos } => {
+                // Every length is folded even after one of them fails, so a
+                // declaration reports all of its bad dimensions at once.
+                let folded: Vec<_> = lengths
+                    .iter()
+                    .map(|length| self.array_length(length))
+                    .collect();
+                let elem = self.resolve_type(elem);
+                let mut ty = elem?;
+                // Report 6.2: ARRAY N0, N1 OF T means ARRAY N0 OF ARRAY N1 OF
+                // T, so the innermost dimension is built first and the two
+                // spellings produce the same descriptors.
+                for len in folded.into_iter().rev() {
+                    ty = self.new_array(len?, ty, *pos)?;
+                }
+                Some(ty)
+            }
         }
     }
 
@@ -2138,6 +2377,15 @@ impl Analyzer {
 
         let ret = match result {
             Some(source) => match self.resolve_type(source) {
+                Some(ty) if ty.structured() => {
+                    let kind = if ty.is_array() { "array" } else { "record" };
+                    self.diags.push(Diagnostic::new(
+                        source.pos(),
+                        format!("a procedure cannot have the {kind} result type {ty}"),
+                    ));
+                    ok = false;
+                    None
+                }
                 Some(ty) => Some(ty),
                 None => {
                     ok = false;
@@ -2162,6 +2410,50 @@ impl Analyzer {
         (ty, formals, ret)
     }
 
+    // Report 6.2: a length is a constant expression, and Report 5 leaves it an
+    // INTEGER. Zero is an ordinary length; a negative one has no meaning.
+    fn array_length(&mut self, expr: &ast::Expr) -> Option<i32> {
+        self.check_const_expr(expr)?;
+        match self.eval_const(expr) {
+            Ok(ConstValue::Int(len)) if len >= 0 => Some(len),
+            Ok(ConstValue::Int(len)) => {
+                self.diags.push(Diagnostic::new(
+                    expr.pos(),
+                    format!("array length must not be negative, found {len}"),
+                ));
+                None
+            }
+            Ok(other) => {
+                self.diags.push(Diagnostic::new(
+                    expr.pos(),
+                    format!("array length must be INTEGER, found {}", other.ty()),
+                ));
+                None
+            }
+            Err(diag) => {
+                self.diags.push(diag);
+                None
+            }
+        }
+    }
+
+    // One ARRAY constructor, and therefore one new type identity. The size is
+    // computed and checked here so nothing downstream has to wonder whether an
+    // array's bytes fit in the arithmetic it uses.
+    fn new_array(&mut self, len: i32, elem: Type, pos: Pos) -> Option<Type> {
+        let size = i64::from(len)
+            .checked_mul(elem.size())
+            .filter(|size| *size <= ir::MAX_OBJECT_SIZE);
+        let Some(size) = size else {
+            self.diags.push(Diagnostic::new(
+                pos,
+                "array type exceeds target object-size limit",
+            ));
+            return None;
+        };
+        Some(Type::Array(Rc::new(ArrayType { len, elem, size })))
+    }
+
     // A designator that names an object directly, with no selectors left over.
     // Every context that wants a name rather than a variable goes through
     // here: a type, a procedure to call, a constant.
@@ -2175,7 +2467,7 @@ impl Analyzer {
 
     // qualident = [ident "."] ident, plus the selectors that still have to be
     // applied to what it names. The two are separated because only a variable
-    // can carry selectors.
+    // can carry selectors, and applying an index selector emits code.
     fn qualident<'a>(
         &self,
         designator: &'a ast::Designator,
@@ -2330,6 +2622,8 @@ impl Analyzer {
 
 struct ProcBuilder {
     proc: ir::Proc,
+    // The aligned bytes this procedure's parameters and locals have reserved.
+    frame: i64,
     next_temp: usize,
     next_label: usize,
 }
@@ -2344,6 +2638,7 @@ impl ProcBuilder {
                 slots: Vec::new(),
                 insts: Vec::new(),
             },
+            frame: 0,
             next_temp: 0,
             next_label: 0,
         }
@@ -2381,8 +2676,8 @@ fn relation_ir(op: ast::BinOp) -> ir::BinOp {
 // A selector on something that cannot carry one. Reaching this means the
 // context wanted a name — a type, a procedure, a constant — so the message
 // says the selector is out of place rather than guessing at the intent. A
-// selector on a variable never comes here: that is a field, and the
-// designator walks handle it.
+// selector on a variable never comes here: that is a field or an index, and
+// the designator walks handle both.
 fn selector_error(designator: &ast::Designator, selector: &ast::Selector) -> Diagnostic {
     match selector {
         ast::Selector::Field(name, pos) => Diagnostic::new(
@@ -2392,18 +2687,55 @@ fn selector_error(designator: &ast::Designator, selector: &ast::Selector) -> Dia
                 designator.ident
             ),
         ),
+        ast::Selector::Index(_, pos) => Diagnostic::new(
+            *pos,
+            format!("'{}' cannot be indexed here", designator.ident),
+        ),
     }
 }
 
-// Report 9.1 requires the same type on both sides.
+// Report 9.1 requires the same type on both sides. Two structured types can
+// print the same and still be different types, so when the spellings agree the
+// message has to say what the difference is.
 fn assign_error(pos: Pos, target: &Type, found: &Type) -> Diagnostic {
-    Diagnostic::new(pos, format!("cannot assign {found} to {target}"))
+    Diagnostic::new(
+        pos,
+        format!(
+            "cannot assign {found} to {target}{}",
+            distinct_types_hint(target, found)
+        ),
+    )
 }
 
 fn argument_type_error(pos: Pos, number: usize, expected: &Type, found: &Type) -> Diagnostic {
     Diagnostic::new(
         pos,
-        format!("argument {number} has type {found}, expected {expected}"),
+        format!(
+            "argument {number} has type {found}, expected {expected}{}",
+            distinct_types_hint(expected, found)
+        ),
+    )
+}
+
+// Two arrays with the same shape, two records with the same declared name, or
+// two inline records all print alike, so a diagnostic comparing two of them
+// has to name the rule that keeps them apart.
+fn distinct_types_hint(target: &Type, found: &Type) -> &'static str {
+    if target.to_string() != found.to_string() {
+        return "";
+    }
+    match target {
+        Type::Array(_) => {
+            ": these are different array types, and each ARRAY in the source declares its own"
+        }
+        _ => "",
+    }
+}
+
+fn index_range_error(pos: Pos, index: i32, len: i32) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!("index {index} is out of bounds: the array has length {len}"),
     )
 }
 

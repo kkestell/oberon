@@ -1,7 +1,9 @@
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Every language failure ends here. Out writes through the buffered C stdout,
    so it is flushed before the message goes to the unbuffered stderr: on a
@@ -14,6 +16,28 @@ static void oberon_fail(const char *message, const char *module, int32_t line, i
     fflush(stdout);
     fprintf(stderr, "%s:%d:%d: %s\n", module, (int)line, (int)col, message);
     exit(1);
+}
+
+/* Report 8.1: an index must lie between zero and the length less one. The
+   check runs before the element address is formed, so a zero-length array
+   rejects every index and no invalid address is ever computed. */
+int32_t oberon_check_index(
+    int32_t index,
+    int32_t length,
+    const char *module, int32_t line, int32_t col)
+{
+    if (index < 0 || index >= length) {
+        oberon_fail("array index out of bounds", module, line, col);
+    }
+    return index;
+}
+
+/* Report 9.1: an array assignment copies the value. memmove rather than memcpy
+   because assigning a variable to itself is legal and has to mean something.
+   A count of zero is the ordinary result of copying a zero-length array. */
+void oberon_copy(void *destination, const void *source, size_t count)
+{
+    memmove(destination, source, count);
 }
 
 /* Oakwood Out.Int(i, n): right-justified in a field of at least n spaces. */

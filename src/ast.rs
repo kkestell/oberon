@@ -55,6 +55,22 @@ pub struct VarDecl {
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     Named(Designator),
+    // ArrayType = ARRAY length {"," length} OF type. The comma list is kept as
+    // written: Report 6.2 defines it as nested arrays, and sema expands it.
+    Array {
+        lengths: Vec<Expr>,
+        elem: Box<TypeExpr>,
+        pos: Pos,
+    },
+}
+
+impl TypeExpr {
+    pub fn pos(&self) -> Pos {
+        match self {
+            TypeExpr::Named(d) => d.pos,
+            TypeExpr::Array { pos, .. } => *pos,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -89,10 +105,15 @@ pub struct Designator {
 #[derive(Debug, Clone)]
 pub enum Selector {
     Field(String, Pos),
+    // selector = "[" ExpList "]". One source selector holds the whole comma
+    // list, which Report 8.1 defines as one index selector per expression.
+    Index(Vec<Expr>, Pos),
 }
 
 impl Designator {
-    // For diagnostics: "Out.Int", not just the base "Out".
+    // For diagnostics: "Out.Int", not just the base "Out". An index selector
+    // prints as "[...]": the message names the designator, and printing the
+    // index expressions back out would need a whole expression printer.
     pub fn name(&self) -> String {
         let mut s = self.ident.clone();
         for sel in &self.selectors {
@@ -101,6 +122,7 @@ impl Designator {
                     s.push('.');
                     s.push_str(f);
                 }
+                Selector::Index(..) => s.push_str("[...]"),
             }
         }
         s
