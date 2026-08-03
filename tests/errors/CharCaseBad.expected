@@ -1,0 +1,7 @@
+tests/errors/CharCaseBad.Mod:6:5: case label must be CHAR, found INTEGER
+tests/errors/CharCaseBad.Mod:7:5: case label must be CHAR, found string of 2 characters
+tests/errors/CharCaseBad.Mod:8:5: case label range 122..97 is reversed
+tests/errors/CharCaseBad.Mod:10:5: case labels 101..103 already covered by an earlier alternative
+tests/errors/CharCaseBad.Mod:13:5: case label must be INTEGER, found CHAR
+tests/errors/CharCaseBad.Mod:14:5: case label must be INTEGER, found string of 1 character
+Error: 6 error(s)

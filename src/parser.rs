@@ -500,8 +500,20 @@ impl Parser {
                 Ok(Expr::Int { value, pos })
             }
             Tok::Ident(_) => Ok(Expr::Name(self.designator()?)),
+            Tok::Str(_) => Ok(self.string()),
             other => Err(self.error(format!("expected case label, found {other:?}"))),
         }
+    }
+
+    // The current token is known to be a string; both source forms arrive
+    // here as one token carrying bytes.
+    fn string(&mut self) -> Expr {
+        let pos = self.pos();
+        let t = self.advance();
+        let Tok::Str(bytes) = t.tok else {
+            unreachable!()
+        };
+        Expr::Str { bytes, pos }
     }
 
     fn statement(&mut self) -> PResult<Stmt> {
@@ -722,6 +734,7 @@ impl Parser {
                 Ok(e)
             }
             Tok::LBrace => self.set(),
+            Tok::Str(_) => Ok(self.string()),
             other => Err(self.error(format!("expected expression, found {other:?}"))),
         }
     }
@@ -893,5 +906,40 @@ mod tests {
             error("VAR a: INTEGER; TYPE T = ARRAY 1 OF INTEGER;"),
             "expected 'END', found Type"
         );
+    }
+
+    #[test]
+    fn string_factor_and_constant() {
+        let m = module("CONST Prompt = \"> \"; Quote = 22X;\nVAR ch: CHAR;\nBEGIN ch := \"A\"");
+        let consts: Vec<_> = m
+            .consts
+            .iter()
+            .map(|c| match &c.expr {
+                Expr::Str { bytes, .. } => bytes.clone(),
+                other => panic!("expected a string, found {other:?}"),
+            })
+            .collect();
+        assert_eq!(consts, vec![b"> ".to_vec(), vec![0x22]]);
+        let Stmt::Assign { rhs, .. } = &m.body[0] else {
+            panic!("expected an assignment");
+        };
+        assert!(matches!(rhs, Expr::Str { bytes, .. } if bytes == b"A"));
+    }
+
+    // label = integer | string | qualident, and a range may run between two
+    // single-character strings.
+    #[test]
+    fn string_case_labels() {
+        let m = module("VAR ch: CHAR;\nBEGIN CASE ch OF \"a\" .. \"f\", 0X: | \"z\": END");
+        let Stmt::Case { arms, .. } = &m.body[0] else {
+            panic!("expected a case statement");
+        };
+        assert_eq!(arms.len(), 2);
+        let range = &arms[0].labels[0];
+        assert!(matches!(&range.low, Expr::Str { bytes, .. } if bytes == b"a"));
+        assert!(matches!(range.high.as_ref().unwrap(), Expr::Str { bytes, .. } if bytes == b"f"));
+        let single = &arms[0].labels[1];
+        assert!(matches!(&single.low, Expr::Str { bytes, .. } if bytes == &[0u8]));
+        assert!(single.high.is_none());
     }
 }

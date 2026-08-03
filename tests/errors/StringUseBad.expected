@@ -1,0 +1,9 @@
+tests/errors/StringUseBad.Mod:10:8: a string of 2 characters cannot be used as a value: only a single-character string is a CHAR
+tests/errors/StringUseBad.Mod:11:8: a string of 2 characters cannot be used as a value: only a single-character string is a CHAR
+tests/errors/StringUseBad.Mod:12:12: operator '=' requires operands of the same type, found CHAR and INTEGER
+tests/errors/StringUseBad.Mod:13:8: argument 1 must be a variable
+tests/errors/StringUseBad.Mod:14:12: a string of 3 characters cannot be used as a value: only a single-character string is a CHAR
+tests/errors/StringUseBad.Mod:14:12: argument 1 must be an array variable
+tests/errors/StringUseBad.Mod:15:18: a string of 0 characters cannot be used as a value: only a single-character string is a CHAR
+tests/errors/StringUseBad.Mod:16:12: a string of 2 characters cannot be used as a value: only a single-character string is a CHAR
+Error: 8 error(s)

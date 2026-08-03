@@ -32,6 +32,16 @@ pub(super) fn bin_op_name(op: ast::BinOp) -> &'static str {
 pub(super) enum AssignKind {
     // The same scalar type on both sides: one ordinary store.
     Store,
+    // Report 6.1: INTEGER is compatible with BYTE. The store checks that the
+    // value lies in 0 through 255, because that is BYTE's whole value set and
+    // target truncation does not get to define the language.
+    ByteRange,
+    // Report 9.1: a single-character string stands for its CHAR.
+    CharFromString,
+    // Report 9.1: a string copies into a character array with a null
+    // appended. The length rule is checked at the assignment, the one site
+    // that can reach this.
+    StringCopy,
     // Report 9.1: two identical structured types copy the whole
     // representation, padding included.
     WholeCopy,
@@ -45,7 +55,30 @@ pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
             AssignKind::Store
         });
     }
-    None
+    match (target, found) {
+        (Type::Byte, Type::Integer) => Some(AssignKind::ByteRange),
+        (Type::Char, Type::String(1)) => Some(AssignKind::CharFromString),
+        (Type::Array(_), Type::String(_)) if target.char_array() => Some(AssignKind::StringCopy),
+        _ => None,
+    }
+}
+
+// The text pairs Report 8.2.4 lets a relation compare. Character arrays reach
+// this only while a required constant expression is being type-checked; the
+// later constant evaluation still rejects their variables as nonconstant.
+pub(super) fn text_relation_ok(lhs: &Type, rhs: &Type) -> bool {
+    if matches!(
+        (lhs, rhs),
+        (Type::Char, Type::Char)
+            | (Type::Char, Type::String(1))
+            | (Type::String(1), Type::Char)
+            | (Type::String(_), Type::String(_))
+    ) {
+        return true;
+    }
+    let lhs_text = lhs.char_array() || matches!(lhs, Type::String(_));
+    let rhs_text = rhs.char_array() || matches!(rhs, Type::String(_));
+    lhs_text && rhs_text && (lhs.char_array() || rhs.char_array())
 }
 
 // Report 8.2 overloads "+", "-", "*", and "/". The first three take two
@@ -69,7 +102,7 @@ pub(super) fn check_arith_types(
     check_operand_types(pos, op, accepted, lhs, rhs, diags)
 }
 
-// Report 8.2.4 orders the numeric types; SET and BOOLEAN have
+// Report 8.2.4 orders the numeric types and CHAR; SET and BOOLEAN have
 // equality and inequality only. The operand type is returned rather than
 // BOOLEAN, because the comparison instruction is chosen from it.
 pub(super) fn check_order_types(
@@ -79,7 +112,14 @@ pub(super) fn check_order_types(
     rhs: Type,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
-    check_operand_types(pos, op, &[Type::Integer, Type::Real], lhs, rhs, diags)
+    check_operand_types(
+        pos,
+        op,
+        &[Type::Integer, Type::Real, Type::Char],
+        lhs,
+        rhs,
+        diags,
+    )
 }
 
 pub(super) fn check_operand_types(
@@ -161,6 +201,16 @@ pub enum Type {
     Real,
     Boolean,
     Set,
+    // Report 6.1. A CHAR is one unsigned byte, so the character set is exactly
+    // the ordinals 0 through 255 and a string literal's bytes are its
+    // characters. BYTE has the same storage but is an integer type: reading
+    // one yields an INTEGER and writing one checks the range.
+    Char,
+    Byte,
+    // The type of a string constant, carrying its character count. No source
+    // identifier names it, so no variable, formal, or element can have it: a
+    // string exists only as a literal or a constant declared from one.
+    String(usize),
     // Report 6.2. Each ARRAY constructor in the source builds one descriptor,
     // and sharing that descriptor is what makes two types the same type. A
     // declaration's names, an alias, an interface member, and a client's view
@@ -196,14 +246,16 @@ impl Type {
     // The IR type of a value of this type, when a value of it exists. An
     // array has none: it is storage, and asking for one is how a
     // load, a store, an argument, or a result finds out it may not have this
-    // type at all.
+    // type at all. A string has none either, so no string can reach a load, a
+    // store, an argument, or a result by accident.
     pub(super) fn scalar(&self) -> Option<ir::Ty> {
         match self {
             Type::Integer => Some(ir::Ty::Int),
             Type::Real => Some(ir::Ty::Real),
             Type::Boolean => Some(ir::Ty::Bool),
             Type::Set => Some(ir::Ty::Set),
-            Type::Array(_) | Type::Procedure(_) => None,
+            Type::Char | Type::Byte => Some(ir::Ty::Byte),
+            Type::String(_) | Type::Array(_) | Type::Procedure(_) => None,
         }
     }
 
@@ -244,6 +296,12 @@ impl Type {
         matches!(self, Type::Array(_))
     }
 
+    // A one-dimensional array whose element type is CHAR. Report 9.1's string
+    // assignment and 8.2.4's array relations apply to exactly these.
+    pub(super) fn char_array(&self) -> bool {
+        matches!(self.array_elem(), Some(Type::Char))
+    }
+
     pub(super) fn size(&self) -> i64 {
         match self {
             Type::Array(array) => array.size,
@@ -251,7 +309,8 @@ impl Type {
         }
     }
 
-    // An array is contiguous and takes its element's alignment.
+    // An array is contiguous and takes its element's alignment, so the rule
+    // works for the one-byte CHAR and BYTE types without a special case.
     pub(super) fn align(&self) -> i64 {
         match self {
             Type::Array(array) => array.elem.align(),
@@ -283,7 +342,10 @@ impl PartialEq for Type {
             (Type::Integer, Type::Integer)
             | (Type::Real, Type::Real)
             | (Type::Boolean, Type::Boolean)
-            | (Type::Set, Type::Set) => true,
+            | (Type::Set, Type::Set)
+            | (Type::Char, Type::Char)
+            | (Type::Byte, Type::Byte) => true,
+            (Type::String(a), Type::String(b)) => a == b,
             (Type::Array(a), Type::Array(b)) => Rc::ptr_eq(a, b),
             (Type::Procedure(a), Type::Procedure(b)) => Rc::ptr_eq(a, b),
             _ => false,
@@ -300,6 +362,10 @@ impl fmt::Display for Type {
             Type::Real => write!(f, "REAL"),
             Type::Boolean => write!(f, "BOOLEAN"),
             Type::Set => write!(f, "SET"),
+            Type::Char => write!(f, "CHAR"),
+            Type::Byte => write!(f, "BYTE"),
+            Type::String(1) => write!(f, "string of 1 character"),
+            Type::String(n) => write!(f, "string of {n} characters"),
             Type::Array(array) => write!(f, "ARRAY {} OF {}", array.len, array.elem),
             Type::Procedure(procedure) => {
                 write!(f, "PROCEDURE")?;

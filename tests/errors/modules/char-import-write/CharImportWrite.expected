@@ -1,0 +1,4 @@
+tests/errors/modules/char-import-write/CharImportWrite.Mod:6:3: cannot assign to 'CharSource.text': it is read-only
+tests/errors/modules/char-import-write/CharImportWrite.Mod:7:3: cannot assign to 'CharSource.text[...]': it is read-only
+tests/errors/modules/char-import-write/CharImportWrite.Mod:8:3: cannot assign to 'CharSource.ch': it is read-only
+Error: 3 error(s)

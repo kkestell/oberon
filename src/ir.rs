@@ -109,6 +109,7 @@ impl Storage {
 pub fn scalar_size(ty: Ty) -> i64 {
     match ty {
         Ty::Int | Ty::Bool | Ty::Set | Ty::Real => 4,
+        Ty::Byte => 1,
         Ty::Pointer => 8,
     }
 }
@@ -127,13 +128,18 @@ pub enum ParamPass {
 
 // Int, Bool, and Set are four bytes and travel in a QBE word; Real is IEEE
 // 754 binary32 and travels in a QBE single, which is a distinct calling class
-// and a distinct set of arithmetic and comparison operations.
+// and a distinct set of arithmetic and comparison operations. Byte is one
+// unsigned byte in storage — CHAR and BYTE share it, because they differ only
+// in source rules — and still travels in a word: it loads zero-extended, so a
+// register value is always 0 through 255 and the signed word comparisons give
+// the correct unsigned ordering.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ty {
     Int,
     Bool,
     Set,
     Real,
+    Byte,
     Pointer,
 }
 
@@ -145,6 +151,7 @@ pub enum Value {
     Bool(bool),
     Set(u32),
     Real(f32),
+    Byte(u8),
     Symbol(String),
     Temp(usize),
 }

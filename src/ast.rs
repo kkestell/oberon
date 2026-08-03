@@ -201,6 +201,12 @@ pub enum Expr {
         value: bool,
         pos: Pos,
     },
+    // Both of Report 3's string forms: the lexer has already turned 41X into
+    // a one-byte string, so no character literal exists as a separate node.
+    Str {
+        bytes: Vec<u8>,
+        pos: Pos,
+    },
     Name(Designator),
     // set = "{" [element {"," element}] "}". The empty constructor is legal
     // and has no elements.
@@ -271,6 +277,7 @@ impl Expr {
             Expr::Int { pos, .. }
             | Expr::Real { pos, .. }
             | Expr::Bool { pos, .. }
+            | Expr::Str { pos, .. }
             | Expr::Set { pos, .. }
             | Expr::Apply { pos, .. }
             | Expr::Unary { pos, .. }

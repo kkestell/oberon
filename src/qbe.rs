@@ -24,8 +24,9 @@ pub fn emit(program: &ir::Program) -> String {
         }
         for literal in &module.literals {
             // Every byte is a decimal item, so no escaping rule is needed and
-            // every value including zero is emitted the same way. The null
-            // terminator makes each object a C string.
+            // every value including zero is emitted the same way. The
+            // terminator the Report appends on assignment is part of the data
+            // object, so one literal serves both the copy and the comparison.
             write!(
                 out,
                 "data ${} = align 1 {{ b",
@@ -286,20 +287,23 @@ fn arg(arg: &ir::Arg, names: &Names, slots: &HashMap<&str, String>) -> String {
 }
 
 // QBE passes an `s` in the platform's floating-point class and a `w` in its
-// integer class, which is the native C float and int32_t ABI.
+// integer class, which is the native C float and int32_t ABI. A byte is a
+// word in every calling position; only its memory traffic is byte-wide.
 fn class(ty: ir::Ty) -> &'static str {
     match ty {
-        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "w",
+        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set | ir::Ty::Byte => "w",
         ir::Ty::Real => "s",
         ir::Ty::Pointer => "l",
     }
 }
 
-// The memory mnemonics come from the type, not from its register class.
+// The memory mnemonics come from the type, not from its register class: a
+// byte loads zero-extended into a word and stores its low byte back.
 fn load_op(ty: ir::Ty) -> &'static str {
     match ty {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "loadw",
         ir::Ty::Real => "loads",
+        ir::Ty::Byte => "loadub",
         ir::Ty::Pointer => "loadl",
     }
 }
@@ -308,6 +312,7 @@ fn store_op(ty: ir::Ty) -> &'static str {
     match ty {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "storew",
         ir::Ty::Real => "stores",
+        ir::Ty::Byte => "storeb",
         ir::Ty::Pointer => "storel",
     }
 }
@@ -342,6 +347,7 @@ fn value(value: &ir::Value, names: &Names) -> String {
         // constant arithmetic can produce, none of which a decimal spelling
         // states directly.
         ir::Value::Real(v) => (v.to_bits() as i32).to_string(),
+        ir::Value::Byte(v) => v.to_string(),
         ir::Value::Symbol(symbol) => format!("${}", names.symbol(symbol)),
         ir::Value::Temp(id) => temp(*id),
     }

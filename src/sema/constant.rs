@@ -20,6 +20,13 @@ fn eval_const_binary(
             _ => unreachable!(),
         }));
     }
+    // CHAR and string relations, folded under the same bounded rule the
+    // runtime comparison uses, so the folded and computed forms agree.
+    if let BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge = op
+        && let (Some(a), Some(b)) = (text_bytes(&lhs), text_bytes(&rhs))
+    {
+        return Ok(ConstValue::Bool(relation_holds(op, str_const_cmp(&a, &b))));
+    }
     // Every source operator rounds at binary32, so a folded expression takes
     // the same rounding steps as the same expression computed at run time.
     // IEEE behaviour is the whole answer here: overflow yields an infinity,
@@ -120,6 +127,50 @@ pub(super) fn floor_const(value: f32, pos: Pos) -> Result<i32, Diagnostic> {
     }
 }
 
+// The bounded comparison rule of Report 8.2.4, applied to two constants. Each
+// operand is its characters with the terminator appended, and the walk stops
+// at the first differing pair, at a null present in both, or at the shorter
+// operand's length. oberon_str_cmp applies the same rule to the same byte
+// sequences, so a folded comparison and a computed one always agree.
+pub(super) fn str_const_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let bound = (a.len() + 1).min(b.len() + 1);
+    for i in 0..bound {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x.cmp(&y);
+        }
+        if x == 0 {
+            break;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+pub(super) fn relation_holds(op: ast::BinOp, ordering: std::cmp::Ordering) -> bool {
+    use std::cmp::Ordering;
+    match op {
+        ast::BinOp::Eq => ordering == Ordering::Equal,
+        ast::BinOp::Ne => ordering != Ordering::Equal,
+        ast::BinOp::Lt => ordering == Ordering::Less,
+        ast::BinOp::Le => ordering != Ordering::Greater,
+        ast::BinOp::Gt => ordering == Ordering::Greater,
+        ast::BinOp::Ge => ordering != Ordering::Less,
+        _ => unreachable!("only a relation is folded from an ordering"),
+    }
+}
+
+// The character values a constant relation can hold: a CHAR is its one
+// character and a string is its characters, so one bounded rule serves every
+// combination.
+fn text_bytes(value: &ConstValue) -> Option<Vec<u8>> {
+    match value {
+        ConstValue::Char(c) => Some(vec![*c]),
+        ConstValue::Str(bytes) => Some(bytes.as_ref().clone()),
+        _ => None,
+    }
+}
+
 impl Analyzer {
     pub(super) fn check_const_expr(&mut self, expr: &ast::Expr) -> Option<Type> {
         match expr {
@@ -133,6 +184,10 @@ impl Analyzer {
             },
             ast::Expr::Real { .. } => Some(Type::Real),
             ast::Expr::Bool { .. } => Some(Type::Boolean),
+            // A constant declaration keeps the string type of its right-hand
+            // side, so a single-character string stays a string here and the
+            // CHAR rule applies at each use site instead.
+            ast::Expr::Str { bytes, .. } => Some(Type::String(bytes.len())),
             ast::Expr::Set { elements, .. } => {
                 // Only the element types are checked here. The domain check
                 // belongs to eval_const, which has the values.
@@ -218,7 +273,7 @@ impl Analyzer {
                         &mut self.diags,
                     ),
                     BinOp::Eq | BinOp::Ne => {
-                        if lhs == rhs && lhs.scalar().is_some() {
+                        if (lhs == rhs && lhs.scalar().is_some()) || text_relation_ok(&lhs, &rhs) {
                             Some(Type::Boolean)
                         } else {
                             let message = if lhs == rhs {
@@ -237,8 +292,12 @@ impl Analyzer {
                         }
                     }
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                        check_order_types(*pos, *op, lhs, rhs, &mut self.diags)?;
-                        Some(Type::Boolean)
+                        if text_relation_ok(&lhs, &rhs) {
+                            Some(Type::Boolean)
+                        } else {
+                            check_order_types(*pos, *op, lhs, rhs, &mut self.diags)?;
+                            Some(Type::Boolean)
+                        }
                     }
                 }
             }
@@ -319,6 +378,12 @@ impl Analyzer {
             }
         }
         match procedure.ret.clone() {
+            // A BYTE result is read as an INTEGER at the call, just as it is
+            // in executable lowering. Keeping the constant precheck in step
+            // prevents a valid surrounding INTEGER expression from gaining
+            // a second, false type diagnostic before the call is rejected as
+            // nonconstant.
+            Some(Type::Byte) => Some(Type::Integer),
             Some(ty) => Some(ty),
             None => {
                 self.diags.push(Diagnostic::new(
@@ -373,7 +438,10 @@ impl Analyzer {
                 ok = false;
                 continue;
             };
-            if !expected.contains(&found) {
+            // The single-character rule applies in the constant world too,
+            // so ORD("A") folds exactly as ORD of a CHAR constant does.
+            let char_from_string = expected.contains(&Type::Char) && found == Type::String(1);
+            if !expected.contains(&found) && !char_from_string {
                 self.diags.push(Diagnostic::new(
                     actual.pos(),
                     format!(
@@ -469,6 +537,31 @@ impl Analyzer {
             // the bit pattern keeps the folded and runtime forms identical
             // and matches Project Oberon, where ORD emits nothing at all.
             (Builtin::Ord, [ConstValue::Set(bits)]) => Ok(ConstValue::Int(*bits as i32)),
+            (Builtin::Ord, [ConstValue::Char(c)]) => Ok(ConstValue::Int(i32::from(*c))),
+            // The single-character rule again: ORD("A") is the ordinal of
+            // that one character. A longer string keeps a diagnostic rather
+            // than an internal invariant, because an unchecked constant walk
+            // can reach here through a folded LEN index.
+            (Builtin::Ord, [ConstValue::Str(bytes)]) if bytes.len() == 1 => {
+                Ok(ConstValue::Int(i32::from(bytes[0])))
+            }
+            (Builtin::Ord, [ConstValue::Str(bytes)]) => Err(Diagnostic::new(
+                actuals[0].pos(),
+                format!(
+                    "argument 1 has type {}, expected CHAR or BOOLEAN or SET",
+                    Type::String(bytes.len())
+                ),
+            )),
+            (Builtin::Chr, [ConstValue::Int(value)]) => {
+                if (0..=255).contains(value) {
+                    Ok(ConstValue::Char(*value as u8))
+                } else {
+                    Err(Diagnostic::new(
+                        actuals[0].pos(),
+                        format!("CHR argument {value} is out of range: must be between 0 and 255"),
+                    ))
+                }
+            }
             (
                 Builtin::Lsl | Builtin::Asr | Builtin::Ror,
                 [ConstValue::Int(x), ConstValue::Int(n)],
@@ -498,6 +591,7 @@ impl Analyzer {
                 .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
             ast::Expr::Real { value, .. } => Ok(ConstValue::Real(*value)),
             ast::Expr::Bool { value, .. } => Ok(ConstValue::Bool(*value)),
+            ast::Expr::Str { bytes, .. } => Ok(ConstValue::Str(Rc::new(bytes.clone()))),
             ast::Expr::Set { elements, .. } => {
                 let mut bits = 0;
                 for element in elements {
@@ -601,7 +695,10 @@ impl Analyzer {
 
     fn is_const_expr(&self, expr: &ast::Expr) -> bool {
         match expr {
-            ast::Expr::Int { .. } | ast::Expr::Real { .. } | ast::Expr::Bool { .. } => true,
+            ast::Expr::Int { .. }
+            | ast::Expr::Real { .. }
+            | ast::Expr::Bool { .. }
+            | ast::Expr::Str { .. } => true,
             ast::Expr::Set { elements, .. } => elements.iter().all(|element| {
                 self.is_const_expr(&element.low)
                     && element
@@ -851,7 +948,10 @@ impl Analyzer {
     // is unobservable, and skipping a call is not.
     fn const_index_call(&self, expr: &ast::Expr) -> Option<Diagnostic> {
         match expr {
-            ast::Expr::Int { .. } | ast::Expr::Real { .. } | ast::Expr::Bool { .. } => None,
+            ast::Expr::Int { .. }
+            | ast::Expr::Real { .. }
+            | ast::Expr::Bool { .. }
+            | ast::Expr::Str { .. } => None,
             ast::Expr::Set { elements, .. } => elements.iter().find_map(|element| {
                 self.const_index_call(&element.low).or_else(|| {
                     element

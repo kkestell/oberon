@@ -6,6 +6,13 @@ pub enum Tok {
     Ident(String),
     Int(i64),  // i64 so an oversized decimal literal lexes; sema range-checks to i32
     Real(f32), // REAL is IEEE 754 binary32, so the literal rounds once, here
+    // Report 3 gives strings two forms, and both are strings: a quoted literal
+    // is the bytes of its source text exactly as they appear in the file, and
+    // 41X is "a single-character string specified by the ordinal number of the
+    // character". The bytes are not decoded or validated, so a UTF-8 source
+    // character is one CHAR per byte, and the 0X form can carry the one byte a
+    // quoted literal cannot contain.
+    Str(Vec<u8>),
     // Keywords
     Array,
     Begin,
@@ -134,6 +141,8 @@ impl Lexer {
                 Some(self.ident_or_keyword())
             } else if c.is_ascii_digit() {
                 self.number(pos, diags)
+            } else if c == '"' {
+                self.string(pos, diags)
             } else {
                 self.operator(pos, diags)
             };
@@ -223,7 +232,7 @@ impl Lexer {
         }
     }
 
-    // number = digit {digit} | digit {hexDigit} "H"
+    // number = digit {digit} | digit {hexDigit} "H" | digit {hexDigit} "X"
     //        | digit {digit} "." {digit} [ScaleFactor]
     // Hex digits are uppercase only, and hex literals start with a decimal digit.
     fn number(&mut self, pos: Pos, diags: &mut Vec<Diagnostic>) -> Option<Tok> {
@@ -244,6 +253,19 @@ impl Lexer {
                         diags.push(Diagnostic::new(
                             pos,
                             format!("hex literal '{s}H' too large"),
+                        ));
+                        None
+                    }
+                }
+            }
+            Some('X') => {
+                self.bump();
+                match u32::from_str_radix(&s, 16) {
+                    Ok(v) if v <= 0xFF => Some(Tok::Str(vec![v as u8])),
+                    _ => {
+                        diags.push(Diagnostic::new(
+                            pos,
+                            format!("character code '{s}X' out of range"),
                         ));
                         None
                     }
@@ -329,6 +351,27 @@ impl Lexer {
             return None;
         }
         Some(Tok::Real(value))
+    }
+
+    fn string(&mut self, pos: Pos, diags: &mut Vec<Diagnostic>) -> Option<Tok> {
+        self.bump(); // opening quote; no escape sequences in Oberon
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                Some('"') => {
+                    self.bump();
+                    return Some(Tok::Str(s.into_bytes()));
+                }
+                Some('\n') | None => {
+                    diags.push(Diagnostic::new(pos, "unterminated string"));
+                    return None;
+                }
+                Some(c) => {
+                    s.push(c);
+                    self.bump();
+                }
+            }
+        }
     }
 
     fn operator(&mut self, pos: Pos, diags: &mut Vec<Diagnostic>) -> Option<Tok> {
@@ -475,6 +518,45 @@ mod tests {
         );
     }
 
+    // Both source forms produce the one string token: 41X is a one-character
+    // string, 0X is a one-character string holding the null character, and a
+    // byte above 127 is an ordinary character with no meaning attached.
+    #[test]
+    fn ordinal_strings() {
+        assert_eq!(
+            toks("41X 0X 0FFX"),
+            vec![
+                Tok::Str(vec![0x41]),
+                Tok::Str(vec![0]),
+                Tok::Str(vec![0xFF]),
+                Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn string_literal() {
+        assert_eq!(
+            toks("\"hello\" \"\""),
+            vec![Tok::Str(b"hello".to_vec()), Tok::Str(Vec::new()), Tok::Eof]
+        );
+    }
+
+    // A quoted literal is the bytes of its source text, so a multi-byte UTF-8
+    // character is one CHAR per byte, not one CHAR per character.
+    #[test]
+    fn string_literal_keeps_source_bytes() {
+        assert_eq!(toks("\"é\""), vec![Tok::Str(vec![0xC3, 0xA9]), Tok::Eof]);
+    }
+
+    #[test]
+    fn ordinal_string_out_of_range_diagnoses() {
+        let mut diags = Vec::new();
+        lex("100X", &mut diags);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].msg, "character code '100X' out of range");
+    }
+
     #[test]
     fn integer_range_disambiguation() {
         assert_eq!(
@@ -490,6 +572,14 @@ mod tests {
             toks("a (* x (* y *) z *) b"),
             vec![Tok::Ident("a".into()), Tok::Ident("b".into()), Tok::Eof]
         );
+    }
+
+    #[test]
+    fn unterminated_string_diagnoses() {
+        let mut diags = Vec::new();
+        lex("\"abc", &mut diags);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].msg.contains("unterminated string"));
     }
 
     #[test]

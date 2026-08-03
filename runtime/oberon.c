@@ -44,6 +44,23 @@ void oberon_copy(void *destination, const void *source, size_t count)
 void oberon_out_int(int32_t v, int32_t n) { printf("%*d", (int)n, (int)v); }
 void oberon_out_ln(void)                  { putchar('\n'); }
 
+/* Out.Char writes the low byte and nothing else, so a program's output is
+   exactly the bytes it asked for. */
+void oberon_out_char(int32_t c) { putchar((unsigned char)c); }
+
+/* Report 8.2.4's relations on character arrays and strings. Each length
+   bounds its operand: a character array's is its declared length and a
+   string literal's counts its terminator. strncmp stops at the first
+   difference and at a null present in both, compares as unsigned characters,
+   and never reads past the smaller bound, so a properly terminated value
+   compares by its characters and an unterminated full array still gets an
+   answer without reading past its end. */
+int32_t oberon_str_cmp(const void *a, int32_t alen, const void *b, int32_t blen)
+{
+    size_t n = alen < blen ? (size_t)alen : (size_t)blen;
+    return (int32_t)strncmp((const char *)a, (const char *)b, n);
+}
+
 /* Report 10.2 REAL operations. REAL is IEEE 754 binary32, so every one of
    these is the C float form of the same operation. */
 
@@ -114,4 +131,14 @@ void oberon_shift_range(const char *module, int32_t line, int32_t col)
 void oberon_set_element_range(const char *module, int32_t line, int32_t col)
 {
     oberon_fail("SET element out of range", module, line, col);
+}
+
+void oberon_byte_range(const char *module, int32_t line, int32_t col)
+{
+    oberon_fail("BYTE value out of range", module, line, col);
+}
+
+void oberon_chr_range(const char *module, int32_t line, int32_t col)
+{
+    oberon_fail("CHR argument is outside CHAR range", module, line, col);
 }

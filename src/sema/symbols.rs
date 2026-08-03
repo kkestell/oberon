@@ -7,6 +7,9 @@ use super::types::{ProcedureParam, ProcedureType, Type, fixed_shape};
 
 pub(super) type Scope = HashMap<String, Symbol>;
 
+// The string case ends the enum's days as a Copy type: the bytes are owned
+// and shared through the Rc, so a clone is cheap and one buffer sits behind a
+// constant however many modules import it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
     Int(i32),
@@ -18,6 +21,11 @@ pub enum ConstValue {
     // Unsigned so complement covers exactly the 32 supported elements and no
     // set operation can overflow a signed INTEGER.
     Set(u32),
+    // The ordinal of one character. Only ORD and CHR fold to this; a
+    // single-character string stays a string, because a named constant must
+    // behave exactly like the literal it was declared from.
+    Char(u8),
+    Str(Rc<Vec<u8>>),
 }
 
 impl ConstValue {
@@ -27,6 +35,8 @@ impl ConstValue {
             ConstValue::Real(_) => Type::Real,
             ConstValue::Bool(_) => Type::Boolean,
             ConstValue::Set(_) => Type::Set,
+            ConstValue::Char(_) => Type::Char,
+            ConstValue::Str(bytes) => Type::String(bytes.len()),
         }
     }
 
@@ -36,6 +46,8 @@ impl ConstValue {
             ConstValue::Real(v) => ir::Value::Real(*v),
             ConstValue::Bool(v) => ir::Value::Bool(*v),
             ConstValue::Set(v) => ir::Value::Set(*v),
+            ConstValue::Char(v) => ir::Value::Byte(*v),
+            ConstValue::Str(_) => panic!("a string constant has no scalar value"),
         }
     }
 }
@@ -87,6 +99,8 @@ impl Member {
     // declaring module keeps the writable symbol it built for itself.
     pub(super) fn client_symbol(&self) -> Symbol {
         match self {
+            // A string constant's clone shares the bytes behind the Rc, so
+            // every client sees the one buffer.
             Member::Const(value) => Symbol::Const(value.clone()),
             Member::Type(ty) => Symbol::TypeName(ty.clone()),
             Member::Var { ty, symbol } => Symbol::Var {
@@ -116,6 +130,7 @@ pub(super) enum Builtin {
     Asr,
     Ror,
     Ord,
+    Chr,
     Inc,
     Dec,
     Incl,
@@ -131,6 +146,8 @@ pub(super) fn universe_scope() -> Scope {
     scope.insert("REAL".into(), Symbol::TypeName(Type::Real));
     scope.insert("BOOLEAN".into(), Symbol::TypeName(Type::Boolean));
     scope.insert("SET".into(), Symbol::TypeName(Type::Set));
+    scope.insert("CHAR".into(), Symbol::TypeName(Type::Char));
+    scope.insert("BYTE".into(), Symbol::TypeName(Type::Byte));
     for (name, builtin) in [
         ("ABS", Builtin::Abs),
         ("LEN", Builtin::Len),
@@ -141,6 +158,7 @@ pub(super) fn universe_scope() -> Scope {
         ("ASR", Builtin::Asr),
         ("ROR", Builtin::Ror),
         ("ORD", Builtin::Ord),
+        ("CHR", Builtin::Chr),
         ("INC", Builtin::Inc),
         ("DEC", Builtin::Dec),
         ("INCL", Builtin::Incl),
@@ -170,6 +188,7 @@ pub fn out_interface() -> Interface {
         );
     };
 
+    add("Char", "oberon_out_char", vec![value(Type::Char)]);
     add(
         "Int",
         "oberon_out_int",
@@ -210,10 +229,10 @@ impl BuiltinResult {
 
 // Argument types and result type of the function-like predefined operations.
 // Each parameter carries the types it accepts, which is one type everywhere
-// except ABS and ORD: Report 10.2 gives ORD a BOOLEAN form and a SET form.
-// INC, DEC, INCL, EXCL, PACK, UNPK, and ASSERT are proper procedures and have
-// no entry: a None here is what makes them "cannot be used as a value" in an
-// expression.
+// except ABS and ORD: Report 10.2 gives ORD a CHAR form, a BOOLEAN form, and
+// a SET form. INC, DEC, INCL, EXCL, PACK, UNPK, and ASSERT are proper
+// procedures and have no entry: a None here is what makes them "cannot be
+// used as a value" in an expression.
 pub(super) fn builtin_signature(
     builtin: Builtin,
 ) -> Option<(&'static [&'static [Type]], BuiltinResult)> {
@@ -226,7 +245,11 @@ pub(super) fn builtin_signature(
         Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
             Some((&[&[Type::Integer], &[Type::Integer]], Fixed(Type::Integer)))
         }
-        Builtin::Ord => Some((&[&[Type::Boolean, Type::Set]], Fixed(Type::Integer))),
+        Builtin::Ord => Some((
+            &[&[Type::Char, Type::Boolean, Type::Set]],
+            Fixed(Type::Integer),
+        )),
+        Builtin::Chr => Some((&[&[Type::Integer]], Fixed(Type::Char))),
         // LEN takes a designator rather than a value, so it has no entry in
         // the value signature table either; lower_len and check_const_len
         // handle it.

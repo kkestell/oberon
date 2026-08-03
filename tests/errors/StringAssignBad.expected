@@ -1,0 +1,6 @@
+tests/errors/StringAssignBad.Mod:7:9: a string of 4 characters and its null terminator do not fit in ARRAY 4 OF CHAR
+tests/errors/StringAssignBad.Mod:8:9: a string of 6 characters and its null terminator do not fit in ARRAY 4 OF CHAR
+tests/errors/StringAssignBad.Mod:9:11: cannot assign string of 3 characters to ARRAY 4 OF INTEGER
+tests/errors/StringAssignBad.Mod:10:11: cannot assign string of 3 characters to ARRAY 2 OF ARRAY 4 OF CHAR
+tests/errors/StringAssignBad.Mod:11:9: cannot assign string of 2 characters to CHAR
+Error: 5 error(s)

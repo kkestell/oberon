@@ -9,7 +9,7 @@ mod constant;
 mod symbols;
 mod types;
 
-use constant::floor_const;
+use constant::{floor_const, relation_holds, str_const_cmp};
 use symbols::{
     Builtin, ConstValue, Member, Scope, Symbol, builtin_signature, type_list, universe_scope,
 };
@@ -52,10 +52,12 @@ type ResolvedProcedure = (Option<Type>, Vec<ResolvedFormal>, Option<Type>);
 
 // What the source of an assignment or a relation operand turned out to be.
 // An array or a record keeps its address because it has no scalar value to
-// load.
+// load, and a string keeps its bytes because what it becomes — a CHAR, a copy
+// into a character array, one side of a comparison — depends on the context.
 enum Source {
     Value(ir::Value, Type),
     Structured(Place),
+    Str(Rc<Vec<u8>>),
 }
 
 impl Source {
@@ -64,6 +66,7 @@ impl Source {
         match self {
             Source::Value(_, ty) => ty.clone(),
             Source::Structured(place) => place.ty.clone(),
+            Source::Str(bytes) => Type::String(bytes.len()),
         }
     }
 }
@@ -437,10 +440,15 @@ impl Analyzer {
         match (&declaration.ret, ret, &declaration.ret_val) {
             (Some(_), Some(expected), Some(expr)) => {
                 // RETURN asks the same compatibility function as assignment.
+                // A single-character string already lowered to a CHAR, so
+                // only the checked BYTE result appears here.
                 let value = self.lower_expr(expr);
                 if let Some((value, found)) = value {
                     let value = match assign_kind(&expected, &found) {
                         Some(AssignKind::Store) => Some(value),
+                        Some(AssignKind::ByteRange) => {
+                            self.check_byte_domain(Some(expr), value, ByteDomain::Store, expr.pos())
+                        }
                         _ => {
                             self.diags.push(Diagnostic::new(
                                 expr.pos(),
@@ -520,9 +528,10 @@ impl Analyzer {
         }
     }
 
-    // Report 9.1. A scalar assignment stores one value, and identical array
-    // types copy the whole representation. assign_kind names the outcomes, and
-    // the value parameter and the RETURN expression ask the same function.
+    // Report 9.1. A scalar assignment stores one value, identical array types
+    // copy the whole representation, and the exceptions connect strings with
+    // CHAR and with character arrays. assign_kind names the outcomes, and the
+    // value parameter and the RETURN expression ask the same function.
     fn lower_assign(&mut self, lhs: &ast::Designator, rhs: &ast::Expr) {
         // The destination designator is resolved first and the source second,
         // each exactly once, so both sides' index expressions run in source
@@ -540,6 +549,29 @@ impl Analyzer {
                     val: value,
                     addr: target.addr,
                 });
+            }
+            (Some(AssignKind::ByteRange), Source::Value(value, _)) => {
+                if let Some(value) =
+                    self.check_byte_domain(Some(rhs), value, ByteDomain::Store, rhs.pos())
+                {
+                    self.emit(ir::Inst::Store {
+                        ty: ir::Ty::Byte,
+                        val: value,
+                        addr: target.addr,
+                    });
+                }
+            }
+            (Some(AssignKind::CharFromString), Source::Str(bytes)) => {
+                self.emit(ir::Inst::Store {
+                    ty: ir::Ty::Byte,
+                    val: ir::Value::Byte(bytes[0]),
+                    addr: target.addr,
+                });
+            }
+            // The fixed and open destinations differ only in where the fit is
+            // decided, which copy_string reads off the destination type.
+            (Some(AssignKind::StringCopy), Source::Str(bytes)) => {
+                self.copy_string(&bytes, target, rhs.pos());
             }
             (Some(AssignKind::WholeCopy), Source::Structured(source)) => {
                 // A zero-length array or an empty record still resolved both
@@ -560,6 +592,40 @@ impl Analyzer {
         }
     }
 
+    // Report 9.1: a string may be assigned to any array of characters
+    // provided the number of characters is less than the length of the array,
+    // and a null character is appended. The rule is checked here, so a string
+    // that leaves no room for the terminator never becomes a runtime failure.
+    // The copy moves exactly the characters and one null and leaves the rest
+    // of the destination untouched; cf. Project Oberon, whose word-at-a-time
+    // copy can write up to three bytes past the terminator.
+    fn copy_string(&mut self, bytes: &[u8], target: Place, pos: Pos) {
+        assert!(
+            target.ty.char_array(),
+            "assign_kind chose a character array"
+        );
+        let count = i32::try_from(bytes.len() + 1).expect("a string fits the source file");
+        if let Type::Array(array) = &target.ty {
+            if count > array.len {
+                self.diags.push(Diagnostic::new(
+                    pos,
+                    format!(
+                        "a {} and its null terminator do not fit in {}",
+                        Type::String(bytes.len()),
+                        target.ty
+                    ),
+                ));
+                return;
+            }
+        }
+        let src = self.literal(bytes);
+        self.emit(ir::Inst::CopyBytes {
+            dst: target.addr,
+            src,
+            size: i64::from(count),
+        });
+    }
+
     // One string literal's data object. A literal exists only when a string's
     // bytes have to exist at run time; a string that only ever folds emits
     // nothing. Literals are numbered within the module and never shared
@@ -576,9 +642,13 @@ impl Analyzer {
 
     // The right-hand side of an assignment or one operand of a relation,
     // evaluated exactly once. An array designator has no scalar value, so it
-    // stays an address here rather than being rejected: whole-array
-    // assignment is the context that wants it.
+    // stays an address here rather than being rejected, and a string stays
+    // its bytes: whole-array assignment, string assignment, and the character
+    // array relations are the contexts that want them.
     fn lower_source(&mut self, expr: &ast::Expr) -> Option<Source> {
+        if let ast::Expr::Str { bytes, .. } = expr {
+            return Some(Source::Str(Rc::new(bytes.clone())));
+        }
         let ast::Expr::Name(designator) = expr else {
             let (value, ty) = self.lower_expr(expr)?;
             return Some(Source::Value(value, ty));
@@ -586,6 +656,7 @@ impl Analyzer {
         // A constant is not storage, so it is recognized before the designator
         // is resolved as a variable.
         match self.qualident(designator) {
+            Ok((Symbol::Const(ConstValue::Str(bytes)), [])) => return Some(Source::Str(bytes)),
             Ok((Symbol::Const(value), [])) => return Some(Source::Value(value.ir(), value.ty())),
             Ok(_) => {}
             Err(diag) => {
@@ -600,7 +671,15 @@ impl Analyzer {
         Some(match place.ty.scalar() {
             Some(ty) => {
                 let value = self.load(place.addr, ty);
-                Source::Value(value, place.ty)
+                // Report 6.1: BYTE is compatible with INTEGER. Reading a BYTE
+                // yields an INTEGER — the load already zero-extended it — so
+                // everything downstream is ordinary INTEGER behaviour.
+                let read_ty = if place.ty == Type::Byte {
+                    Type::Integer
+                } else {
+                    place.ty
+                };
+                Source::Value(value, read_ty)
             }
             None => Source::Structured(place),
         })
@@ -629,6 +708,27 @@ impl Analyzer {
                 ));
                 None
             }
+            Source::Str(bytes) => self.char_from_string(&bytes, expr.pos()),
+        }
+    }
+
+    // Report 9.1 lets a single-character string stand for a CHAR value, and
+    // this is the one place that rule is written. The empty string has no
+    // characters, so it is not a single-character string and has no CHAR
+    // value; cf. Project Oberon, which agrees, and OBNC, which converts any
+    // string of length one or less.
+    fn char_from_string(&mut self, bytes: &[u8], pos: Pos) -> Option<(ir::Value, Type)> {
+        if bytes.len() == 1 {
+            Some((ir::Value::Byte(bytes[0]), Type::Char))
+        } else {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "a {} cannot be used as a value: only a single-character string is a CHAR",
+                    Type::String(bytes.len())
+                ),
+            ));
+            None
         }
     }
 
@@ -834,20 +934,21 @@ impl Analyzer {
         }
     }
 
-    // Report 9.5. The INTEGER form compares the selector against its labels.
+    // Report 9.5. The INTEGER and CHAR forms reduce labels to ordinals.
     fn lower_case(&mut self, expr: &ast::Expr, arms: &[ast::CaseArm]) {
         // "First the case expression is evaluated": once, into a temporary
         // that every arm's test then compares against.
-        let selector = match self.lower_expr(expr) {
-            Some((value, Type::Integer)) => Some(value),
+        let (selector, char_labels) = match self.lower_expr(expr) {
+            Some((value, Type::Integer)) => (Some(value), false),
+            Some((value, Type::Char)) => (Some(value), true),
             Some((_, ty)) => {
                 self.diags.push(Diagnostic::new(
                     expr.pos(),
-                    format!("CASE expression must be INTEGER, found {ty}"),
+                    format!("CASE expression must be INTEGER or CHAR, found {ty}"),
                 ));
-                None
+                (None, false)
             }
-            None => None,
+            None => (None, false),
         };
 
         // One label table for the whole statement, as in oberonc: labels must
@@ -857,9 +958,9 @@ impl Analyzer {
         for arm in arms {
             let mut ranges = Vec::new();
             for range in &arm.labels {
-                let low = self.case_label(&range.low);
+                let low = self.case_label(&range.low, char_labels);
                 let high = match &range.high {
-                    Some(expr) => self.case_label(expr),
+                    Some(expr) => self.case_label(expr, char_labels),
                     None => low,
                 };
                 let (Some(low), Some(high)) = (low, high) else {
@@ -949,15 +1050,26 @@ impl Analyzer {
         self.emit(ir::Inst::Label(end));
     }
 
-    // Report 9.5: under an INTEGER selector every label is an integer.
-    fn case_label(&mut self, expr: &ast::Expr) -> Option<i32> {
+    // Report 9.5: under an INTEGER selector every label is an integer, and
+    // under a CHAR selector every label and range endpoint is a
+    // single-character string or a CHAR constant. Both reduce to ordinals.
+    fn case_label(&mut self, expr: &ast::Expr, char_labels: bool) -> Option<i32> {
         match self.eval_const(expr) {
-            Ok(value) => match value {
-                ConstValue::Int(value) => Some(value),
-                other => {
+            Ok(value) => match (char_labels, value) {
+                (false, ConstValue::Int(value)) => Some(value),
+                (true, ConstValue::Char(c)) => Some(i32::from(c)),
+                (true, ConstValue::Str(bytes)) if bytes.len() == 1 => Some(i32::from(bytes[0])),
+                (false, other) => {
                     self.diags.push(Diagnostic::new(
                         expr.pos(),
                         format!("case label must be INTEGER, found {}", other.ty()),
+                    ));
+                    None
+                }
+                (true, other) => {
+                    self.diags.push(Diagnostic::new(
+                        expr.pos(),
+                        format!("case label must be CHAR, found {}", other.ty()),
                     ));
                     None
                 }
@@ -1011,7 +1123,12 @@ impl Analyzer {
             // Report 8: an expression operates on values, and an array
             // designator has none. Whole-array assignment is the one place
             // that wants the array itself, and it uses lower_source directly.
-            ast::Expr::Name(_) => {
+            // A string here follows the one single-character rule: Report 9.1
+            // lets a single-character string stand for a CHAR, so the
+            // comparison `ch >= "A"`, the argument `p("A")`, the assignment
+            // `ch := 0X`, and the result `RETURN "A"` all lower through this
+            // arm with no further cases.
+            ast::Expr::Str { .. } | ast::Expr::Name(_) => {
                 let source = self.lower_source(expr)?;
                 self.source_scalar(expr, source)
             }
@@ -1187,6 +1304,64 @@ impl Analyzer {
         });
         self.emit(ir::Inst::Label(trap));
         self.trap("oberon_set_element_range", expr.pos());
+        self.emit(ir::Inst::Label(ok));
+        Some(value)
+    }
+
+    // The 0-through-255 domain shared by a BYTE store and a CHR argument,
+    // with the shape every dynamic check here has: a value the compiler can
+    // fold is a source diagnostic and emits no runtime check, and any other
+    // value is compared against both bounds before it is used. `expr` is
+    // absent when the value is computed and never foldable, as in INC on a
+    // BYTE.
+    fn check_byte_domain(
+        &mut self,
+        expr: Option<&ast::Expr>,
+        value: ir::Value,
+        domain: ByteDomain,
+        pos: Pos,
+    ) -> Option<ir::Value> {
+        if let Some(expr) = expr {
+            match self.try_eval_const(expr) {
+                Ok(Some(ConstValue::Int(n))) => {
+                    return if (0..=255).contains(&n) {
+                        Some(value)
+                    } else {
+                        self.diags.push(Diagnostic::new(
+                            expr.pos(),
+                            format!(
+                                "{} {n} is out of range: must be between 0 and 255",
+                                domain.describe()
+                            ),
+                        ));
+                        None
+                    };
+                }
+                Ok(Some(_)) => unreachable!("the value was type-checked as INTEGER"),
+                Ok(None) => {}
+                Err(diag) => {
+                    self.diags.push(diag);
+                    return None;
+                }
+            }
+        }
+        let low = self.bin(ir::BinOp::Lt, ir::Ty::Int, value.clone(), ir::Value::Int(0));
+        let high = self.bin(
+            ir::BinOp::Gt,
+            ir::Ty::Int,
+            value.clone(),
+            ir::Value::Int(255),
+        );
+        let bad = self.bin(ir::BinOp::BitOr, ir::Ty::Bool, low, high);
+        let trap = self.label(&format!("{}.bad", domain.label()));
+        let ok = self.label(&format!("{}.ok", domain.label()));
+        self.emit(ir::Inst::Br {
+            cond: bad,
+            then: trap.clone(),
+            els: ok.clone(),
+        });
+        self.emit(ir::Inst::Label(trap));
+        self.trap(domain.trap(), pos);
         self.emit(ir::Inst::Label(ok));
         Some(value)
     }
@@ -1385,8 +1560,12 @@ impl Analyzer {
         Some((value, result_ty))
     }
 
-    // Report 8.2.4. The relations order INTEGER and REAL, and compare SET and
-    // BOOLEAN for equality.
+    // Report 8.2.4. The relations order INTEGER, REAL, and CHAR, compare SET
+    // and BOOLEAN for equality, and extend to strings and character arrays:
+    // two operands may be compared when each is a character array or a
+    // string and at least one is a character array. Two strings fold
+    // instead, and a CHAR against a single-character string is an ordinary
+    // CHAR comparison, so neither reaches the runtime call.
     fn lower_relation(
         &mut self,
         op: ast::BinOp,
@@ -1403,6 +1582,36 @@ impl Analyzer {
         let (Some(lhs_src), Some(rhs_src)) = (lhs_src, rhs_src) else {
             return None;
         };
+
+        if let (Source::Str(a), Source::Str(b)) = (&lhs_src, &rhs_src) {
+            let holds = relation_holds(op, str_const_cmp(a, b));
+            return Some((ir::Value::Bool(holds), Type::Boolean));
+        }
+
+        let stringy = |source: &Source| match source {
+            Source::Str(_) => true,
+            Source::Structured(place) => place.ty.char_array(),
+            Source::Value(..) => false,
+        };
+        let is_array = |source: &Source| matches!(source, Source::Structured(_));
+        if stringy(&lhs_src) && stringy(&rhs_src) && (is_array(&lhs_src) || is_array(&rhs_src)) {
+            let (lhs_addr, lhs_len) = self.cmp_operand(lhs_src);
+            let (rhs_addr, rhs_len) = self.cmp_operand(rhs_src);
+            let result = self.call_runtime(
+                "oberon_str_cmp",
+                vec![
+                    ir::Arg::Ref(lhs_addr),
+                    ir::Arg::Val(ir::Ty::Int, lhs_len),
+                    ir::Arg::Ref(rhs_addr),
+                    ir::Arg::Val(ir::Ty::Int, rhs_len),
+                ],
+                ir::Ty::Int,
+            );
+            // One runtime helper serves all six relations; only the
+            // comparison against the returned value differs.
+            let value = self.bin(relation_ir(op), ir::Ty::Int, result, ir::Value::Int(0));
+            return Some((value, Type::Boolean));
+        }
 
         let lhs_value = self.source_scalar(lhs, lhs_src);
         let rhs_value = self.source_scalar(rhs, rhs_src);
@@ -1429,8 +1638,28 @@ impl Analyzer {
             }
             _ => unreachable!("only a relation reaches lower_relation"),
         };
+        // A CHAR operand is zero-extended in its word, so the signed word
+        // comparison the emitter picks for it gives the unsigned ordering.
         let value = self.bin(relation_ir(op), operand_ty.ir(), lhs_value, rhs_value);
         Some((value, Type::Boolean))
+    }
+
+    // One side of a runtime character comparison: an address and the length
+    // that bounds the walk. A character array is bounded by its declared
+    // length, and a string by its character count plus one for the
+    // terminator its data object carries.
+    fn cmp_operand(&mut self, source: Source) -> (ir::Addr, ir::Value) {
+        match source {
+            Source::Structured(place) => {
+                assert!(place.ty.char_array(), "the operand is a character array");
+                (place.addr, place.shape[0].clone())
+            }
+            Source::Str(bytes) => {
+                let len = i32::try_from(bytes.len() + 1).expect("a literal fits the source file");
+                (self.literal(&bytes), ir::Value::Int(len))
+            }
+            Source::Value(..) => unreachable!("the operand was checked to be characters"),
+        }
     }
 
     fn div_zero_check(&mut self, divisor: ir::Value, pos: Pos) {
@@ -1525,8 +1754,27 @@ impl Analyzer {
             // actual, so the actual must be a designator of the identical
             // type. For VAR that is Report 10.1's rule; for a structured
             // value it is what remains of assignment compatibility once the
-            // actual must be addressable.
+            // actual must be addressable. The one casualty is a string actual
+            // for a fixed character-array formal, which Project Oberon and
+            // oberonc also reject: under reference semantics no assignment to
+            // the formal happens, so Report 9.1's string exception has
+            // nothing to attach to. Strings meet parameters through Slice
+            // 14's open arrays of CHAR. The rejection covers a string of any
+            // length, a single character included, and is checked before the
+            // expression is lowered so it reports as a string where a
+            // variable is required rather than as a CHAR mismatch.
             if var || expected.structured() {
+                if expected.structured() && self.string_expr(actual).is_some() {
+                    self.diags.push(Diagnostic::new(
+                        actual.pos(),
+                        format!(
+                            "argument {} is a string where a variable is required",
+                            i + 1
+                        ),
+                    ));
+                    ok = false;
+                    continue;
+                }
                 // A structured value actual is a read, so a read-only
                 // designator — an imported variable, another structured value
                 // parameter — may be passed on. A VAR actual will be written
@@ -1549,11 +1797,23 @@ impl Analyzer {
                 }
             } else {
                 // The value parameter asks the same compatibility function as
-                // assignment.
+                // assignment. A single-character string already lowered to a
+                // CHAR, so only the checked BYTE store appears here.
                 match self.lower_expr(actual) {
                     Some((value, found)) => match assign_kind(&expected, &found) {
                         Some(AssignKind::Store) => {
                             args.push(ir::Arg::Val(expected.ir(), value));
+                        }
+                        Some(AssignKind::ByteRange) => {
+                            match self.check_byte_domain(
+                                Some(actual),
+                                value,
+                                ByteDomain::Store,
+                                actual.pos(),
+                            ) {
+                                Some(value) => args.push(ir::Arg::Val(ir::Ty::Byte, value)),
+                                None => ok = false,
+                            }
                         }
                         _ => {
                             self.diags.push(Diagnostic::new(
@@ -1573,7 +1833,12 @@ impl Analyzer {
         }
         let dst = procedure.ret.as_ref().map(|ty| (self.temp(), ty.ir()));
         self.emit(ir::Inst::Call { dst, symbol, args });
-        let ret = procedure.ret.clone();
+        // Report 6.1 again: a function whose result type is BYTE produces an
+        // INTEGER value when it is called.
+        let ret = procedure
+            .ret
+            .clone()
+            .map(|ty| if ty == Type::Byte { Type::Integer } else { ty });
         Some((dst.map(|(temp, _)| ir::Value::Temp(temp)), ret))
     }
 
@@ -1653,10 +1918,18 @@ impl Analyzer {
                 });
                 ir::Value::Temp(dst)
             }
-            // BOOLEAN is already 0 or 1 in a word and a SET is already its
-            // own bit pattern, so the value passes through with only its type
-            // changed. cf. Project Oberon, where ORD lowers to nothing.
+            // BOOLEAN is already 0 or 1 in a word, a SET is already its own
+            // bit pattern, and a CHAR is already its ordinal, so the value
+            // passes through with only its type changed. cf. Project Oberon,
+            // where ORD lowers to nothing.
             Builtin::Ord => args[0].0.clone(),
+            // CHR emits no conversion either: the checked value is the
+            // result. Its domain is the CHAR ordinals, which are the same
+            // 0 through 255 as BYTE, but the check and the message are its
+            // own, matching how each dynamic check has its own line.
+            Builtin::Chr => {
+                self.check_byte_domain(Some(&actuals[0]), args[0].0.clone(), ByteDomain::Chr, pos)?
+            }
             Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
                 self.lower_shift(builtin, args[0].0.clone(), args[1].0.clone(), &actuals[1])?
             }
@@ -1959,13 +2232,17 @@ impl Analyzer {
             }
             return None;
         }
-        // The argument is an integer variable.
+        // The argument is an integer variable, and BYTE is compatible with
+        // INTEGER, so a BYTE variable is accepted too: it reads as an
+        // INTEGER and writes through the same checked store as assignment,
+        // so incrementing past 255 fails at run time — a genuine
+        // out-of-range write, not an artefact of the lowering.
         let target = match self.var_actual(&actuals[0], 1) {
-            Some((addr, ty @ Type::Integer)) => Some((addr, ty)),
+            Some((addr, ty @ (Type::Integer | Type::Byte))) => Some((addr, ty)),
             Some((_, found)) => {
                 self.diags.push(Diagnostic::new(
                     actuals[0].pos(),
-                    format!("argument 1 has type {found}, expected INTEGER"),
+                    format!("argument 1 has type {found}, expected INTEGER or BYTE"),
                 ));
                 None
             }
@@ -1986,6 +2263,12 @@ impl Analyzer {
                 ir::BinOp::Sub
             };
             let next = self.bin(op, ir::Ty::Int, current, step);
+            let next = if ty == Type::Byte {
+                self.check_byte_domain(None, next, ByteDomain::Store, pos)
+                    .expect("a computed value only takes the dynamic check")
+            } else {
+                next
+            };
             self.emit(ir::Inst::Store {
                 ty: scalar,
                 val: next,
@@ -2135,6 +2418,20 @@ impl Analyzer {
             return None;
         }
         Some(place)
+    }
+
+    // A string in actual-parameter position: a literal or a constant declared
+    // from one. Recognized before lowering, the way every context that treats
+    // a string specially examines the expression first.
+    fn string_expr(&self, expr: &ast::Expr) -> Option<Rc<Vec<u8>>> {
+        match expr {
+            ast::Expr::Str { bytes, .. } => Some(Rc::new(bytes.clone())),
+            ast::Expr::Name(designator) => match self.qualident(designator) {
+                Ok((Symbol::Const(ConstValue::Str(bytes)), [])) => Some(bytes),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     // The non-emitting type walk used only to check a call in a required
@@ -2658,6 +2955,37 @@ impl ProcBuilder {
 
     fn finish(self) -> ir::Proc {
         self.proc
+    }
+}
+
+// The two uses of the 0-through-255 domain. Each has its own trap and its own
+// message, matching how every existing dynamic check has its own line.
+#[derive(Clone, Copy)]
+enum ByteDomain {
+    Store,
+    Chr,
+}
+
+impl ByteDomain {
+    fn describe(self) -> &'static str {
+        match self {
+            ByteDomain::Store => "BYTE value",
+            ByteDomain::Chr => "CHR argument",
+        }
+    }
+
+    fn trap(self) -> &'static str {
+        match self {
+            ByteDomain::Store => "oberon_byte_range",
+            ByteDomain::Chr => "oberon_chr_range",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ByteDomain::Store => "byte",
+            ByteDomain::Chr => "chr",
+        }
     }
 }
 
