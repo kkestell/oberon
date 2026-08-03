@@ -1,0 +1,16 @@
+tests/errors/SetBad.Mod:7:10: operator '+' requires two INTEGER or two SET operands, found SET and INTEGER
+tests/errors/SetBad.Mod:8:10: operator '*' requires two INTEGER or two SET operands, found INTEGER and SET
+tests/errors/SetBad.Mod:9:10: operator '/' requires two SET operands, found INTEGER and INTEGER
+tests/errors/SetBad.Mod:10:10: operator '<' requires INTEGER and INTEGER, found SET and SET
+tests/errors/SetBad.Mod:11:10: operator '>=' requires INTEGER and INTEGER, found SET and SET
+tests/errors/SetBad.Mod:12:9: set element must be INTEGER, found BOOLEAN
+tests/errors/SetBad.Mod:13:9: set element must be INTEGER, found BOOLEAN
+tests/errors/SetBad.Mod:14:10: operator 'DIV' requires INTEGER and INTEGER, found SET and SET
+tests/errors/SetBad.Mod:15:10: operator 'MOD' requires INTEGER and INTEGER, found SET and SET
+tests/errors/SetBad.Mod:16:10: operator '&' requires BOOLEAN and BOOLEAN, found SET and SET
+tests/errors/SetBad.Mod:17:8: operator '~' requires BOOLEAN, found SET
+tests/errors/SetBad.Mod:18:8: operator '+' requires INTEGER, found SET
+tests/errors/SetBad.Mod:19:8: cannot assign INTEGER to SET
+tests/errors/SetBad.Mod:20:8: cannot assign SET to INTEGER
+tests/errors/SetBad.Mod:21:8: cannot assign SET to BOOLEAN
+Error: 15 error(s)

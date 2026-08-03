@@ -161,6 +161,12 @@ pub enum Expr {
         pos: Pos,
     },
     Name(Designator),
+    // set = "{" [element {"," element}] "}". The empty constructor is legal
+    // and has no elements.
+    Set {
+        elements: Vec<SetElement>,
+        pos: Pos,
+    },
     Call {
         callee: Designator,
         args: Vec<Expr>,
@@ -179,17 +185,32 @@ pub enum Expr {
     },
 }
 
+// element = expression [".." expression]. Both endpoints keep their own
+// position so an out-of-range diagnostic points at the offending value.
+#[derive(Debug, Clone)]
+pub struct SetElement {
+    pub low: Expr,
+    pub high: Option<Expr>,
+}
+
+// Report 8.2.2 defines unary "+" for numeric operands only, so it is a real
+// operator here rather than something the parser discards.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnOp {
-    Neg, // unary + is dropped in the parser
+    Plus,
+    Neg,
     Not,
 }
 
+// Source operators, not resolved operations: Report 8.2 overloads "+", "-",
+// "*", and "/", and sema picks INTEGER or SET behaviour once it knows both
+// operand types. Div is the DIV keyword; Slash is "/".
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {
     Add,
     Sub,
     Mul,
+    Slash,
     Div,
     Mod,
     Eq,
@@ -198,6 +219,7 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    In,
     And,
     Or,
 }
@@ -207,6 +229,7 @@ impl Expr {
         match self {
             Expr::Int { pos, .. }
             | Expr::Bool { pos, .. }
+            | Expr::Set { pos, .. }
             | Expr::Call { pos, .. }
             | Expr::Unary { pos, .. }
             | Expr::Binary { pos, .. } => *pos,

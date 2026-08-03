@@ -529,7 +529,8 @@ impl Parser {
             Tok::Le => BinOp::Le,
             Tok::Gt => BinOp::Gt,
             Tok::Ge => BinOp::Ge,
-            Tok::In | Tok::Is => return self.unsupported("IN and IS relations"),
+            Tok::In => BinOp::In,
+            Tok::Is => return self.unsupported("IS relations"),
             _ => return Ok(lhs),
         };
         let pos = self.pos();
@@ -546,9 +547,16 @@ impl Parser {
     // SimpleExpression = ["+" | "-"] term {AddOperator term}
     fn simple_expression(&mut self) -> PResult<Expr> {
         let mut e = match self.peek() {
+            // Kept rather than discarded: Report 8.2.2 allows unary "+" on a
+            // numeric operand only, so "+TRUE" and "+{}" have to be rejected.
             Tok::Plus => {
-                self.advance(); // unary + is the identity
-                self.term()?
+                let pos = self.pos();
+                self.advance();
+                Expr::Unary {
+                    op: UnOp::Plus,
+                    expr: Box::new(self.term()?),
+                    pos,
+                }
             }
             Tok::Minus => {
                 let pos = self.pos();
@@ -595,7 +603,7 @@ impl Parser {
                 Tok::Star => BinOp::Mul,
                 Tok::Div => BinOp::Div,
                 Tok::Mod => BinOp::Mod,
-                Tok::Slash => return self.unsupported("real division"),
+                Tok::Slash => BinOp::Slash,
                 Tok::Amp => BinOp::And,
                 _ => break,
             };
@@ -653,10 +661,38 @@ impl Parser {
                 self.expect(Tok::RParen, "')'")?;
                 Ok(e)
             }
-            Tok::Real(_) | Tok::Char(_) | Tok::Str(_) | Tok::Nil | Tok::LBrace => {
+            Tok::LBrace => self.set(),
+            Tok::Real(_) | Tok::Char(_) | Tok::Str(_) | Tok::Nil => {
                 self.unsupported("other literal factors")
             }
             other => Err(self.error(format!("expected expression, found {other:?}"))),
         }
+    }
+
+    // set = "{" [element {"," element}] "}"
+    // element = expression [".." expression]
+    fn set(&mut self) -> PResult<Expr> {
+        let pos = self.pos();
+        self.expect(Tok::LBrace, "'{'")?;
+        let mut elements = Vec::new();
+        if *self.peek() != Tok::RBrace {
+            loop {
+                let low = self.expression()?;
+                let high = if *self.peek() == Tok::DotDot {
+                    self.advance();
+                    Some(self.expression()?)
+                } else {
+                    None
+                };
+                elements.push(SetElement { low, high });
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(Tok::RBrace, "'}'")?;
+        Ok(Expr::Set { elements, pos })
     }
 }

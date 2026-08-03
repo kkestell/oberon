@@ -12,10 +12,17 @@ type Scope = HashMap<String, Symbol>;
 // module scope is innermost".
 const MODULE_SCOPE: usize = 1;
 
+// Report 6.1 leaves the largest SET element implementation-defined. This
+// compiler picks 31, so a SET is exactly one 32-bit bit vector and bit n
+// records membership of element n. Project Oberon makes the same choice.
+const SET_MAX: i32 = 31;
+const SET_FULL: u32 = u32::MAX;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Type {
     Integer,
     Boolean,
+    Set,
 }
 
 impl Type {
@@ -23,6 +30,7 @@ impl Type {
         match self {
             Type::Integer => ir::Ty::Int,
             Type::Boolean => ir::Ty::Bool,
+            Type::Set => ir::Ty::Set,
         }
     }
 }
@@ -32,6 +40,7 @@ impl fmt::Display for Type {
         match self {
             Type::Integer => write!(f, "INTEGER"),
             Type::Boolean => write!(f, "BOOLEAN"),
+            Type::Set => write!(f, "SET"),
         }
     }
 }
@@ -40,6 +49,9 @@ impl fmt::Display for Type {
 pub enum ConstValue {
     Int(i32),
     Bool(bool),
+    // Unsigned so complement covers exactly the 32 supported elements and no
+    // set operation can overflow a signed INTEGER.
+    Set(u32),
 }
 
 impl ConstValue {
@@ -47,6 +59,7 @@ impl ConstValue {
         match self {
             ConstValue::Int(_) => Type::Integer,
             ConstValue::Bool(_) => Type::Boolean,
+            ConstValue::Set(_) => Type::Set,
         }
     }
 
@@ -54,6 +67,7 @@ impl ConstValue {
         match self {
             ConstValue::Int(v) => ir::Value::Int(v),
             ConstValue::Bool(v) => ir::Value::Bool(v),
+            ConstValue::Set(v) => ir::Value::Set(v),
         }
     }
 }
@@ -129,7 +143,7 @@ impl Member {
 }
 
 // Report 10.2. Only the operations whose argument types exist are here; LEN,
-// FLOOR, FLT, CHR, INCL, EXCL, NEW, PACK, and UNPK arrive with their types.
+// FLOOR, FLT, CHR, NEW, PACK, and UNPK arrive with their types.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Builtin {
     Abs,
@@ -140,6 +154,8 @@ enum Builtin {
     Ord,
     Inc,
     Dec,
+    Incl,
+    Excl,
     Assert,
 }
 
@@ -147,6 +163,7 @@ fn universe_scope() -> Scope {
     let mut scope = Scope::new();
     scope.insert("INTEGER".into(), Symbol::TypeName(Type::Integer));
     scope.insert("BOOLEAN".into(), Symbol::TypeName(Type::Boolean));
+    scope.insert("SET".into(), Symbol::TypeName(Type::Set));
     for (name, builtin) in [
         ("ABS", Builtin::Abs),
         ("ODD", Builtin::Odd),
@@ -156,6 +173,8 @@ fn universe_scope() -> Scope {
         ("ORD", Builtin::Ord),
         ("INC", Builtin::Inc),
         ("DEC", Builtin::Dec),
+        ("INCL", Builtin::Incl),
+        ("EXCL", Builtin::Excl),
         ("ASSERT", Builtin::Assert),
     ] {
         scope.insert(name.into(), Symbol::Builtin(builtin));
@@ -745,10 +764,10 @@ impl Analyzer {
                 1
             }
             Ok(ConstValue::Int(value)) => value,
-            Ok(ConstValue::Bool(_)) => {
+            Ok(other) => {
                 self.diags.push(Diagnostic::new(
                     expr.pos(),
-                    "FOR step must be INTEGER, found BOOLEAN",
+                    format!("FOR step must be INTEGER, found {}", other.ty()),
                 ));
                 1
             }
@@ -853,10 +872,10 @@ impl Analyzer {
     fn case_label(&mut self, expr: &ast::Expr) -> Option<i32> {
         match self.eval_const(expr) {
             Ok(ConstValue::Int(value)) => Some(value),
-            Ok(ConstValue::Bool(_)) => {
+            Ok(other) => {
                 self.diags.push(Diagnostic::new(
                     expr.pos(),
-                    "case label must be INTEGER, found BOOLEAN",
+                    format!("case label must be INTEGER, found {}", other.ty()),
                 ));
                 None
             }
@@ -904,6 +923,7 @@ impl Analyzer {
                 }
             },
             ast::Expr::Bool { value, .. } => Some((ir::Value::Bool(*value), Type::Boolean)),
+            ast::Expr::Set { elements, .. } => self.lower_set(elements),
             ast::Expr::Name(designator) => match self.resolve(designator) {
                 Ok(Symbol::Const(value)) => Some((value.ir(), value.ty())),
                 Ok(Symbol::Var { ty, addr, .. }) => Some((self.load(addr, ty), ty)),
@@ -933,41 +953,180 @@ impl Analyzer {
             },
             ast::Expr::Unary { op, expr, pos } => {
                 let (arg, found) = self.lower_expr(expr)?;
-                let expected = match op {
-                    ast::UnOp::Neg => Type::Integer,
-                    ast::UnOp::Not => Type::Boolean,
-                };
-                if found != expected {
-                    self.diags.push(unary_type_error(
-                        *pos,
-                        match op {
-                            ast::UnOp::Neg => "-",
-                            ast::UnOp::Not => "~",
-                        },
-                        expected,
-                        found,
-                    ));
+                match (op, found) {
+                    // Report 8.2.2: unary "+" is the identity on a numeric
+                    // operand, so it needs no instruction of its own.
+                    (ast::UnOp::Plus, Type::Integer) => Some((arg, Type::Integer)),
+                    (ast::UnOp::Neg, Type::Integer) => {
+                        let dst = self.temp();
+                        self.emit(ir::Inst::Un {
+                            dst,
+                            op: ir::UnOp::Neg,
+                            arg,
+                        });
+                        Some((ir::Value::Temp(dst), Type::Integer))
+                    }
+                    // Report 8.2.3: unary "-" on a SET is the complement.
+                    // Every one of the 32 bits belongs to the domain, so the
+                    // result cannot name an element outside it.
+                    (ast::UnOp::Neg, Type::Set) => Some((
+                        self.bin(ir::BinOp::BitXor, arg, ir::Value::Set(SET_FULL)),
+                        Type::Set,
+                    )),
+                    (ast::UnOp::Not, Type::Boolean) => {
+                        let dst = self.temp();
+                        self.emit(ir::Inst::Un {
+                            dst,
+                            op: ir::UnOp::Not,
+                            arg,
+                        });
+                        Some((ir::Value::Temp(dst), Type::Boolean))
+                    }
+                    _ => {
+                        self.diags.push(unary_type_error(*pos, *op, found));
+                        None
+                    }
+                }
+            }
+            ast::Expr::Binary { op, lhs, rhs, pos } => match op {
+                ast::BinOp::And | ast::BinOp::Or => self.lower_logical(*op, lhs, rhs, *pos),
+                ast::BinOp::In => self.lower_membership(lhs, rhs, *pos),
+                _ => self.lower_binary(*op, lhs, rhs, *pos),
+            },
+        }
+    }
+
+    // Report 8.2: {} is empty, {m} holds m, and {m .. n} holds m through n
+    // and is empty when m > n. Elements are evaluated once each, left to
+    // right, and their masks are combined with union.
+    fn lower_set(&mut self, elements: &[ast::SetElement]) -> Option<(ir::Value, Type)> {
+        let mut result = None;
+        let mut ok = true;
+        for element in elements {
+            let low = self.lower_set_element(&element.low);
+            let mask = match &element.high {
+                None => low.map(|low| self.set_singleton(low)),
+                // The high endpoint is lowered even when the low one failed,
+                // so an invalid range reports both of its errors.
+                Some(high) => {
+                    let high = self.lower_set_element(high);
+                    match (low, high) {
+                        (Some(low), Some(high)) => Some(self.set_range(low, high)),
+                        _ => None,
+                    }
+                }
+            };
+            let Some(mask) = mask else {
+                ok = false;
+                continue;
+            };
+            result = Some(match result {
+                None => mask,
+                Some(acc) => self.set_union(acc, mask),
+            });
+        }
+        ok.then(|| (result.unwrap_or(ir::Value::Set(0)), Type::Set))
+    }
+
+    fn set_singleton(&mut self, element: ir::Value) -> ir::Value {
+        match element {
+            ir::Value::Int(n) => ir::Value::Set(1 << n),
+            _ => self.bin(ir::BinOp::Shl, ir::Value::Int(1), element),
+        }
+    }
+
+    // The bits at or above the low endpoint, intersected with the bits at or
+    // below the high one. That is empty exactly when the range is reversed,
+    // so the Report's rule for {m .. n} with m > n needs no branch of its
+    // own, and no endpoint comparison is generated. The shift counts are
+    // `low` and `31 - high`, both already checked to lie in 0 .. 31, so
+    // neither can reach the word width.
+    fn set_range(&mut self, low: ir::Value, high: ir::Value) -> ir::Value {
+        if let (ir::Value::Int(low), ir::Value::Int(high)) = (&low, &high) {
+            return ir::Value::Set(set_range_bits(*low, *high));
+        }
+        let above = self.bin(ir::BinOp::Shl, ir::Value::Set(SET_FULL), low);
+        let drop = self.bin(ir::BinOp::Sub, ir::Value::Int(SET_MAX), high);
+        let below = self.bin(ir::BinOp::Shr, ir::Value::Set(SET_FULL), drop);
+        self.bin(ir::BinOp::BitAnd, above, below)
+    }
+
+    fn set_union(&mut self, lhs: ir::Value, rhs: ir::Value) -> ir::Value {
+        match (lhs, rhs) {
+            (ir::Value::Set(lhs), ir::Value::Set(rhs)) => ir::Value::Set(lhs | rhs),
+            (lhs, rhs) => self.bin(ir::BinOp::BitOr, lhs, rhs),
+        }
+    }
+
+    fn lower_set_element(&mut self, expr: &ast::Expr) -> Option<ir::Value> {
+        let value = self.lower_int(expr, "set element")?;
+        self.check_set_element(expr, value)
+    }
+
+    // The one domain rule, shared by constructors, ranges, IN, INCL, and
+    // EXCL. A constant is diagnosed here rather than deferred to run time,
+    // and folding is what makes `{16 + 16}` as wrong as `{32}`.
+    fn check_set_element(&mut self, expr: &ast::Expr, value: ir::Value) -> Option<ir::Value> {
+        match self.try_eval_const(expr) {
+            Ok(Some(ConstValue::Int(n))) => {
+                if !(0..=SET_MAX).contains(&n) {
+                    self.diags.push(set_element_range_error(expr.pos(), n));
                     return None;
                 }
-                let dst = self.temp();
-                self.emit(ir::Inst::Un {
-                    dst,
-                    op: match op {
-                        ast::UnOp::Neg => ir::UnOp::Neg,
-                        ast::UnOp::Not => ir::UnOp::Not,
-                    },
-                    arg,
-                });
-                Some((ir::Value::Temp(dst), expected))
+                return Some(ir::Value::Int(n));
             }
-            ast::Expr::Binary { op, lhs, rhs, pos } => {
-                if matches!(op, ast::BinOp::And | ast::BinOp::Or) {
-                    self.lower_logical(*op, lhs, rhs, *pos)
-                } else {
-                    self.lower_binary(*op, lhs, rhs, *pos)
-                }
+            Ok(Some(_)) => unreachable!("set element was type-checked as INTEGER"),
+            Ok(None) => {}
+            Err(diag) => {
+                self.diags.push(diag);
+                return None;
             }
         }
+        // QBE reduces a shift count modulo the word width, so an unchecked
+        // 32 would quietly behave like 0.
+        let low = self.bin(ir::BinOp::Lt, value.clone(), ir::Value::Int(0));
+        let high = self.bin(ir::BinOp::Gt, value.clone(), ir::Value::Int(SET_MAX));
+        let bad = self.bin(ir::BinOp::BitOr, low, high);
+        let trap = self.label("set.bad");
+        let ok = self.label("set.ok");
+        self.emit(ir::Inst::Br {
+            cond: bad,
+            then: trap.clone(),
+            els: ok.clone(),
+        });
+        self.emit(ir::Inst::Label(trap));
+        self.trap("oberon_set_element_range");
+        self.emit(ir::Inst::Label(ok));
+        Some(value)
+    }
+
+    // Report 8.2: x IN s. The element takes the same domain check as one
+    // written in a constructor, because the test lowers to a shift too.
+    fn lower_membership(
+        &mut self,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        pos: Pos,
+    ) -> Option<(ir::Value, Type)> {
+        let element = self.lower_expr(lhs);
+        let set = self.lower_expr(rhs);
+        let (Some((element, element_ty)), Some((set, set_ty))) = (element, set) else {
+            return None;
+        };
+        if element_ty != Type::Integer || set_ty != Type::Set {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!("operator 'IN' requires INTEGER and SET, found {element_ty} and {set_ty}"),
+            ));
+            return None;
+        }
+        let element = self.check_set_element(lhs, element)?;
+        let bit = self.set_singleton(element);
+        let masked = self.bin(ir::BinOp::BitAnd, set, bit);
+        Some((
+            self.bin(ir::BinOp::Ne, masked, ir::Value::Set(0)),
+            Type::Boolean,
+        ))
     }
 
     fn lower_logical(
@@ -1042,7 +1201,10 @@ impl Analyzer {
 
         use ast::BinOp;
         let result_ty = match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => check_binary_types(
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Slash => {
+                check_arith_types(pos, op, lhs_ty, rhs_ty, &mut self.diags)?
+            }
+            BinOp::Div | BinOp::Mod => check_binary_types(
                 pos,
                 bin_op_name(op),
                 Type::Integer,
@@ -1073,8 +1235,28 @@ impl Analyzer {
                 Type::Boolean,
                 &mut self.diags,
             )?,
-            BinOp::And | BinOp::Or => unreachable!(),
+            BinOp::In | BinOp::And | BinOp::Or => unreachable!(),
         };
+
+        // Report 8.2: for SET operands "+", "-", "*", and "/" mean union,
+        // difference, intersection, and symmetric difference. Difference
+        // clears the right-hand bits, so it is an intersection with the
+        // complement and never a subtraction.
+        if result_ty == Type::Set {
+            return Some((
+                match op {
+                    BinOp::Add => self.bin(ir::BinOp::BitOr, lhs, rhs_ir),
+                    BinOp::Sub => {
+                        let keep = self.bin(ir::BinOp::BitXor, rhs_ir, ir::Value::Set(SET_FULL));
+                        self.bin(ir::BinOp::BitAnd, lhs, keep)
+                    }
+                    BinOp::Mul => self.bin(ir::BinOp::BitAnd, lhs, rhs_ir),
+                    BinOp::Slash => self.bin(ir::BinOp::BitXor, lhs, rhs_ir),
+                    _ => unreachable!("only the four set operators yield SET"),
+                },
+                Type::Set,
+            ));
+        }
 
         let value = match op {
             BinOp::Div | BinOp::Mod => {
@@ -1101,7 +1283,9 @@ impl Analyzer {
                     BinOp::Le => ir::BinOp::Le,
                     BinOp::Gt => ir::BinOp::Gt,
                     BinOp::Ge => ir::BinOp::Ge,
-                    BinOp::Div | BinOp::Mod | BinOp::And | BinOp::Or => unreachable!(),
+                    BinOp::Slash | BinOp::Div | BinOp::Mod | BinOp::In | BinOp::And | BinOp::Or => {
+                        unreachable!()
+                    }
                 },
                 lhs,
                 rhs_ir,
@@ -1246,6 +1430,7 @@ impl Analyzer {
     ) -> Option<(Option<ir::Value>, Option<Type>)> {
         match builtin {
             Builtin::Inc | Builtin::Dec => return self.lower_inc_dec(builtin, actuals, pos),
+            Builtin::Incl | Builtin::Excl => return self.lower_incl_excl(builtin, actuals, pos),
             Builtin::Assert => return self.lower_assert(actuals, pos),
             _ => {}
         }
@@ -1259,7 +1444,7 @@ impl Analyzer {
         for (i, (actual, expected)) in actuals.iter().zip(params).enumerate() {
             // Every argument is lowered even after one of them fails, so a
             // call reports all of its type errors rather than only the first.
-            match self.builtin_arg(actual, i + 1, *expected) {
+            match self.builtin_arg(actual, i + 1, expected) {
                 Some(value) => args.push(value),
                 None => ok = false,
             }
@@ -1277,13 +1462,16 @@ impl Analyzer {
                 let rem = self.bin(ir::BinOp::Rem, args[0].clone(), ir::Value::Int(2));
                 self.bin(ir::BinOp::Ne, rem, ir::Value::Int(0))
             }
-            // BOOLEAN is already 0 or 1 in a word, so the value passes
-            // through with only its type changed.
+            // BOOLEAN is already 0 or 1 in a word, and a SET is already its
+            // own bit pattern, so the value passes through with only its
+            // type changed. cf. Project Oberon, where ORD lowers to nothing.
             Builtin::Ord => args[0].clone(),
             Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
                 self.lower_shift(builtin, &args, &actuals[1])?
             }
-            Builtin::Inc | Builtin::Dec | Builtin::Assert => unreachable!("handled above"),
+            Builtin::Inc | Builtin::Dec | Builtin::Incl | Builtin::Excl | Builtin::Assert => {
+                unreachable!("handled above")
+            }
         };
         Some((Some(value), Some(ret)))
     }
@@ -1417,7 +1605,7 @@ impl Analyzer {
             None => None,
         };
         let step = match actuals.get(1) {
-            Some(actual) => self.builtin_arg(actual, 2, Type::Integer),
+            Some(actual) => self.builtin_arg(actual, 2, &[Type::Integer]),
             None => Some(ir::Value::Int(1)),
         };
         if let (Some(addr), Some(step)) = (target, step) {
@@ -1437,6 +1625,51 @@ impl Analyzer {
         Some((None, None))
     }
 
+    // Report 10.2: INCL(v, x) is v := v + {x} and EXCL(v, x) is v := v - {x}.
+    // Both are proper procedures taking a writable SET variable, so they go
+    // through the same designator path as INC and DEC and are equally unable
+    // to change an imported variable.
+    fn lower_incl_excl(
+        &mut self,
+        builtin: Builtin,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        if !self.builtin_arity(actuals, 2, pos) {
+            return None;
+        }
+        let target = match self.var_actual(&actuals[0], 1) {
+            Some((addr, Type::Set)) => Some(addr),
+            Some((_, ty)) => {
+                self.diags.push(Diagnostic::new(
+                    actuals[0].pos(),
+                    format!("argument 1 has type {ty}, expected SET"),
+                ));
+                None
+            }
+            None => None,
+        };
+        let element = self
+            .builtin_arg(&actuals[1], 2, &[Type::Integer])
+            .and_then(|value| self.check_set_element(&actuals[1], value));
+        if let (Some(addr), Some(element)) = (target, element) {
+            let bit = self.set_singleton(element);
+            let current = self.load(addr.clone(), Type::Set);
+            let next = if builtin == Builtin::Incl {
+                self.bin(ir::BinOp::BitOr, current, bit)
+            } else {
+                let keep = self.bin(ir::BinOp::BitXor, bit, ir::Value::Set(SET_FULL));
+                self.bin(ir::BinOp::BitAnd, current, keep)
+            };
+            self.emit(ir::Inst::Store {
+                ty: ir::Ty::Set,
+                val: next,
+                addr,
+            });
+        }
+        Some((None, None))
+    }
+
     fn lower_assert(
         &mut self,
         actuals: &[ast::Expr],
@@ -1447,7 +1680,7 @@ impl Analyzer {
         }
         // No constant special case: ASSERT(FALSE) emits the test like any
         // other condition and QBE folds it.
-        if let Some(cond) = self.builtin_arg(&actuals[0], 1, Type::Boolean) {
+        if let Some(cond) = self.builtin_arg(&actuals[0], 1, &[Type::Boolean]) {
             let bad = self.label("assert.bad");
             let ok = self.label("assert.ok");
             self.emit(ir::Inst::Br {
@@ -1483,15 +1716,18 @@ impl Analyzer {
         &mut self,
         actual: &ast::Expr,
         number: usize,
-        expected: Type,
+        expected: &[Type],
     ) -> Option<ir::Value> {
         let (value, found) = self.lower_expr(actual)?;
-        if found == expected {
+        if expected.contains(&found) {
             Some(value)
         } else {
             self.diags.push(Diagnostic::new(
                 actual.pos(),
-                format!("argument {number} has type {found}, expected {expected}"),
+                format!(
+                    "argument {number} has type {found}, expected {}",
+                    type_list(expected)
+                ),
             ));
             None
         }
@@ -1577,6 +1813,30 @@ impl Analyzer {
                 }
             },
             ast::Expr::Bool { .. } => Some(Type::Boolean),
+            ast::Expr::Set { elements, .. } => {
+                // Only the element types are checked here. The domain check
+                // belongs to eval_const, which has the values.
+                let mut ok = true;
+                for element in elements {
+                    for endpoint in [Some(&element.low), element.high.as_ref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        match self.check_const_expr(endpoint) {
+                            Some(Type::Integer) => {}
+                            Some(found) => {
+                                self.diags.push(Diagnostic::new(
+                                    endpoint.pos(),
+                                    format!("set element must be INTEGER, found {found}"),
+                                ));
+                                ok = false;
+                            }
+                            None => ok = false,
+                        }
+                    }
+                }
+                ok.then_some(Type::Set)
+            }
             ast::Expr::Name(designator) => match self.resolve(designator) {
                 Ok(Symbol::Const(value)) => Some(value.ty()),
                 Ok(Symbol::Var { ty, .. }) => Some(ty),
@@ -1595,23 +1855,16 @@ impl Analyzer {
             ast::Expr::Call { callee, args, pos } => self.check_const_call(callee, args, *pos),
             ast::Expr::Unary { op, expr, pos } => {
                 let found = self.check_const_expr(expr)?;
-                let expected = match op {
-                    ast::UnOp::Neg => Type::Integer,
-                    ast::UnOp::Not => Type::Boolean,
-                };
-                if found == expected {
-                    Some(expected)
-                } else {
-                    self.diags.push(unary_type_error(
-                        *pos,
-                        match op {
-                            ast::UnOp::Neg => "-",
-                            ast::UnOp::Not => "~",
-                        },
-                        expected,
-                        found,
-                    ));
-                    None
+                match (op, found) {
+                    (ast::UnOp::Plus, Type::Integer) | (ast::UnOp::Neg, Type::Integer) => {
+                        Some(Type::Integer)
+                    }
+                    (ast::UnOp::Neg, Type::Set) => Some(Type::Set),
+                    (ast::UnOp::Not, Type::Boolean) => Some(Type::Boolean),
+                    _ => {
+                        self.diags.push(unary_type_error(*pos, *op, found));
+                        None
+                    }
                 }
             }
             ast::Expr::Binary { op, lhs, rhs, pos } => {
@@ -1622,16 +1875,30 @@ impl Analyzer {
                 };
                 use ast::BinOp;
                 match op {
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                        check_binary_types(
-                            *pos,
-                            bin_op_name(*op),
-                            Type::Integer,
-                            lhs,
-                            rhs,
-                            Type::Integer,
-                            &mut self.diags,
-                        )
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Slash => {
+                        check_arith_types(*pos, *op, lhs, rhs, &mut self.diags)
+                    }
+                    BinOp::Div | BinOp::Mod => check_binary_types(
+                        *pos,
+                        bin_op_name(*op),
+                        Type::Integer,
+                        lhs,
+                        rhs,
+                        Type::Integer,
+                        &mut self.diags,
+                    ),
+                    BinOp::In => {
+                        if lhs == Type::Integer && rhs == Type::Set {
+                            Some(Type::Boolean)
+                        } else {
+                            self.diags.push(Diagnostic::new(
+                                *pos,
+                                format!(
+                                    "operator 'IN' requires INTEGER and SET, found {lhs} and {rhs}"
+                                ),
+                            ));
+                            None
+                        }
                     }
                     BinOp::And | BinOp::Or => check_binary_types(
                         *pos,
@@ -1771,10 +2038,14 @@ impl Analyzer {
                 ok = false;
                 continue;
             };
-            if found != *expected {
+            if !expected.contains(&found) {
                 self.diags.push(Diagnostic::new(
                     actual.pos(),
-                    format!("argument {} has type {found}, expected {expected}", i + 1),
+                    format!(
+                        "argument {} has type {found}, expected {}",
+                        i + 1,
+                        type_list(expected)
+                    ),
                 ));
                 ok = false;
             }
@@ -1806,6 +2077,11 @@ impl Analyzer {
                 .ok_or_else(|| Diagnostic::new(pos, "constant expression overflows")),
             (Builtin::Odd, [ConstValue::Int(value)]) => Ok(ConstValue::Bool(value % 2 != 0)),
             (Builtin::Ord, [ConstValue::Bool(value)]) => Ok(ConstValue::Int(i32::from(*value))),
+            // Report 10.2 calls this the ordinal number of a SET but does not
+            // say how 32 elements map onto a signed INTEGER. Reinterpreting
+            // the bit pattern keeps the folded and runtime forms identical
+            // and matches Project Oberon, where ORD emits nothing at all.
+            (Builtin::Ord, [ConstValue::Set(bits)]) => Ok(ConstValue::Int(*bits as i32)),
             (
                 Builtin::Lsl | Builtin::Asr | Builtin::Ror,
                 [ConstValue::Int(x), ConstValue::Int(n)],
@@ -1834,6 +2110,19 @@ impl Analyzer {
                 .map(ConstValue::Int)
                 .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
             ast::Expr::Bool { value, .. } => Ok(ConstValue::Bool(*value)),
+            ast::Expr::Set { elements, .. } => {
+                let mut bits = 0;
+                for element in elements {
+                    let low = self.const_set_element(&element.low)?;
+                    bits |= match &element.high {
+                        // Both endpoints are checked before the reversed-range
+                        // rule applies, so {32 .. 0} is an error and not empty.
+                        Some(high) => set_range_bits(low, self.const_set_element(high)?),
+                        None => 1 << low,
+                    };
+                }
+                Ok(ConstValue::Set(bits))
+            }
             ast::Expr::Name(designator) => match self.resolve(designator)? {
                 Symbol::Const(value) => Ok(value),
                 _ => Err(Diagnostic::new(
@@ -1851,10 +2140,12 @@ impl Analyzer {
             ast::Expr::Unary { op, expr, pos } => {
                 let value = self.eval_const(expr)?;
                 match (op, value) {
+                    (ast::UnOp::Plus, ConstValue::Int(value)) => Ok(ConstValue::Int(value)),
                     (ast::UnOp::Neg, ConstValue::Int(value)) => value
                         .checked_neg()
                         .map(ConstValue::Int)
                         .ok_or_else(|| Diagnostic::new(*pos, "constant expression overflows")),
+                    (ast::UnOp::Neg, ConstValue::Set(bits)) => Ok(ConstValue::Set(bits ^ SET_FULL)),
                     (ast::UnOp::Not, ConstValue::Bool(value)) => Ok(ConstValue::Bool(!value)),
                     _ => unreachable!("constant expression was type-checked"),
                 }
@@ -1867,7 +2158,7 @@ impl Analyzer {
             } => match self.eval_const(lhs)? {
                 ConstValue::Bool(false) => Ok(ConstValue::Bool(false)),
                 ConstValue::Bool(true) => self.eval_const(rhs),
-                ConstValue::Int(_) => unreachable!("constant expression was type-checked"),
+                _ => unreachable!("constant expression was type-checked"),
             },
             ast::Expr::Binary {
                 op: ast::BinOp::Or,
@@ -1877,13 +2168,75 @@ impl Analyzer {
             } => match self.eval_const(lhs)? {
                 ConstValue::Bool(true) => Ok(ConstValue::Bool(true)),
                 ConstValue::Bool(false) => self.eval_const(rhs),
-                ConstValue::Int(_) => unreachable!("constant expression was type-checked"),
+                _ => unreachable!("constant expression was type-checked"),
             },
+            ast::Expr::Binary {
+                op: ast::BinOp::In,
+                lhs,
+                rhs,
+                ..
+            } => {
+                let element = self.const_set_element(lhs)?;
+                let ConstValue::Set(bits) = self.eval_const(rhs)? else {
+                    unreachable!("constant expression was type-checked");
+                };
+                Ok(ConstValue::Bool(bits & (1 << element) != 0))
+            }
             ast::Expr::Binary { op, lhs, rhs, pos } => {
                 let lhs = self.eval_const(lhs)?;
                 let rhs = self.eval_const(rhs)?;
                 eval_const_binary(*op, lhs, rhs, *pos)
             }
+        }
+    }
+
+    // Optional constant evaluation has three outcomes. A value can be folded,
+    // an expression containing a variable or user procedure must run, and an
+    // invalid expression made entirely from constants keeps its diagnostic.
+    fn try_eval_const(&self, expr: &ast::Expr) -> Result<Option<ConstValue>, Diagnostic> {
+        match self.eval_const(expr) {
+            Ok(value) => Ok(Some(value)),
+            Err(diag) if self.is_const_expr(expr) => Err(diag),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn is_const_expr(&self, expr: &ast::Expr) -> bool {
+        match expr {
+            ast::Expr::Int { .. } | ast::Expr::Bool { .. } => true,
+            ast::Expr::Set { elements, .. } => elements.iter().all(|element| {
+                self.is_const_expr(&element.low)
+                    && element
+                        .high
+                        .as_ref()
+                        .is_none_or(|high| self.is_const_expr(high))
+            }),
+            ast::Expr::Name(designator) => {
+                matches!(self.resolve(designator), Ok(Symbol::Const(_)))
+            }
+            ast::Expr::Call { callee, args, .. } => {
+                matches!(
+                    self.resolve(callee),
+                    Ok(Symbol::Builtin(builtin)) if builtin_signature(builtin).is_some()
+                ) && args.iter().all(|arg| self.is_const_expr(arg))
+            }
+            ast::Expr::Unary { expr, .. } => self.is_const_expr(expr),
+            ast::Expr::Binary { lhs, rhs, .. } => {
+                self.is_const_expr(lhs) && self.is_const_expr(rhs)
+            }
+        }
+    }
+
+    // The static half of the one element-domain rule; Analyzer::
+    // check_set_element is the runtime half, and the two must stay in step.
+    fn const_set_element(&self, expr: &ast::Expr) -> Result<i32, Diagnostic> {
+        let ConstValue::Int(element) = self.eval_const(expr)? else {
+            unreachable!("constant expression was type-checked");
+        };
+        if (0..=SET_MAX).contains(&element) {
+            Ok(element)
+        } else {
+            Err(set_element_range_error(expr.pos(), element))
         }
     }
 
@@ -2121,6 +2474,19 @@ fn eval_const_binary(
     pos: Pos,
 ) -> Result<ConstValue, Diagnostic> {
     use ast::BinOp;
+    // Same bit rules as the runtime forms in Analyzer::lower_binary: union,
+    // difference, intersection, symmetric difference.
+    if let (ConstValue::Set(lhs), ConstValue::Set(rhs)) = (lhs, rhs)
+        && let BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Slash = op
+    {
+        return Ok(ConstValue::Set(match op {
+            BinOp::Add => lhs | rhs,
+            BinOp::Sub => lhs & !rhs,
+            BinOp::Mul => lhs & rhs,
+            BinOp::Slash => lhs ^ rhs,
+            _ => unreachable!(),
+        }));
+    }
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
             let (ConstValue::Int(lhs), ConstValue::Int(rhs)) = (lhs, rhs) else {
@@ -2180,7 +2546,42 @@ fn eval_const_binary(
                 _ => unreachable!(),
             }))
         }
+        BinOp::Slash => unreachable!("'/' on non-SET operands was rejected"),
+        BinOp::In => unreachable!("membership is folded with the element check"),
         BinOp::And | BinOp::Or => unreachable!("short-circuit operators handled separately"),
+    }
+}
+
+// Report 8.2 overloads "+", "-", "*", and "/". The first three take two
+// INTEGERs or two SETs; "/" is symmetric set difference here and gains its
+// REAL meaning in Slice 9. The operation is chosen from the operand types,
+// not from the token, so the AST keeps the source operator.
+fn check_arith_types(
+    pos: Pos,
+    op: ast::BinOp,
+    lhs: Type,
+    rhs: Type,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let numeric = op != ast::BinOp::Slash;
+    match (lhs, rhs) {
+        (Type::Set, Type::Set) => Some(Type::Set),
+        (Type::Integer, Type::Integer) if numeric => Some(Type::Integer),
+        _ => {
+            let expected = if numeric {
+                "two INTEGER or two SET operands"
+            } else {
+                "two SET operands"
+            };
+            diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "operator '{}' requires {expected}, found {lhs} and {rhs}",
+                    bin_op_name(op)
+                ),
+            ));
+            None
+        }
     }
 }
 
@@ -2205,18 +2606,29 @@ fn check_binary_types(
 }
 
 // Argument types and result type of the function-like predefined operations.
-// INC, DEC, and ASSERT are proper procedures and have no entry: a None here
-// is what makes them "cannot be used as a value" in an expression.
-fn builtin_signature(builtin: Builtin) -> Option<(&'static [Type], Type)> {
+// Each parameter carries the types it accepts, which is one type everywhere
+// except ORD: Report 10.2 gives it a BOOLEAN form and a SET form, and CHAR
+// joins them in Slice 11. INC, DEC, INCL, EXCL, and ASSERT are proper
+// procedures and have no entry: a None here is what makes them "cannot be
+// used as a value" in an expression.
+fn builtin_signature(builtin: Builtin) -> Option<(&'static [&'static [Type]], Type)> {
     match builtin {
-        Builtin::Abs => Some((&[Type::Integer], Type::Integer)),
-        Builtin::Odd => Some((&[Type::Integer], Type::Boolean)),
+        Builtin::Abs => Some((&[&[Type::Integer]], Type::Integer)),
+        Builtin::Odd => Some((&[&[Type::Integer]], Type::Boolean)),
         Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
-            Some((&[Type::Integer, Type::Integer], Type::Integer))
+            Some((&[&[Type::Integer], &[Type::Integer]], Type::Integer))
         }
-        Builtin::Ord => Some((&[Type::Boolean], Type::Integer)),
-        Builtin::Inc | Builtin::Dec | Builtin::Assert => None,
+        Builtin::Ord => Some((&[&[Type::Boolean, Type::Set]], Type::Integer)),
+        Builtin::Inc | Builtin::Dec | Builtin::Incl | Builtin::Excl | Builtin::Assert => None,
     }
+}
+
+fn type_list(types: &[Type]) -> String {
+    types
+        .iter()
+        .map(Type::to_string)
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 fn shift_range_error(pos: Pos, count: i32) -> Diagnostic {
@@ -2224,6 +2636,19 @@ fn shift_range_error(pos: Pos, count: i32) -> Diagnostic {
         pos,
         format!("shift count {count} is out of range: must be between 0 and 31"),
     )
+}
+
+fn set_element_range_error(pos: Pos, element: i32) -> Diagnostic {
+    Diagnostic::new(
+        pos,
+        format!("set element {element} is out of range: must be between 0 and {SET_MAX}"),
+    )
+}
+
+// The bits of {low .. high}, which is empty when the range is reversed. The
+// runtime form in Analyzer::set_range computes the same intersection.
+fn set_range_bits(low: i32, high: i32) -> u32 {
+    (SET_FULL << low) & (SET_FULL >> (SET_MAX - high))
 }
 
 fn label_text(low: i32, high: i32) -> String {
@@ -2234,10 +2659,15 @@ fn label_text(low: i32, high: i32) -> String {
     }
 }
 
-fn unary_type_error(pos: Pos, op: &str, expected: Type, found: Type) -> Diagnostic {
+fn unary_type_error(pos: Pos, op: ast::UnOp, found: Type) -> Diagnostic {
+    let (name, expected) = match op {
+        ast::UnOp::Plus => ("+", "INTEGER"),
+        ast::UnOp::Neg => ("-", "INTEGER or SET"),
+        ast::UnOp::Not => ("~", "BOOLEAN"),
+    };
     Diagnostic::new(
         pos,
-        format!("operator '{op}' requires {expected}, found {found}"),
+        format!("operator '{name}' requires {expected}, found {found}"),
     )
 }
 
@@ -2246,6 +2676,8 @@ fn bin_op_name(op: ast::BinOp) -> &'static str {
         ast::BinOp::Add => "+",
         ast::BinOp::Sub => "-",
         ast::BinOp::Mul => "*",
+        ast::BinOp::Slash => "/",
+        ast::BinOp::In => "IN",
         ast::BinOp::Div => "DIV",
         ast::BinOp::Mod => "MOD",
         ast::BinOp::Eq => "=",

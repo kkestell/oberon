@@ -45,3 +45,9 @@ void oberon_shift_range(void)
     fputs("shift count out of range\n", stderr);
     exit(1);
 }
+
+void oberon_set_element_range(void)
+{
+    fputs("SET element out of range\n", stderr);
+    exit(1);
+}

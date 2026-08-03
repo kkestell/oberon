@@ -43,12 +43,16 @@ pub enum ParamPass {
 pub enum Ty {
     Int,
     Bool,
+    Set,
 }
 
+// A SET is a bit vector, so its immediate is unsigned: bit 31 is an ordinary
+// element and not a sign.
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i32),
     Bool(bool),
+    Set(u32),
     Temp(usize),
 }
 
@@ -132,4 +136,5 @@ pub enum BinOp {
     Sar,
     BitAnd,
     BitOr,
+    BitXor,
 }

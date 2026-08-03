@@ -9,17 +9,25 @@ MODULE PredefinedShadow;
      The declarations are at module level on purpose. A local one would prove
      nothing: locals already shadow module-level names. *)
   IMPORT Out;
-  CONST ODD = 7;
+  CONST ODD = 7; INCL = 9;
   VAR ABS: INTEGER;
       BOOLEAN: INTEGER;
+      SET: INTEGER;
 
   PROCEDURE ASSERT(n: INTEGER): INTEGER;
   BEGIN
   RETURN n * 2
   END ASSERT;
 
+  PROCEDURE EXCL(n: INTEGER): INTEGER;
+  BEGIN
+  RETURN n + 1
+  END EXCL;
+
 BEGIN
   ABS := 3; BOOLEAN := 4;
   Out.Int(ABS, 4); Out.Int(BOOLEAN, 4); Out.Int(ODD, 4); Out.Int(ASSERT(5), 4);
-  Out.Ln
+  Out.Ln;
+  SET := 5;
+  Out.Int(SET, 4); Out.Int(INCL, 4); Out.Int(EXCL(6), 4); Out.Ln
 END PredefinedShadow.

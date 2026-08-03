@@ -1,0 +1,11 @@
+tests/errors/SetBuiltinBad.Mod:7:8: argument 1 has type INTEGER, expected SET
+tests/errors/SetBuiltinBad.Mod:8:8: argument 1 has type BOOLEAN, expected SET
+tests/errors/SetBuiltinBad.Mod:9:8: argument 1 must be a variable
+tests/errors/SetBuiltinBad.Mod:10:10: argument 1 must be a variable
+tests/errors/SetBuiltinBad.Mod:11:11: argument 2 has type BOOLEAN, expected INTEGER
+tests/errors/SetBuiltinBad.Mod:12:3: wrong number of arguments: expected 2, found 1
+tests/errors/SetBuiltinBad.Mod:13:3: wrong number of arguments: expected 2, found 3
+tests/errors/SetBuiltinBad.Mod:14:8: 'INCL' cannot be used as a value
+tests/errors/SetBuiltinBad.Mod:15:8: 'EXCL' cannot be used as a value
+tests/errors/SetBuiltinBad.Mod:16:12: argument 1 has type INTEGER, expected BOOLEAN or SET
+Error: 10 error(s)

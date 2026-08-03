@@ -10,7 +10,7 @@ pub fn emit(program: &ir::Program) -> String {
     for module in &program.modules {
         for global in &module.globals {
             let size = match global.ty {
-                ir::Ty::Int | ir::Ty::Bool => 4,
+                ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => 4,
             };
             writeln!(out, "data ${} = align {size} {{ z {size} }}", global.symbol).unwrap();
         }
@@ -58,7 +58,7 @@ fn emit_proc(out: &mut String, proc: &ir::Proc) {
     writeln!(out, "@start").unwrap();
     for (slot, ty) in &proc.slots {
         let bytes = match ty {
-            ir::Ty::Int | ir::Ty::Bool => 4,
+            ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => 4,
         };
         writeln!(out, "\t%{slot} =l alloc4 {bytes}").unwrap();
     }
@@ -166,7 +166,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
 
 fn class(ty: ir::Ty) -> &'static str {
     match ty {
-        ir::Ty::Int | ir::Ty::Bool => "w",
+        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "w",
     }
 }
 
@@ -178,6 +178,9 @@ fn value(value: &ir::Value) -> String {
     match value {
         ir::Value::Int(value) => value.to_string(),
         ir::Value::Bool(value) => usize::from(*value).to_string(),
+        // QBE parses a word immediate as a signed 32-bit number, so a set
+        // with bit 31 in it has to be spelled negative. The bits are the same.
+        ir::Value::Set(bits) => (*bits as i32).to_string(),
         ir::Value::Temp(id) => temp(*id),
     }
 }
@@ -208,5 +211,6 @@ fn bin_op(op: ir::BinOp) -> &'static str {
         ir::BinOp::Sar => "sar",
         ir::BinOp::BitAnd => "and",
         ir::BinOp::BitOr => "or",
+        ir::BinOp::BitXor => "xor",
     }
 }
