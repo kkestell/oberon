@@ -173,6 +173,14 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
         ir::Inst::CheckNil { pointer } => {
             writeln!(out, "\tcall $oberon_check_nil(l {})", value(pointer)).unwrap();
         }
+        ir::Inst::CheckProcedure { procedure } => {
+            writeln!(
+                out,
+                "\tcall $oberon_check_procedure(l {})",
+                value(procedure)
+            )
+            .unwrap();
+        }
         ir::Inst::Alloc {
             dst,
             size,
@@ -314,12 +322,15 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
             )
             .unwrap();
         }
-        ir::Inst::Call { dst, symbol, args } => {
+        ir::Inst::Call { dst, target, args } => {
             write!(out, "\t").unwrap();
             if let Some((dst, ty)) = dst {
                 write!(out, "{} ={} ", temp(*dst), class(*ty)).unwrap();
             }
-            write!(out, "call ${symbol}(").unwrap();
+            match target {
+                ir::CallTarget::Direct(symbol) => write!(out, "call ${symbol}(").unwrap(),
+                ir::CallTarget::Indirect(value_) => write!(out, "call {}(", value(value_)).unwrap(),
+            }
             for (i, arg) in args.iter().enumerate() {
                 if i != 0 {
                     write!(out, ", ").unwrap();
@@ -353,7 +364,7 @@ fn class(ty: ir::Ty) -> &'static str {
     match ty {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set | ir::Ty::Byte => "w",
         ir::Ty::Real => "s",
-        ir::Ty::Pointer => "l",
+        ir::Ty::Pointer | ir::Ty::Procedure => "l",
     }
 }
 
@@ -364,7 +375,7 @@ fn load_op(ty: ir::Ty) -> &'static str {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "loadw",
         ir::Ty::Real => "loads",
         ir::Ty::Byte => "loadub",
-        ir::Ty::Pointer => "loadl",
+        ir::Ty::Pointer | ir::Ty::Procedure => "loadl",
     }
 }
 
@@ -373,7 +384,7 @@ fn store_op(ty: ir::Ty) -> &'static str {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "storew",
         ir::Ty::Real => "stores",
         ir::Ty::Byte => "storeb",
-        ir::Ty::Pointer => "storel",
+        ir::Ty::Pointer | ir::Ty::Procedure => "storel",
     }
 }
 
@@ -428,7 +439,7 @@ fn address(addr: &ir::Addr) -> String {
 // The remaining operations are word-only and never see a REAL operand.
 fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
     let real = ty == ir::Ty::Real;
-    let pointer = ty == ir::Ty::Pointer;
+    let long = matches!(ty, ir::Ty::Pointer | ir::Ty::Procedure);
     match op {
         ir::BinOp::Add => "add",
         ir::BinOp::Sub => "sub",
@@ -441,8 +452,8 @@ fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
         ir::BinOp::Le if real => "cles",
         ir::BinOp::Gt if real => "cgts",
         ir::BinOp::Ge if real => "cges",
-        ir::BinOp::Eq if pointer => "ceql",
-        ir::BinOp::Ne if pointer => "cnel",
+        ir::BinOp::Eq if long => "ceql",
+        ir::BinOp::Ne if long => "cnel",
         ir::BinOp::Eq => "ceqw",
         ir::BinOp::Ne => "cnew",
         ir::BinOp::Lt => "csltw",

@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::ir;
 
-use super::types::{Type, fixed_shape};
+use super::types::{ProcedureParam, ProcedureType, Type, fixed_shape};
 
 #[derive(Debug, Clone)]
 pub(super) enum RecordDynamic {
@@ -76,8 +76,8 @@ pub(super) enum Symbol {
     },
     Proc {
         symbol: String,
-        params: Vec<(bool, Type)>,
-        ret: Option<Type>,
+        ty: Type,
+        eligible: bool,
     },
     Module(HashMap<String, Symbol>),
     TypeName(Type),
@@ -102,15 +102,8 @@ pub struct Interface {
 pub enum Member {
     Const(ConstValue),
     Type(Type),
-    Var {
-        ty: Type,
-        symbol: String,
-    },
-    Proc {
-        symbol: String,
-        params: Vec<(bool, Type)>,
-        ret: Option<Type>,
-    },
+    Var { ty: Type, symbol: String },
+    Proc { symbol: String, ty: Type },
 }
 
 impl Member {
@@ -131,14 +124,10 @@ impl Member {
                     .record()
                     .map(|record| RecordDynamic::Static(record.descriptor.clone())),
             },
-            Member::Proc {
-                symbol,
-                params,
-                ret,
-            } => Symbol::Proc {
+            Member::Proc { symbol, ty } => Symbol::Proc {
                 symbol: symbol.clone(),
-                params: params.clone(),
-                ret: ret.clone(),
+                ty: ty.clone(),
+                eligible: true,
             },
         }
     }
@@ -212,28 +201,35 @@ pub fn out_interface() -> Interface {
                 "Int".into(),
                 Member::Proc {
                     symbol: "oberon_out_int".into(),
-                    params: vec![(false, Type::Integer), (false, Type::Integer)],
-                    ret: None,
+                    ty: procedure_type(vec![Type::Integer, Type::Integer]),
                 },
             ),
             (
                 "Char".into(),
                 Member::Proc {
                     symbol: "oberon_out_char".into(),
-                    params: vec![(false, Type::Char)],
-                    ret: None,
+                    ty: procedure_type(vec![Type::Char]),
                 },
             ),
             (
                 "Ln".into(),
                 Member::Proc {
                     symbol: "oberon_out_ln".into(),
-                    params: Vec::new(),
-                    ret: None,
+                    ty: procedure_type(Vec::new()),
                 },
             ),
         ]),
     }
+}
+
+fn procedure_type(params: Vec<Type>) -> Type {
+    Type::Procedure(Rc::new(ProcedureType {
+        params: params
+            .into_iter()
+            .map(|ty| ProcedureParam { var: false, ty })
+            .collect(),
+        ret: None,
+    }))
 }
 
 // Report 10.2 gives ABS one INTEGER form and one REAL form, and its result is

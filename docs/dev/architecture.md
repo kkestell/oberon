@@ -45,7 +45,7 @@ The generated `main` calls `oberon_init` and then calls each module's initialize
 
 `INTEGER` is a signed 32-bit number, `BOOLEAN` is 0 or 1, and `SET` is a 32-bit bit vector; all three occupy four bytes and travel in a QBE word. `REAL` is an IEEE 754 binary32 value and travels in a QBE single, which is the platform's native C `float` calling class. Not every scalar is four bytes: `CHAR` and `BYTE` occupy one unsigned byte each, load zero-extended with `loadub`, store with `storeb`, and still travel in a QBE word in every calling position. All six remain distinct semantic types: sharing a machine class never makes one assignable to another, and `INTEGER` and `REAL` never mix implicitly even though both are numeric.
 
-A pointer occupies eight bytes, has alignment eight, and travels in QBE's long class. Pointer storage loads with `loadl` and stores with `storel`. A pointer value is distinct from the address of the variable that stores it, so a value parameter receives and copies the pointer while a `VAR` parameter receives the address of pointer storage. Pointer function results also use the long class.
+A pointer occupies eight bytes, has alignment eight, and travels in QBE's long class. Pointer storage loads with `loadl` and stores with `storel`. A pointer value is distinct from the address of the variable that stores it, so a value parameter receives and copies the pointer while a `VAR` parameter receives the address of pointer storage. Pointer function results also use the long class. A procedure value uses the same pointer-sized machine class but remains a distinct IR and semantic type.
 
 ### Pointers and `NIL`
 
@@ -55,11 +55,29 @@ A pointer base must be a record. While a `TYPE` section is being analyzed, an ot
 
 Recursive source types form bounded shared descriptor graphs. A pointer descriptor holds a mutable pending, resolved, or invalid base state, and a record descriptor owns its field types. Debug formatting stays shallow so a recursive record and pointer pair cannot recurse while being printed.
 
-`NIL` is a polymorphic constant whose pointer-class value is zero. It has a semantic pseudo-type but no source type name or storage layout. It is compatible with every pointer for assignment, value arguments, results, equality, and inequality. It is not an integer zero and is rejected in arithmetic, ordering, conditions, indexing, `CASE`, and other unrelated scalar operations.
+`NIL` is a polymorphic constant whose machine value is zero. It has a semantic pseudo-type but no source type name or storage layout. It is compatible with every pointer and procedure type for assignment, value arguments, results, equality, and inequality. It is not an integer zero and is rejected in arithmetic, ordering, conditions, indexing, `CASE`, and other unrelated scalar operations.
 
 Explicit `p^` and implicit field selection through `p.f` use one checked dereference operation. The compiler loads the pointer once, emits `oberon_check_nil`, and only then treats the checked value as the address of its base record. The checked pointer also makes the heap object's dynamic record descriptor recoverable without loading it until a polymorphic call or dynamic-type operation needs it. Read-only status follows the address through dereference, fields, and indices. Short-circuit Boolean evaluation remains the way a source program guards a dereference.
 
 Fixed `LEN` has separate executable and required-constant paths. Executable `LEN(p.row)` resolves the designator and therefore executes nil and index checks before returning the declared length. Required-constant `LEN` follows selector types without loading pointers or evaluating indices; it still type-checks every index and diagnoses a constant index outside its fixed bound.
+
+### Procedure types and indirect calls
+
+Each `PROCEDURE` type constructor has one identity and owns an ordered source signature. A formal records its value or `VAR` mode and resolved type, while the signature records an optional result. Formal names are checked for duplicates and then discarded. Procedure declarations use this same representation, paired with their direct code symbol, so declarations, variables, parameters, results, and exported interfaces cannot develop separate notions of one callable shape.
+
+Assignment, value substitution, equality, and inequality compare procedure signatures structurally. Proper and function procedures must agree, and formal counts, order, modes, and types must match. Open-array dimensions are compared recursively, as are procedure-typed formals. The component types inside a signature retain their existing identities, so separately constructed fixed arrays, records, and pointers do not become compatible merely because their layouts match. A function result component also requires constructor identity, including when that result is itself a procedure type. A procedure `VAR` formal applies the ordinary identical-type rule to its actual, so two separately constructed but structurally matching procedure types are not interchangeable in that context.
+
+A procedure value is one eight-byte code address, or zero for `NIL`. It loads and stores with QBE's long operations and can occupy globals, locals, parameters, results, array elements, and record fields. It is not a data pointer, does not make an aggregate pointer-containing, and is never a GC root by virtue of its source type. No descriptor, registry, trampoline, static link, or closure object exists.
+
+Only a procedure declared in a module scope can become a value. The rule includes exported procedures reached through an imported module and the runtime-backed `Out` members because those members are ordinary module procedures. Nested and predefined procedures remain directly callable but cannot be assigned, passed, returned, or compared as values. This restriction eliminates the need for closures while retaining direct recursion and nested direct calls.
+
+A procedure value parameter receives one copied code address and lives in a writable local slot like another scalar value parameter. A procedure `VAR` parameter receives the address of writable procedure storage. A function may return a basic, pointer, or procedure value; arrays, open arrays, and records remain invalid results. An imported procedure variable can be read, compared, passed by value, and called, but its read-only status prevents assignment and `VAR` substitution.
+
+The typed IR represents a call target as either a direct symbol or an indirect value. Both forms use the same argument builder and result representation. Structured values therefore remain addresses, every open dimension contributes its length in the same position, and every record `VAR` address is followed immediately by its dynamic descriptor regardless of how the callee was reached.
+
+An indirect call resolves all selectors and loads its procedure value exactly once before evaluating actual parameters. Actuals then evaluate from left to right. The call uses the captured value even when an actual changes the original procedure variable. After all actuals have run, `oberon_check_procedure` rejects a zero target by printing `nil procedure call` and exiting; a nonzero target is called through its captured QBE temporary. Direct calls need no dynamic check and keep their direct-symbol form.
+
+Semantic analysis decides whether a terminal parenthesized postfix is a call or a type guard from the prefix type. A procedure-valued place makes it an indirect call. An eligible record or pointer place makes it a guard. Field, index, dereference, and guard selectors can all precede the terminal call, but the grammar permits no selector after an actual-parameter list.
 
 ### REAL
 
@@ -127,7 +145,7 @@ An open array exists only in a formal parameter type. Each `ARRAY OF` prefix cre
 
 Compatibility consumes one actual array dimension for each open prefix. The consumed actual dimension may be fixed or open and may have any non-negative length. After the prefixes are consumed, the actual must reach the identical qualified base type. This preserves the boundary between `ARRAY OF Row`, where `Row` is one named fixed type, and `ARRAY OF ARRAY OF INTEGER`, where the second dimension is open. It also lets a mixed open and fixed actual be forwarded when both walks reach the same terminal type.
 
-One open-array source parameter expands into one QBE long address followed by one QBE word length for each open prefix. Lengths are ordered from the outermost dimension to the innermost. Each declared name expands independently, even when several names share one parameter section. Procedure symbols and interfaces keep source parameters for arity and type diagnostics, while the typed IR exposes every expanded machine parameter and call argument.
+One open-array source parameter expands into one QBE long address followed by one QBE word length for each open prefix. Lengths are ordered from the outermost dimension to the innermost. Each declared name expands independently, even when several names share one parameter section. Procedure semantic types and interfaces keep source signatures for arity and type diagnostics, while the typed IR exposes every expanded machine parameter and call argument.
 
 A resolved place carries the lengths of all array dimensions reachable from it. A fixed dimension contributes an immediate. An open dimension contributes its incoming length temporary. Indexing consumes the current length and leaves the remaining shape on the selected place, so a selected row can be forwarded without resolving its selectors again. Field selection reconstructs the fixed shape of an array field. Pointer dereference preserves read-only status and relies on the existing arbitrary-interior-pointer collector setting when a selected heap address crosses a call.
 
@@ -223,6 +241,7 @@ A small C runtime provides:
 * memory allocation
 * module initialization
 * runtime checks, including the array index check
+* the nil-procedure call check
 * open-array assignment capacity checks
 * whole-value copying
 * basic runtime support
@@ -234,7 +253,7 @@ The runtime intentionally remains minimal.
 
 `NEW(p)` passes the payload size and the currently selected bound record's static descriptor to an allocation wrapper. The allocation contains one hidden pointer-sized descriptor header immediately before the source payload, while the returned pointer still addresses the first source field. Source field offsets, record sizes, array strides, and copy counts therefore exclude the header. Allocation failure returns null before any header write or pointer adjustment and is stored as `NIL`. A zero-size payload reserves one additional hidden byte so the returned interior pointer is nonnull, lies within its allocation, and remains distinct from other live empty objects. The generated program calls only `oberon_alloc` and `oberon_alloc_atomic`, never BDWGC directly.
 
-Each record layout records whether its complete source payload contains a pointer. A pointer field makes the record scanned without following the pointer's base. A derived record inherits pointer containment from its base. A positive-length array inherits the property from its element, a zero-length array does not, and a nested record contributes its already computed property. `NEW` selects `oberon_alloc` for a pointer-containing payload and `oberon_alloc_atomic` otherwise. A descriptor pointer in an atomic object's header names static data rather than a GC allocation and does not require scanning.
+Each record layout records whether its complete source payload contains a data pointer. A pointer field makes the record scanned without following the pointer's base. A procedure field does not. A derived record inherits pointer containment from its base. A positive-length array inherits the property from its element, a zero-length array does not, and a nested record contributes its already computed property. `NEW` selects `oberon_alloc` for a pointer-containing payload and `oberon_alloc_atomic` otherwise. A descriptor pointer in an atomic object's header names static data rather than a GC allocation and does not require scanning.
 
 Pointer globals, stack slots, parameters, temporaries, and scanned heap fields are ordinary conservative roots. Every returned payload pointer is an interior pointer because of the descriptor header. A selected `NEW` target may also leave only an interior field address live across the allocation call, so `oberon_init` enables arbitrary interior-pointer recognition before `GC_INIT`. This preserves both heap objects and source evaluation order because every target selector is evaluated once before allocation.
 

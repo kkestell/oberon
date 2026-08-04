@@ -36,13 +36,6 @@ impl Parser {
         Diagnostic::new(self.pos(), msg)
     }
 
-    // For constructs that are valid Oberon-07 but not implemented yet. A
-    // `todo!()` here would panic on correct source and report a position
-    // inside the parser instead of one inside the user's module.
-    fn unsupported<T>(&self, what: &str) -> PResult<T> {
-        Err(self.error(format!("not yet supported: {what}")))
-    }
-
     fn expect(&mut self, tok: Tok, what: &str) -> PResult<Token> {
         if *self.peek() == tok {
             Ok(self.advance())
@@ -193,9 +186,26 @@ impl Parser {
             Tok::Array => self.array_type(),
             Tok::Record => self.record_type(),
             Tok::Pointer => self.pointer_type(),
-            Tok::Procedure => self.unsupported("PROCEDURE types"),
+            Tok::Procedure => self.procedure_type(),
             _ => Ok(TypeExpr::Named(self.qualident("type name")?)),
         }
+    }
+
+    // ProcedureType = PROCEDURE [FormalParameters]. A result belongs to the
+    // complete FormalParameters production, so it is only accepted after ().
+    fn procedure_type(&mut self) -> PResult<TypeExpr> {
+        let pos = self.pos();
+        self.expect(Tok::Procedure, "'PROCEDURE'")?;
+        let (params, ret) = if *self.peek() == Tok::LParen {
+            self.formal_parameters()?
+        } else {
+            (Vec::new(), None)
+        };
+        Ok(TypeExpr::Procedure {
+            params,
+            ret: ret.map(Box::new),
+            pos,
+        })
     }
 
     // PointerType = POINTER TO type. The base is parsed through the complete
@@ -309,16 +319,10 @@ impl Parser {
     fn proc_declaration(&mut self) -> PResult<ProcDecl> {
         self.expect(Tok::Procedure, "'PROCEDURE'")?;
         let id = self.identdef("procedure name")?;
-        let params = if *self.peek() == Tok::LParen {
+        let (params, ret) = if *self.peek() == Tok::LParen {
             self.formal_parameters()?
         } else {
-            Vec::new()
-        };
-        let ret = if *self.peek() == Tok::Colon {
-            self.advance();
-            Some(TypeExpr::Named(self.qualident("result type name")?))
-        } else {
-            None
+            (Vec::new(), None)
         };
         self.expect(Tok::Semi, "';'")?;
 
@@ -364,8 +368,8 @@ impl Parser {
         })
     }
 
-    // FormalParameters = "(" [FPSection {";" FPSection}] ")"
-    fn formal_parameters(&mut self) -> PResult<Vec<FpSection>> {
+    // FormalParameters = "(" [FPSection {";" FPSection}] ")" [":" qualident]
+    fn formal_parameters(&mut self) -> PResult<(Vec<FpSection>, Option<TypeExpr>)> {
         self.expect(Tok::LParen, "'('")?;
         let mut sections = Vec::new();
         if *self.peek() != Tok::RParen {
@@ -405,7 +409,13 @@ impl Parser {
             }
         }
         self.expect(Tok::RParen, "')'")?;
-        Ok(sections)
+        let ret = if *self.peek() == Tok::Colon {
+            self.advance();
+            Some(TypeExpr::Named(self.qualident("result type name")?))
+        } else {
+            None
+        };
+        Ok((sections, ret))
     }
 
     fn stmt_seq(&mut self) -> PResult<Vec<Stmt>> {
@@ -982,6 +992,33 @@ mod tests {
                 }
             }
             TypeExpr::Pointer { base, .. } => format!("POINTER TO {}", shape(base)),
+            TypeExpr::Procedure { params, ret, .. } => {
+                let params: Vec<String> = params
+                    .iter()
+                    .map(|section| {
+                        let names: Vec<&str> = section
+                            .names
+                            .iter()
+                            .map(|(name, _)| name.as_str())
+                            .collect();
+                        format!(
+                            "{}{}: {}",
+                            if section.var { "VAR " } else { "" },
+                            names.join(", "),
+                            formal_shape(section)
+                        )
+                    })
+                    .collect();
+                let result = ret
+                    .as_ref()
+                    .map(|ret| format!(": {}", shape(ret)))
+                    .unwrap_or_default();
+                if params.is_empty() && ret.is_none() {
+                    "PROCEDURE".into()
+                } else {
+                    format!("PROCEDURE({}){result}", params.join("; "))
+                }
+            }
         }
     }
 
@@ -1257,10 +1294,48 @@ mod tests {
     }
 
     #[test]
-    fn procedure_types_still_unsupported() {
+    fn procedure_types() {
+        let m = module(
+            "TYPE P = PROCEDURE; Empty = PROCEDURE(); F = PROCEDURE(x: INTEGER; VAR y: ARRAY OF ARRAY OF M.T): M.R; A = ARRAY 2 OF PROCEDURE(ch: CHAR); R = RECORD p: PROCEDURE(): INTEGER END;",
+        );
+        let shapes: Vec<_> = m.types.iter().map(|ty| shape(&ty.ty)).collect();
         assert_eq!(
-            error("TYPE P = PROCEDURE (n: INTEGER);"),
-            "not yet supported: PROCEDURE types"
+            shapes,
+            vec![
+                "PROCEDURE",
+                "PROCEDURE",
+                "PROCEDURE(x: INTEGER; VAR y: ARRAY OF ARRAY OF M.T): M.R",
+                "ARRAY 2 OF PROCEDURE(ch: CHAR)",
+                "RECORD p: PROCEDURE(): INTEGER END",
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_procedure_types_and_results() {
+        assert_eq!(
+            error("TYPE P = PROCEDURE(x);"),
+            "expected ':', found RParen"
+        );
+        assert_eq!(
+            error("TYPE P = PROCEDURE(x: INTEGER;"),
+            "expected parameter name, found End"
+        );
+        assert_eq!(
+            error("TYPE P = PROCEDURE():;"),
+            "expected result type name, found Semi"
+        );
+        assert_eq!(
+            error("TYPE P = PROCEDURE: INTEGER;"),
+            "expected ';', found Colon"
+        );
+        assert_eq!(
+            error("TYPE P = PROCEDURE(): ARRAY 2 OF INTEGER;"),
+            "expected result type name, found Array"
+        );
+        assert_eq!(
+            error("PROCEDURE F: INTEGER; END F;"),
+            "expected ';', found Colon"
         );
     }
 

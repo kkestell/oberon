@@ -217,13 +217,12 @@ impl Analyzer {
             // so the rest of the expression can be checked. eval_const is what
             // reports that it cannot be folded.
             ast::Expr::Name(designator) => self.check_const_designator_type(designator),
-            ast::Expr::Apply { callee, args, pos } => {
-                if self.application_is_call(callee) {
+            ast::Expr::Apply { callee, args, pos } => match self.application_kind(callee) {
+                ApplicationKind::Guard => self.check_const_guard(callee, args, *pos),
+                ApplicationKind::Call | ApplicationKind::Invalid => {
                     self.check_const_call(callee, args, *pos)
-                } else {
-                    self.check_const_guard(callee, args, *pos)
                 }
-            }
+            },
             ast::Expr::TypeTest { expr, ty, pos } => self.check_const_type_test(expr, ty, *pos),
             ast::Expr::Unary { op, expr, pos } => {
                 let found = self.check_const_expr(expr)?;
@@ -283,6 +282,7 @@ impl Analyzer {
                     BinOp::Eq | BinOp::Ne => {
                         if (lhs == rhs && lhs.scalar().is_some())
                             || pointer_value_compatible(&lhs, &rhs)
+                            || procedure_value_compatible(&lhs, &rhs)
                             || text_relation_ok(&lhs, &rhs)
                         {
                             Some(Type::Boolean)
@@ -413,45 +413,58 @@ impl Analyzer {
             Ok(Symbol::Builtin(builtin)) => {
                 return self.check_const_builtin(builtin, callee, actuals, pos);
             }
-            Ok(Symbol::Proc { params, ret, .. }) => Some((params, ret)),
-            Ok(_) => {
-                self.diags.push(Diagnostic::new(
-                    pos,
-                    format!("'{}' is not a procedure", callee.name()),
-                ));
-                None
-            }
-            Err(diag) => {
-                self.diags.push(diag);
-                None
-            }
+            Ok(Symbol::Proc { ty, .. }) => ty.procedure().cloned(),
+            Ok(_) => match self.designator_type(callee) {
+                Ok(ty) => match ty.procedure().cloned() {
+                    Some(procedure) => Some(procedure),
+                    None => {
+                        self.diags.push(Diagnostic::new(
+                            pos,
+                            format!("'{}' has type {ty} and is not a procedure", callee.name()),
+                        ));
+                        None
+                    }
+                },
+                Err(diag) => {
+                    self.diags.push(diag);
+                    None
+                }
+            },
+            Err(diag) => match self.designator_type(callee) {
+                Ok(ty) => ty.procedure().cloned(),
+                Err(_) => {
+                    self.diags.push(diag);
+                    None
+                }
+            },
         };
-        let Some((params, ret)) = proc else {
+        let Some(procedure) = proc else {
             for actual in actuals {
                 let _ = self.check_const_expr(actual);
             }
             return None;
         };
-        if actuals.len() != params.len() {
+        if actuals.len() != procedure.params.len() {
             self.diags.push(Diagnostic::new(
                 pos,
                 format!(
                     "wrong number of arguments: expected {}, found {}",
-                    params.len(),
+                    procedure.params.len(),
                     actuals.len()
                 ),
             ));
         }
         for (i, actual) in actuals.iter().enumerate() {
             let found = self.check_const_expr(actual);
-            if let (Some(found), Some((var, expected))) = (found, params.get(i))
+            if let (Some(found), Some(formal)) = (found, procedure.params.get(i))
                 // The same identical-type rule as the executable path for
                 // reference formals, structured value formals included, so
                 // the constant precheck cannot accept what lowering rejects.
-                && if *var || expected.structured() {
+                && if formal.var || formal.ty.structured() {
+                    let expected = &formal.ty;
                     if expected.open_rank() > 0 {
                         !(open_actual_compatible(expected, &found)
-                            || (!*var
+                            || (!formal.var
                                 && matches!(found, Type::String(_))
                                 && open_string_formal(expected)))
                     } else if let (Some(expected), Some(found)) =
@@ -462,16 +475,20 @@ impl Analyzer {
                         found != *expected
                     }
                 } else {
-                    assign_kind(expected, &found).is_none()
+                    assign_kind(&formal.ty, &found).is_none()
                 }
             {
                 self.diags.push(Diagnostic::new(
                     actual.pos(),
-                    format!("argument {} has type {found}, expected {expected}", i + 1),
+                    format!(
+                        "argument {} has type {found}, expected {}",
+                        i + 1,
+                        formal.ty
+                    ),
                 ));
             }
         }
-        match ret {
+        match procedure.ret.clone() {
             // A BYTE result is read as an INTEGER at the call, just as it is
             // in executable lowering. Keeping the constant precheck in step
             // prevents a valid surrounding INTEGER expression from gaining
@@ -708,17 +725,17 @@ impl Analyzer {
                 )),
             },
             ast::Expr::Apply { callee, args, pos } => {
-                if !self.application_is_call(callee) {
+                if self.application_kind(callee) == ApplicationKind::Guard {
                     return Err(Diagnostic::new(
                         *pos,
                         "constant expression contains a type guard",
                     ));
                 }
-                match self.resolve(callee)? {
-                    Symbol::Builtin(builtin) => {
+                match self.resolve(callee) {
+                    Ok(Symbol::Builtin(builtin)) => {
                         self.eval_const_builtin(builtin, callee, args, *pos)
                     }
-                    _ => Err(Diagnostic::new(
+                    Ok(_) | Err(_) => Err(Diagnostic::new(
                         *pos,
                         "constant expression contains a procedure call",
                     )),
@@ -873,6 +890,21 @@ impl Analyzer {
         };
         let mut ty = match symbol {
             Symbol::Const(value) if rest.is_empty() => return Some(value.ty()),
+            Symbol::Proc {
+                ty, eligible: true, ..
+            } if rest.is_empty() => return Some(ty),
+            Symbol::Proc {
+                eligible: false, ..
+            } if rest.is_empty() => {
+                self.diags.push(Diagnostic::new(
+                    designator.pos,
+                    format!(
+                        "procedure '{}' cannot be used as a value: only a globally declared procedure is eligible",
+                        designator.name()
+                    ),
+                ));
+                return None;
+            }
             Symbol::Var { ty, .. } => ty,
             _ => {
                 self.diags.push(Diagnostic::new(

@@ -50,9 +50,8 @@ pub struct VarDecl {
     pub ty: TypeExpr,
 }
 
-// type = qualident | StrucType. The parser produces Named for a qualident and
-// Array, Record, or Pointer for the StrucTypes this compiler has; PROCEDURE
-// types are rejected in the parser and arrive with their slice.
+// type = qualident | StrucType. The parser preserves every source constructor;
+// sema resolves names and gives each constructor its language-level identity.
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     Named(Designator),
@@ -73,6 +72,11 @@ pub enum TypeExpr {
         base: Box<TypeExpr>,
         pos: Pos,
     },
+    Procedure {
+        params: Vec<FpSection>,
+        ret: Option<Box<TypeExpr>>,
+        pos: Pos,
+    },
 }
 
 // FieldList = IdentList ":" type. The names are identdefs, so a field may
@@ -89,7 +93,8 @@ impl TypeExpr {
             TypeExpr::Named(d) => d.pos,
             TypeExpr::Array { pos, .. }
             | TypeExpr::Record { pos, .. }
-            | TypeExpr::Pointer { pos, .. } => *pos,
+            | TypeExpr::Pointer { pos, .. }
+            | TypeExpr::Procedure { pos, .. } => *pos,
         }
     }
 }

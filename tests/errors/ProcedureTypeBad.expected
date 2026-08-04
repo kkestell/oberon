@@ -1,0 +1,14 @@
+tests/errors/ProcedureTypeBad.Mod:4:30: a procedure cannot have the array result type ARRAY 2 OF INTEGER
+tests/errors/ProcedureTypeBad.Mod:5:31: a procedure cannot have the record result type Rec
+tests/errors/ProcedureTypeBad.Mod:26:41: 'x' is already declared
+tests/errors/ProcedureTypeBad.Mod:27:34: 'x' is already declared
+tests/errors/ProcedureTypeBad.Mod:45:8: cannot assign PROCEDURE(INTEGER; INTEGER) to PROCEDURE(INTEGER)
+tests/errors/ProcedureTypeBad.Mod:46:8: cannot assign PROCEDURE(VAR INTEGER) to PROCEDURE(INTEGER)
+tests/errors/ProcedureTypeBad.Mod:47:10: cannot assign PROCEDURE(ARRAY OF ARRAY OF INTEGER) to PROCEDURE(ARRAY OF INTEGER)
+tests/errors/ProcedureTypeBad.Mod:48:11: cannot assign PROCEDURE(): BYTE to PROCEDURE(): INTEGER
+tests/errors/ProcedureTypeBad.Mod:50:14: cannot assign PROCEDURE(): PROCEDURE(INTEGER) to PROCEDURE(): PROCEDURE(INTEGER): these are different procedure type constructors, and this context requires an identical type
+tests/errors/ProcedureTypeBad.Mod:51:14: cannot assign PROCEDURE(ARRAY 1 OF INTEGER) to PROCEDURE(ARRAY 1 OF INTEGER): these are different procedure type constructors, and this context requires an identical type
+tests/errors/ProcedureTypeBad.Mod:52:15: cannot assign PROCEDURE(CHAR; INTEGER) to PROCEDURE(INTEGER; CHAR)
+tests/errors/ProcedureTypeBad.Mod:53:8: cannot assign INTEGER to PROCEDURE(INTEGER)
+tests/errors/ProcedureTypeBad.Mod:54:8: operator '<' requires two INTEGER, two REAL, or two CHAR operands, found PROCEDURE(INTEGER) and PROCEDURE(INTEGER)
+Error: 13 error(s)

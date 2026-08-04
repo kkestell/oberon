@@ -95,7 +95,7 @@ pub fn scalar_size(ty: Ty) -> i64 {
     match ty {
         Ty::Int | Ty::Bool | Ty::Set | Ty::Real => 4,
         Ty::Byte => 1,
-        Ty::Pointer => 8,
+        Ty::Pointer | Ty::Procedure => 8,
     }
 }
 
@@ -126,6 +126,9 @@ pub enum Ty {
     Real,
     Byte,
     Pointer,
+    // A code address has the target's pointer-sized machine class, but it is
+    // not a source pointer and must never affect heap scanning decisions.
+    Procedure,
 }
 
 // A SET is a bit vector, so its immediate is unsigned: bit 31 is an ordinary
@@ -195,6 +198,9 @@ pub enum Inst {
     },
     CheckNil {
         pointer: Value,
+    },
+    CheckProcedure {
+        procedure: Value,
     },
     Alloc {
         dst: usize,
@@ -267,7 +273,7 @@ pub enum Inst {
     },
     Call {
         dst: Option<(usize, Ty)>,
-        symbol: String,
+        target: CallTarget,
         args: Vec<Arg>,
     },
     Jmp(String),
@@ -278,6 +284,12 @@ pub enum Inst {
     },
     Ret(Option<Value>),
     Halt,
+}
+
+#[derive(Debug)]
+pub enum CallTarget {
+    Direct(String),
+    Indirect(Value),
 }
 
 #[derive(Debug)]

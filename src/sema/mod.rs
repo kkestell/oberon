@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast;
@@ -51,6 +51,9 @@ struct Place {
     dynamic: Option<RecordDynamic>,
 }
 
+type ResolvedFormal = (bool, String, Pos, Type);
+type ResolvedProcedure = (Option<Type>, Vec<ResolvedFormal>, Option<Type>);
+
 // What the source of an assignment or a relation operand turned out to be.
 // An array or a record keeps its address because it has no scalar value to
 // load, and a string keeps its bytes because what it becomes — a CHAR, a copy
@@ -59,6 +62,13 @@ enum Source {
     Value(ir::Value, Type),
     Structured(Place),
     Str(Rc<Vec<u8>>),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ApplicationKind {
+    Call,
+    Guard,
+    Invalid,
 }
 
 impl Source {
@@ -344,61 +354,25 @@ impl Analyzer {
     }
 
     fn procedure(&mut self, declaration: &ast::ProcDecl, prefix: &str) {
-        let mut formals = Vec::new();
-        let mut params_ok = true;
-        for section in &declaration.params {
-            let Some(ty) = self.resolve_formal_type(section) else {
-                params_ok = false;
-                continue;
-            };
-            for (name, pos) in &section.names {
-                formals.push((section.var, name.clone(), *pos, ty.clone()));
-            }
-        }
-
-        let (ret, ret_ok) = match &declaration.ret {
-            Some(source) => match self.resolve_type(source) {
-                // Report 10.1: the result type of a procedure can be neither a
-                // record nor an array. This one is permanent, not a slice
-                // boundary.
-                Some(ty) if ty.structured() => {
-                    let kind = if ty.array().is_some() {
-                        "array"
-                    } else {
-                        "record"
-                    };
-                    self.diags.push(Diagnostic::new(
-                        source.pos(),
-                        format!("a procedure cannot have the {kind} result type {ty}"),
-                    ));
-                    (None, false)
-                }
-                Some(ty) => (Some(ty), true),
-                None => (None, false),
-            },
-            None => (None, true),
-        };
+        let (proc_ty, formals, ret) =
+            self.resolve_procedure_signature(&declaration.params, declaration.ret.as_ref());
         let symbol = format!("{prefix}.{}", declaration.id.name);
-        if params_ok && ret_ok {
-            let params: Vec<_> = formals
-                .iter()
-                .map(|(var, _, _, ty)| (*var, ty.clone()))
-                .collect();
+        if let Some(proc_ty) = proc_ty {
+            let eligible = self.scopes.len() == MODULE_SCOPE + 1;
             if self.declare(
                 &declaration.id.name,
                 declaration.id.pos,
                 Symbol::Proc {
                     symbol: symbol.clone(),
-                    params: params.clone(),
-                    ret: ret.clone(),
+                    ty: proc_ty.clone(),
+                    eligible,
                 },
             ) {
                 self.export(
                     &declaration.id,
                     Member::Proc {
                         symbol: symbol.clone(),
-                        params,
-                        ret: ret.clone(),
+                        ty: proc_ty,
                     },
                 );
             }
@@ -408,7 +382,11 @@ impl Analyzer {
         let enclosing = self.current.take();
         self.current = Some(ProcBuilder::new(symbol.clone(), ret.clone()));
 
+        let mut declared_formals = HashSet::new();
         for (var, name, pos, ty) in formals {
+            if !declared_formals.insert(name.clone()) {
+                continue;
+            }
             // A structured parameter is a reference whichever kind it is:
             // Report 10.1 confines "the formal is a local variable holding
             // the value" to basic types, and 9.1 forbids assigning to a
@@ -780,7 +758,7 @@ impl Analyzer {
             return Some(Source::Str(Rc::new(bytes.clone())));
         }
         if let ast::Expr::Apply { callee, args, pos } = expr
-            && !self.application_is_call(callee)
+            && self.application_kind(callee) == ApplicationKind::Guard
         {
             let place = self.terminal_guard_place(
                 callee,
@@ -802,6 +780,31 @@ impl Analyzer {
         match self.qualident(designator) {
             Ok((Symbol::Const(ConstValue::Str(bytes)), [])) => return Some(Source::Str(bytes)),
             Ok((Symbol::Const(value), [])) => return Some(Source::Value(value.ir(), value.ty())),
+            Ok((
+                Symbol::Proc {
+                    symbol,
+                    ty,
+                    eligible: true,
+                },
+                [],
+            )) => {
+                return Some(Source::Value(ir::Value::Symbol(symbol), ty));
+            }
+            Ok((
+                Symbol::Proc {
+                    eligible: false, ..
+                },
+                [],
+            )) => {
+                self.diags.push(Diagnostic::new(
+                    designator.pos,
+                    format!(
+                        "procedure '{}' cannot be used as a value: only a globally declared procedure is eligible",
+                        designator.name()
+                    ),
+                ));
+                return None;
+            }
             Ok(_) => {}
             Err(diag) => {
                 self.diags.push(diag);
@@ -1472,7 +1475,7 @@ impl Analyzer {
                 self.source_scalar(expr, source)
             }
             ast::Expr::Apply { callee, args, pos } => {
-                if !self.application_is_call(callee) {
+                if self.application_kind(callee) == ApplicationKind::Guard {
                     let place = self.terminal_guard_place(
                         callee,
                         args,
@@ -1992,6 +1995,14 @@ impl Analyzer {
                     } else {
                         rhs_ty
                     }
+                } else if procedure_value_compatible(&lhs_ty, &rhs_ty) {
+                    if lhs_ty.procedure().is_some() {
+                        lhs_ty
+                    } else if rhs_ty.procedure().is_some() {
+                        rhs_ty
+                    } else {
+                        lhs_ty
+                    }
                 } else {
                     self.diags.push(Diagnostic::new(
                         pos,
@@ -2070,22 +2081,46 @@ impl Analyzer {
         actuals: &[ast::Expr],
         pos: Pos,
     ) -> Option<(Option<ir::Value>, Option<Type>)> {
-        let proc = match self.resolve(callee) {
-            // Before the user-procedure path: the predefined operations are
-            // generic or variable in arity, and none of them is a call in the
-            // emitted code.
-            Ok(Symbol::Builtin(builtin)) => return self.lower_builtin(builtin, actuals, pos),
-            Ok(Symbol::Proc {
-                symbol,
-                params,
-                ret,
-            }) => Some((symbol, params, ret)),
+        // Resolve and, for an indirect call, load the target before lowering
+        // any actual. That captures selectors and the value exactly once.
+        let callable = match self.qualident(callee) {
+            Ok((Symbol::Builtin(builtin), [])) => {
+                return self.lower_builtin(builtin, actuals, pos);
+            }
+            Ok((Symbol::Proc { symbol, ty, .. }, [])) => {
+                Some((ir::CallTarget::Direct(symbol), ty, None))
+            }
+            Ok((Symbol::Var { .. }, _)) => {
+                let place = self.place(callee, format!("'{}' is not a procedure", callee.name()));
+                match place {
+                    Some(place) if place.ty.procedure().is_some() => {
+                        let value = self.load(place.addr, ir::Ty::Procedure);
+                        Some((
+                            ir::CallTarget::Indirect(value.clone()),
+                            place.ty,
+                            Some(value),
+                        ))
+                    }
+                    Some(place) => {
+                        self.diags.push(Diagnostic::new(
+                            pos,
+                            format!(
+                                "'{}' has type {} and is not a procedure",
+                                callee.name(),
+                                place.ty
+                            ),
+                        ));
+                        return None;
+                    }
+                    None => None,
+                }
+            }
             Ok(_) => {
                 self.diags.push(Diagnostic::new(
                     pos,
                     format!("'{}' is not a procedure", callee.name()),
                 ));
-                None
+                return None;
             }
             Err(diag) => {
                 self.diags.push(diag);
@@ -2093,20 +2128,24 @@ impl Analyzer {
             }
         };
 
-        let Some((symbol, params, ret)) = proc else {
+        let Some((target, ty, indirect)) = callable else {
             for actual in actuals {
                 let _ = self.lower_expr(actual);
             }
             return None;
         };
+        let procedure = ty
+            .procedure()
+            .cloned()
+            .expect("a callable carries a procedure type");
 
         let mut ok = true;
-        if actuals.len() != params.len() {
+        if actuals.len() != procedure.params.len() {
             self.diags.push(Diagnostic::new(
                 pos,
                 format!(
                     "wrong number of arguments: expected {}, found {}",
-                    params.len(),
+                    procedure.params.len(),
                     actuals.len()
                 ),
             ));
@@ -2115,10 +2154,12 @@ impl Analyzer {
 
         let mut args = Vec::new();
         for (i, actual) in actuals.iter().enumerate() {
-            let Some((var, expected)) = params.get(i).cloned() else {
+            let Some(formal) = procedure.params.get(i) else {
                 let _ = self.lower_expr(actual);
                 continue;
             };
+            let var = formal.var;
+            let expected = formal.ty.clone();
             // A structured formal — value or VAR — takes the address of its
             // actual, so the actual must be a designator of the identical
             // type. For VAR that is Report 10.1's rule; for a structured
@@ -2220,11 +2261,17 @@ impl Analyzer {
         if !ok {
             return None;
         }
-        let dst = ret.as_ref().map(|ty| (self.temp(), ty.ir()));
-        self.emit(ir::Inst::Call { dst, symbol, args });
+        if let Some(procedure) = indirect {
+            self.emit(ir::Inst::CheckProcedure { procedure });
+        }
+        let dst = procedure.ret.as_ref().map(|ty| (self.temp(), ty.ir()));
+        self.emit(ir::Inst::Call { dst, target, args });
         // Report 6.1 again: a function whose result type is BYTE produces an
         // INTEGER value when it is called.
-        let ret = ret.map(|ty| if ty == Type::Byte { Type::Integer } else { ty });
+        let ret = procedure
+            .ret
+            .clone()
+            .map(|ty| if ty == Type::Byte { Type::Integer } else { ty });
         Some((dst.map(|(temp, _)| ir::Value::Temp(temp)), ret))
     }
 
@@ -2396,7 +2443,7 @@ impl Analyzer {
         if let (Some(addr), Some(exponent)) = (target, exponent) {
             self.emit(ir::Inst::Call {
                 dst: None,
-                symbol: "oberon_pack".into(),
+                target: ir::CallTarget::Direct("oberon_pack".into()),
                 args: vec![ir::Arg::Ref(addr), ir::Arg::Val(ir::Ty::Int, exponent)],
             });
         }
@@ -2419,7 +2466,7 @@ impl Analyzer {
         if let (Some(fraction), Some(exponent)) = (fraction, exponent) {
             self.emit(ir::Inst::Call {
                 dst: None,
-                symbol: "oberon_unpk".into(),
+                target: ir::CallTarget::Direct("oberon_unpk".into()),
                 args: vec![ir::Arg::Ref(fraction), ir::Arg::Ref(exponent)],
             });
         }
@@ -2490,7 +2537,7 @@ impl Analyzer {
         let dst = self.temp();
         self.emit(ir::Inst::Call {
             dst: Some((dst, ret)),
-            symbol: symbol.into(),
+            target: ir::CallTarget::Direct(symbol.into()),
             args,
         });
         ir::Value::Temp(dst)
@@ -2823,13 +2870,16 @@ impl Analyzer {
             ast::Expr::Name(designator) => {
                 self.place(designator, format!("argument {number} must be a variable"))
             }
-            ast::Expr::Apply { callee, args, pos } if !self.application_is_call(callee) => self
-                .terminal_guard_place(
+            ast::Expr::Apply { callee, args, pos }
+                if self.application_kind(callee) == ApplicationKind::Guard =>
+            {
+                self.terminal_guard_place(
                     callee,
                     args,
                     *pos,
                     format!("argument {number} must be a variable"),
-                ),
+                )
+            }
             _ => {
                 let _ = self.lower_expr(actual);
                 self.diags.push(Diagnostic::new(
@@ -2863,11 +2913,87 @@ impl Analyzer {
         }
     }
 
-    fn application_is_call(&self, callee: &ast::Designator) -> bool {
-        matches!(
+    fn application_kind(&self, callee: &ast::Designator) -> ApplicationKind {
+        if matches!(
             self.resolve(callee),
             Ok(Symbol::Proc { .. } | Symbol::Builtin(_))
-        )
+        ) {
+            return ApplicationKind::Call;
+        }
+        match self.designator_type(callee) {
+            Ok(Type::Procedure(_)) => ApplicationKind::Call,
+            Ok(Type::Pointer(_) | Type::Record(_)) => ApplicationKind::Guard,
+            Ok(_) | Err(_) => ApplicationKind::Invalid,
+        }
+    }
+
+    // The non-emitting type walk used only to classify a terminal `(…)` and
+    // to check a call in a required constant context. Executable lowering
+    // still uses place(), which evaluates and checks every selector.
+    fn designator_type(&self, designator: &ast::Designator) -> Result<Type, Diagnostic> {
+        let (symbol, rest) = self.qualident(designator)?;
+        let mut ty = match symbol {
+            Symbol::Var { ty, .. } => ty,
+            Symbol::Proc { ty, .. } if rest.is_empty() => return Ok(ty),
+            _ => {
+                return Err(Diagnostic::new(
+                    designator.pos,
+                    format!("'{}' cannot be used as a value", designator.name()),
+                ));
+            }
+        };
+        for selector in rest {
+            match selector {
+                ast::Selector::Field(name, pos) => {
+                    if let Type::Pointer(pointer) = &ty {
+                        ty = pointer.record().map(Type::Record).ok_or_else(|| {
+                            Diagnostic::new(*pos, "pointer has an invalid base type")
+                        })?;
+                    }
+                    let Some(record) = ty.record() else {
+                        return Err(Diagnostic::new(
+                            *pos,
+                            format!("cannot select '{name}' from {ty}: only a record has fields"),
+                        ));
+                    };
+                    ty = find_field(record, name, &self.module)
+                        .map(|field| field.ty.clone())
+                        .ok_or_else(|| no_such_field(*pos, name, &ty))?;
+                }
+                ast::Selector::Index(exprs, pos) => {
+                    for _ in exprs {
+                        ty = ty.array_elem().cloned().ok_or_else(|| {
+                            Diagnostic::new(
+                                *pos,
+                                format!("cannot index {ty}: only an array can be indexed"),
+                            )
+                        })?;
+                    }
+                }
+                ast::Selector::Deref(pos) => {
+                    let Type::Pointer(pointer) = &ty else {
+                        return Err(Diagnostic::new(
+                            *pos,
+                            format!("cannot dereference {ty}: only a pointer can be dereferenced"),
+                        ));
+                    };
+                    ty = pointer
+                        .record()
+                        .map(Type::Record)
+                        .ok_or_else(|| Diagnostic::new(*pos, "pointer has an invalid base type"))?;
+                }
+                ast::Selector::Guard(target, _) => match self.resolve(target)? {
+                    Symbol::TypeName(target) => ty = target,
+                    _ => {
+                        return Err(Diagnostic::new(
+                            target.pos,
+                            format!("'{}' is not a type", target.name()),
+                        ));
+                    }
+                },
+            }
+        }
+        Ok(ty)
     }
 
     fn terminal_guard_place(
@@ -3388,7 +3514,75 @@ impl Analyzer {
                 Some(ty)
             }
             ast::TypeExpr::Pointer { base, pos } => self.pointer_type(base, name, *pos),
+            ast::TypeExpr::Procedure { params, ret, .. } => {
+                self.resolve_procedure_signature(params, ret.as_deref()).0
+            }
         }
+    }
+
+    // Procedure declarations and procedure type expressions use this one
+    // source-signature builder. Formal names are checked here and discarded;
+    // the resulting type records only mode, type, order, and result.
+    fn resolve_procedure_signature(
+        &mut self,
+        sections: &[ast::FpSection],
+        result: Option<&ast::TypeExpr>,
+    ) -> ResolvedProcedure {
+        let mut formals = Vec::new();
+        let mut names = HashSet::new();
+        let mut ok = true;
+        for section in sections {
+            let ty = self.resolve_formal_type(section);
+            if ty.is_none() {
+                ok = false;
+            }
+            for (name, pos) in &section.names {
+                if !names.insert(name.clone()) {
+                    self.diags.push(Diagnostic::new(
+                        *pos,
+                        format!("'{name}' is already declared"),
+                    ));
+                    ok = false;
+                }
+                if let Some(ty) = &ty {
+                    formals.push((section.var, name.clone(), *pos, ty.clone()));
+                }
+            }
+        }
+
+        let ret = match result {
+            Some(source) => match self.resolve_type(source) {
+                Some(ty) if ty.structured() => {
+                    let kind = if ty.is_array() { "array" } else { "record" };
+                    self.diags.push(Diagnostic::new(
+                        source.pos(),
+                        format!("a procedure cannot have the {kind} result type {ty}"),
+                    ));
+                    ok = false;
+                    None
+                }
+                Some(ty) => Some(ty),
+                None => {
+                    ok = false;
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let ty = ok.then(|| {
+            Type::Procedure(Rc::new(ProcedureType {
+                params: formals
+                    .iter()
+                    .map(|(var, _, _, ty)| ProcedureParam {
+                        var: *var,
+                        ty: ty.clone(),
+                    })
+                    .collect(),
+                ret: ret.clone(),
+            }))
+        });
+        (ty, formals, ret)
     }
 
     fn pointer_type(
@@ -3805,7 +3999,7 @@ impl Analyzer {
     fn trap(&mut self, symbol: &str) {
         self.emit(ir::Inst::Call {
             dst: None,
-            symbol: symbol.into(),
+            target: ir::CallTarget::Direct(symbol.into()),
             args: Vec::new(),
         });
         self.emit(ir::Inst::Halt);
@@ -3973,6 +4167,9 @@ fn distinct_types_hint(target: &Type, found: &Type) -> &'static str {
         }
         Type::Pointer(_) => {
             ": these are different pointer types, and each POINTER in the source declares its own"
+        }
+        Type::Procedure(_) => {
+            ": these are different procedure type constructors, and this context requires an identical type"
         }
         _ => "",
     }
