@@ -1,0 +1,168 @@
+#!/bin/sh
+
+# Copyright 2017-2019, 2023, 2024 Karl Landstrom <karl@miasap.se>
+#
+# This file is part of OBNC.
+#
+# OBNC is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OBNC is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with OBNC.  If not, see <http://www.gnu.org/licenses/>.
+
+set -o errexit -o nounset
+
+readonly selfDirPath="$(cd "$(dirname "$0")"; pwd -P)"
+readonly packagePath="$(dirname "$selfDirPath")"
+export OBNC_PREFIX="$packagePath"
+export OBNC_LIBDIR="lib"
+export CC="${CC:-cc}"
+export CFLAGS="${CFLAGS:-} -I$packagePath/lib"
+
+Log()
+{
+	if "$verbose"; then
+		echo "$@"
+	fi
+}
+
+
+Run()
+{
+	Log "$@"
+	eval "$@"
+}
+
+
+CleanUp()
+{
+	find "$packagePath/tests/obnc" -name .obnc -type d | while read -r dir; do
+		rm -r "$dir"
+	done
+	find "$packagePath/tests/obnc" -name "*.obn" -type f | while read -r file; do
+		rm -f "${file%.obn}" "${file%.obn}.exe"
+	done
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = -v ]; then
+	verbose=true
+else
+	verbose=false
+fi
+
+CleanUp
+
+dir="$packagePath/tests/obnc/passing"
+Run cd "$dir"
+for module in *.obn; do
+	if [ "$module" != T5SystemStatements.obn ]; then
+		if Run "OBNC_IMPORT_PATH='a dir' $packagePath/bin/obnc" "$module"; then
+			if ! Run "./${module%.obn}"; then
+				printf "\nPositive test failed: %s\n\n" "$dir/$module">&2
+				exit 1
+			fi
+		else
+			printf "\nPositive test failed: %s\n\n" "$dir/$module" >&2
+			exit 1
+		fi
+	fi
+done
+
+for def in OBNC_CONFIG_C_INT_TYPE=OBNC_CONFIG_SHORT \
+		OBNC_CONFIG_C_INT_TYPE=OBNC_CONFIG_INT \
+		OBNC_CONFIG_C_INT_TYPE=OBNC_CONFIG_LONG \
+		OBNC_CONFIG_C_REAL_TYPE=OBNC_CONFIG_FLOAT \
+		OBNC_CONFIG_C_REAL_TYPE=OBNC_CONFIG_DOUBLE \
+		OBNC_CONFIG_C_REAL_TYPE=OBNC_CONFIG_LONG_DOUBLE \
+		OBNC_CONFIG_NO_GC=1 \
+		OBNC_CONFIG_TARGET_EMB=1; do
+	if Run "CFLAGS='$CFLAGS -D $def' '$packagePath/bin/obnc'" -x A.obn; then
+		if ! Run ./A; then
+			printf "\nFailed running positive test compiled with C flag %s failed: %s\n\n" "$def" "$dir/A">&2
+			exit 1
+		fi
+	else
+		printf "\nPositive test compiled with C flag %s failed: %s\n\n" "$def" "$dir/A.obn" >&2
+		exit 1
+	fi
+done
+
+#verify that adding exported declarations to a server module does not cause the client module to be recompiled (only changed or deleted exported declarations should cause recompilation of client modules)
+dir="$packagePath/tests/obnc/passing/recompile"
+Run cd "$dir"
+if Run "$packagePath/bin/obnc" client.obn; then
+	cp M.obn M.obn.bak
+	trap "mv \"$dir/M.obn.bak\" \"$dir/M.obn\"" EXIT
+	sleep 1
+	sed -i 's/a* = 1;/\0b* = 2;/' M.obn
+	sleep 1
+	if Run "$packagePath/bin/obnc" client.obn; then
+		if [ .obnc/client.c -ot M.obn ]; then
+			#reverting the server module should now trigger a recompilation of the client
+			sleep 1
+			cp M.obn.bak M.obn
+			sleep 1
+			if Run "$packagePath/bin/obnc" client.obn; then
+				if [ .obnc/client.c -ot M.obn ]; then
+					printf "\nPositive test failed: recompilation of %s expected\n\n" "$dir/client.obn" >&2
+					exit 1
+				fi
+			else
+				printf "\nPositive test failed: second recompilation of %s failed\n\n" "$dir/client.obn" >&2
+				exit 1
+			fi
+		else
+			printf "\nPositive test failed: erroneous recompilation of %s\n\n" "$dir/client.obn" >&2
+			exit 1
+		fi
+	else
+		printf "\nPositive test failed: recompilation of %s failed\n\n" "$dir/client.obn" >&2
+		exit 1
+	fi
+else
+	printf "\nPositive test failed: %s\n\n" "$dir/client.obn" >&2
+	exit 1
+fi
+
+dir="$packagePath/tests/obnc/failing-at-compile-time"
+Run cd "$dir"
+"$packagePath/bin/obnc-compile" A.obn
+"$packagePath/bin/obnc-compile" B.obn
+for module in *.obn; do
+	if [ "$module" != A.obn ] && [ "$module" != B.obn ]; then
+		Log "$packagePath/bin/obnc-compile" "$module"
+		if "$packagePath/bin/obnc-compile" "$module" 2>/dev/null; then
+			printf "\nNegative test failed: %s\n\n" "$dir/$module" >&2
+			exit 1
+		elif [ "$?" -ne 1 ]; then
+			printf "\nNegative test crashed: %s\n\n" "$dir/$module" >&2
+			exit 1
+		fi
+	fi
+done
+
+dir="$packagePath/tests/obnc/failing-at-runtime"
+Run cd "$dir"
+for module in *.obn; do
+	if [ "$module" != A.obn ] && [ "$module" != B.obn ]; then
+		if Run "$packagePath/bin/obnc" "$module"; then
+			Log "./${module%.obn}"
+			if ( "./${module%.obn}" || false ) >/dev/null 2>&1; then
+				printf "\nNegative test failed: %s\n\n" "$dir/$module" >&2
+				exit 1
+			fi
+		else
+			printf "\nNegative test failed: %s\n\n" "$dir/$module" >&2
+			exit 1
+		fi
+	fi
+done
+
+CleanUp

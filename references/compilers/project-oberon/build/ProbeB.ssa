@@ -1,0 +1,34 @@
+data $ProbeB.p = align 8 { z 8 }
+data $ProbeB.calls = align 4 { z 4 }
+
+function w $ProbeB.Index() {
+@start
+	%.t0 =w loadw $ProbeB.calls
+	%.t1 =w add %.t0, 1
+	storew %.t1, $ProbeB.calls
+	ret 0
+}
+
+function $ProbeB.Fold() {
+@start
+	%a =l alloc4 12
+	call $oberon_out_int(w 3, w 0)
+	call $oberon_out_int(w 3, w 0)
+	%.t0 =w loadw $ProbeB.calls
+	call $oberon_out_int(w %.t0, w 0)
+	ret
+}
+
+function $.ProbeB.init() {
+@start
+	call $ProbeB.Fold()
+	call $oberon_out_ln()
+	ret
+}
+
+export function w $main() {
+@start
+	call $oberon_init()
+	call $.ProbeB.init()
+	ret 0
+}

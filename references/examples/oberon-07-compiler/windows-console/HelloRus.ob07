@@ -1,0 +1,26 @@
+﻿MODULE HelloRus;
+
+IMPORT Console, In, Out;
+
+
+PROCEDURE main;
+VAR
+    str: ARRAY 10 OF WCHAR;
+
+BEGIN
+    str := "Привет!";
+    Out.StringW(str); Out.Ln;
+    str[0] := "п";
+    str[6] := "?";
+    Out.StringW(str)
+END main;
+
+
+BEGIN
+    Console.open;
+
+    main;
+    In.Ln;
+
+    Console.exit(TRUE)
+END HelloRus.
