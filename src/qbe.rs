@@ -246,6 +246,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             index,
             len,
             stride,
+            dynamic_stride,
             site,
         } => {
             writeln!(
@@ -257,14 +258,35 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             )
             .unwrap();
             writeln!(out, "\t%.x{dst} =l extsw %.i{dst}").unwrap();
-            writeln!(out, "\t%.s{dst} =l mul %.x{dst}, {stride}").unwrap();
-            writeln!(
-                out,
-                "\t{} =l add {}, %.s{dst}",
-                temp(*dst),
-                address(base, names, slots)
-            )
-            .unwrap();
+            if dynamic_stride.is_empty() {
+                writeln!(out, "\t%.s{dst} =l mul %.x{dst}, {stride}").unwrap();
+                writeln!(
+                    out,
+                    "\t{} =l add {}, %.s{dst}",
+                    temp(*dst),
+                    address(base, names, slots)
+                )
+                .unwrap();
+            } else {
+                writeln!(out, "\t%.s{dst}.0 =l mul %.x{dst}, {stride}").unwrap();
+                for (i, factor) in dynamic_stride.iter().enumerate() {
+                    writeln!(out, "\t%.f{dst}.{i} =l extsw {}", value(factor, names)).unwrap();
+                    writeln!(
+                        out,
+                        "\t%.s{dst}.{} =l mul %.s{dst}.{i}, %.f{dst}.{i}",
+                        i + 1
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "\t{} =l add {}, %.s{dst}.{}",
+                    temp(*dst),
+                    address(base, names, slots),
+                    dynamic_stride.len()
+                )
+                .unwrap();
+            }
         }
         // One add, offset zero included: there is no optimization pass, and
         // one literal path is the same choice the constant index made.
@@ -281,6 +303,37 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             writeln!(
                 out,
                 "\tcall $oberon_copy(l {}, l {}, l {size})",
+                address(dst, names, slots),
+                address(src, names, slots)
+            )
+            .unwrap();
+        }
+        ir::Inst::CheckArrayCopy {
+            source_len,
+            destination_len,
+            site,
+        } => {
+            writeln!(
+                out,
+                "\tcall $oberon_check_array_copy(w {}, w {}, {})",
+                value(source_len, names),
+                value(destination_len, names),
+                args(&site.args(), names, slots)
+            )
+            .unwrap();
+        }
+        ir::Inst::CopyElements {
+            temp: copy_temp,
+            dst,
+            src,
+            count,
+            stride,
+        } => {
+            writeln!(out, "\t%.c{copy_temp} =l extsw {}", value(count, names)).unwrap();
+            writeln!(out, "\t%.b{copy_temp} =l mul %.c{copy_temp}, {stride}").unwrap();
+            writeln!(
+                out,
+                "\tcall $oberon_copy(l {}, l {}, l %.b{copy_temp})",
                 address(dst, names, slots),
                 address(src, names, slots)
             )

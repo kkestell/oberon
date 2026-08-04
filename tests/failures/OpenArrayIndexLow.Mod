@@ -1,0 +1,6 @@
+MODULE OpenArrayIndexLow;
+VAR a: ARRAY 1 OF INTEGER;
+PROCEDURE Fail(x: ARRAY OF INTEGER): INTEGER;
+BEGIN RETURN x[-1] END Fail;
+BEGIN a[0] := Fail(a)
+END OpenArrayIndexLow.

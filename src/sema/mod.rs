@@ -43,7 +43,8 @@ struct Place {
     addr: ir::Addr,
     ty: Type,
     // One length for every array constructor reachable by indexing from this
-    // place, each an immediate. Indexing consumes the first entry.
+    // place. Open dimensions hold incoming temporaries; fixed dimensions hold
+    // immediates. Indexing consumes the first entry.
     shape: Vec<ir::Value>,
     read_only: bool,
 }
@@ -401,12 +402,21 @@ impl Analyzer {
                     ir::ParamPass::Value(ty.ir())
                 },
             });
+            let mut open_lengths = Vec::new();
+            for _ in 0..ty.open_rank() {
+                let length = self.builder().temp();
+                self.builder().proc.params.push(ir::Param {
+                    temp: length,
+                    pass: ir::ParamPass::Value(ir::Ty::Int),
+                });
+                open_lengths.push(ir::Value::Temp(length));
+            }
             let addr = if by_ref {
                 ir::Addr::Temp(temp)
             } else {
                 ir::Addr::Slot(name.clone())
             };
-            let shape = fixed_shape(&ty);
+            let shape = shape_with_open_lengths(&ty, &open_lengths);
             if self.declare(
                 &name,
                 pos,
@@ -552,7 +562,7 @@ impl Analyzer {
 
     fn lower_stmt(&mut self, stmt: &ast::Stmt) {
         match stmt {
-            ast::Stmt::Assign { lhs, rhs, .. } => self.lower_assign(lhs, rhs),
+            ast::Stmt::Assign { lhs, rhs, pos } => self.lower_assign(lhs, rhs, *pos),
             ast::Stmt::Call { proc, args, pos } => {
                 if let Some((_, Some(_))) = self.lower_call(proc, args, *pos) {
                     self.diags.push(Diagnostic::new(
@@ -584,7 +594,7 @@ impl Analyzer {
     // copy the whole representation, and the exceptions connect strings with
     // CHAR and with character arrays. assign_kind names the outcomes, and the
     // value parameter and the RETURN expression ask the same function.
-    fn lower_assign(&mut self, lhs: &ast::Designator, rhs: &ast::Expr) {
+    fn lower_assign(&mut self, lhs: &ast::Designator, rhs: &ast::Expr, pos: Pos) {
         // The destination designator is resolved first and the source second,
         // each exactly once, so both sides' index expressions run in source
         // order and a selected row is copied from where it was when the
@@ -622,7 +632,7 @@ impl Analyzer {
             }
             // The fixed and open destinations differ only in where the fit is
             // decided, which copy_string reads off the destination type.
-            (Some(AssignKind::StringCopy), Source::Str(bytes)) => {
+            (Some(AssignKind::StringCopy | AssignKind::OpenStringCopy), Source::Str(bytes)) => {
                 self.copy_string(&bytes, target, rhs.pos());
             }
             (Some(AssignKind::WholeCopy), Source::Structured(source)) => {
@@ -634,6 +644,27 @@ impl Analyzer {
                     dst: target.addr,
                     src: source.addr,
                     size: target.ty.size(),
+                });
+            }
+            (Some(AssignKind::OpenPrefixCopy), Source::Structured(source)) => {
+                let source_len = source.shape[0].clone();
+                let destination_len = target.shape[0].clone();
+                let site = self.site(pos);
+                self.emit(ir::Inst::CheckArrayCopy {
+                    source_len: source_len.clone(),
+                    destination_len,
+                    site,
+                });
+                let Type::Array(array) = &target.ty else {
+                    unreachable!("an open prefix copies into a fixed array")
+                };
+                let temp = self.temp();
+                self.emit(ir::Inst::CopyElements {
+                    temp,
+                    dst: target.addr,
+                    src: source.addr,
+                    count: source_len,
+                    stride: array.elem.size(),
                 });
             }
             (Some(_), _) => unreachable!("assign_kind agrees with the source's shape"),
@@ -669,6 +700,13 @@ impl Analyzer {
                 ));
                 return;
             }
+        } else {
+            let site = self.site(pos);
+            self.emit(ir::Inst::CheckArrayCopy {
+                source_len: ir::Value::Int(count),
+                destination_len: target.shape[0].clone(),
+                site,
+            });
         }
         let src = self.literal(bytes);
         self.emit(ir::Inst::CopyBytes {
@@ -1826,15 +1864,24 @@ impl Analyzer {
             // expression is lowered so it reports as a string where a
             // variable is required rather than as a CHAR mismatch.
             if var || expected.structured() {
-                if expected.structured() && self.string_expr(actual).is_some() {
-                    self.diags.push(Diagnostic::new(
-                        actual.pos(),
-                        format!(
-                            "argument {} is a string where a variable is required",
-                            i + 1
-                        ),
-                    ));
-                    ok = false;
+                if expected.structured()
+                    && let Some(bytes) = self.string_expr(actual)
+                {
+                    if !var && open_string_formal(&expected) {
+                        let len = i32::try_from(bytes.len() + 1)
+                            .expect("a string literal fits the source file");
+                        args.push(ir::Arg::Ref(self.literal(&bytes)));
+                        args.push(ir::Arg::Val(ir::Ty::Int, ir::Value::Int(len)));
+                    } else {
+                        self.diags.push(Diagnostic::new(
+                            actual.pos(),
+                            format!(
+                                "argument {} is a string where a variable is required",
+                                i + 1
+                            ),
+                        ));
+                        ok = false;
+                    }
                     continue;
                 }
                 // A structured value actual is a read, so a read-only
@@ -1843,8 +1890,16 @@ impl Analyzer {
                 // and may not be.
                 match self.ref_actual(actual, i + 1, var) {
                     Some(place) => {
-                        if place.ty == expected {
+                        let compatible = if expected.open_rank() > 0 {
+                            open_actual_compatible(&expected, &place.ty)
+                        } else {
+                            place.ty == expected
+                        };
+                        if compatible {
                             args.push(ir::Arg::Ref(place.addr.clone()));
+                            for length in place.shape.iter().take(expected.open_rank()) {
+                                args.push(ir::Arg::Val(ir::Ty::Int, length.clone()));
+                            }
                         } else {
                             self.diags.push(argument_type_error(
                                 actual.pos(),
@@ -2753,13 +2808,16 @@ impl Analyzer {
             .cloned()
             .expect("an array place has a length");
         let remaining_shape = base.shape[1..].to_vec();
+        let dynamic_count = elem.open_rank();
+        let fixed_base = open_base(&elem);
         let dst = self.temp();
         self.emit(ir::Inst::Index {
             dst,
             base: base.addr,
             index,
             len,
-            stride: elem.size(),
+            stride: fixed_base.size(),
+            dynamic_stride: remaining_shape[..dynamic_count].to_vec(),
             site: self.site(expr.pos()),
         });
         Some(Place {
@@ -2789,6 +2847,14 @@ impl Analyzer {
 
     fn resolve_type(&mut self, source: &ast::TypeExpr) -> Option<Type> {
         self.resolve_type_named(source, None)
+    }
+
+    fn resolve_formal_type(&mut self, section: &ast::FpSection) -> Option<Type> {
+        let mut ty = self.resolve_type(&section.ty)?;
+        for _ in section.open_arrays.iter().rev() {
+            ty = Type::OpenArray(Box::new(ty));
+        }
+        Some(ty)
     }
 
     // `name` is the type declaration this constructor is the right side of, if
@@ -2847,7 +2913,7 @@ impl Analyzer {
         let mut names = HashSet::new();
         let mut ok = true;
         for section in sections {
-            let ty = self.resolve_type(&section.ty);
+            let ty = self.resolve_formal_type(section);
             if ty.is_none() {
                 ok = false;
             }

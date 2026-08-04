@@ -105,10 +105,14 @@ pub struct ProcDecl {
     pub ret_val: Option<Expr>,
 }
 
+// FormalType = {ARRAY OF} qualident. The ordinary TypeExpr stays unable to
+// represent an open array, so only this formal-parameter production can make
+// one. Each position names one ARRAY prefix, outermost first.
 #[derive(Debug, Clone)]
 pub struct FpSection {
     pub var: bool,
     pub names: Vec<(String, Pos)>,
+    pub open_arrays: Vec<Pos>,
     pub ty: TypeExpr,
 }
 
@@ -155,6 +159,7 @@ pub enum Stmt {
     Assign {
         lhs: Designator,
         rhs: Expr,
+        pos: Pos,
     },
     Call {
         proc: Designator,

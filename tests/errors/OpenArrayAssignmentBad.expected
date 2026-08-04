@@ -1,0 +1,6 @@
+tests/errors/OpenArrayAssignmentBad.Mod:10:18: cannot assign ARRAY 3 OF INTEGER to ARRAY OF INTEGER
+tests/errors/OpenArrayAssignmentBad.Mod:11:18: cannot assign ARRAY OF INTEGER to ARRAY OF INTEGER
+tests/errors/OpenArrayAssignmentBad.Mod:12:16: cannot assign ARRAY OF INTEGER to ARRAY 3 OF REAL
+tests/errors/OpenArrayAssignmentBad.Mod:13:16: cannot assign ARRAY OF ARRAY OF INTEGER to ARRAY 2 OF ARRAY 2 OF INTEGER
+tests/errors/OpenArrayAssignmentBad.Mod:14:3: cannot assign to 'text': it is read-only
+Error: 5 error(s)

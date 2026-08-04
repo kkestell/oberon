@@ -43,13 +43,35 @@ pub(super) enum AssignKind {
     // appended. The length rule is checked at the assignment, the one site
     // that can reach this.
     StringCopy,
+    // The same string rule with a dynamic open destination capacity. The
+    // statement emits the runtime fit check before its fixed-size copy.
+    OpenStringCopy,
     // Report 9.1: two identical structured types copy the whole
     // representation, padding included.
     WholeCopy,
+    // Report 9.1's open-array exception. The statement checks a dynamic
+    // source length against a fixed destination before copying that prefix.
+    OpenPrefixCopy,
+}
+
+pub(super) fn open_actual_compatible(formal: &Type, actual: &Type) -> bool {
+    match formal {
+        Type::OpenArray(formal_elem) => actual
+            .array_elem()
+            .is_some_and(|actual_elem| open_actual_compatible(formal_elem, actual_elem)),
+        _ => formal == actual,
+    }
+}
+
+pub(super) fn open_string_formal(ty: &Type) -> bool {
+    matches!(ty, Type::OpenArray(elem) if **elem == Type::Char)
 }
 
 pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
     if target == found {
+        if matches!(target, Type::OpenArray(_)) {
+            return None;
+        }
         return Some(if target.structured() {
             AssignKind::WholeCopy
         } else {
@@ -64,6 +86,12 @@ pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
         (Type::Byte, Type::Integer) => Some(AssignKind::ByteRange),
         (Type::Char, Type::String(1)) => Some(AssignKind::CharFromString),
         (Type::Array(_), Type::String(_)) if target.char_array() => Some(AssignKind::StringCopy),
+        (Type::OpenArray(_), Type::String(_)) if target.char_array() => {
+            Some(AssignKind::OpenStringCopy)
+        }
+        (Type::Array(target), Type::OpenArray(source)) if target.elem == **source => {
+            Some(AssignKind::OpenPrefixCopy)
+        }
         _ => None,
     }
 }
@@ -198,8 +226,43 @@ pub(super) fn fixed_shape(ty: &Type) -> Vec<ir::Value> {
             shape.extend(fixed_shape(&array.elem));
             shape
         }
+        Type::OpenArray(_) => panic!("an open array needs incoming lengths"),
         _ => Vec::new(),
     }
+}
+
+pub(super) fn open_base(mut ty: &Type) -> &Type {
+    while let Type::OpenArray(elem) = ty {
+        ty = elem;
+    }
+    ty
+}
+
+pub(super) fn shape_with_open_lengths(ty: &Type, open_lengths: &[ir::Value]) -> Vec<ir::Value> {
+    fn walk(ty: &Type, lengths: &[ir::Value], next: &mut usize, shape: &mut Vec<ir::Value>) {
+        match ty {
+            Type::OpenArray(elem) => {
+                shape.push(lengths[*next].clone());
+                *next += 1;
+                walk(elem, lengths, next, shape);
+            }
+            Type::Array(array) => {
+                shape.push(ir::Value::Int(array.len));
+                walk(&array.elem, lengths, next, shape);
+            }
+            _ => {}
+        }
+    }
+
+    let mut next = 0;
+    let mut shape = Vec::new();
+    walk(ty, open_lengths, &mut next, &mut shape);
+    assert_eq!(
+        next,
+        open_lengths.len(),
+        "every open length belongs to a dimension"
+    );
+    shape
 }
 
 // One object's contribution to a running frame or static-storage total, padded
@@ -234,6 +297,9 @@ pub enum Type {
     // declaration's names, an alias, an interface member, and a client's view
     // of an exported type all hold the same handle.
     Array(Rc<ArrayType>),
+    // Report 10.1. An open array exists only as a formal type. It owns no
+    // layout; a bound for this dimension arrives beside the data address.
+    OpenArray(Box<Type>),
     // Report 6.3, under the same identity rule as Array: one RECORD
     // constructor in the source is one type.
     Record(Rc<RecordType>),
@@ -359,7 +425,11 @@ impl Type {
             Type::Set => Some(ir::Ty::Set),
             Type::Char | Type::Byte => Some(ir::Ty::Byte),
             Type::Pointer(_) | Type::Nil => Some(ir::Ty::Pointer),
-            Type::String(_) | Type::Array(_) | Type::Record(_) | Type::Procedure(_) => None,
+            Type::String(_)
+            | Type::Array(_)
+            | Type::OpenArray(_)
+            | Type::Record(_)
+            | Type::Procedure(_) => None,
         }
     }
 
@@ -378,12 +448,20 @@ impl Type {
     pub(super) fn array_elem(&self) -> Option<&Type> {
         match self {
             Type::Array(array) => Some(&array.elem),
+            Type::OpenArray(elem) => Some(elem),
             _ => None,
         }
     }
 
     pub(super) fn is_array(&self) -> bool {
         self.array_elem().is_some()
+    }
+
+    pub(super) fn open_rank(&self) -> usize {
+        match self {
+            Type::OpenArray(elem) => 1 + elem.open_rank(),
+            _ => 0,
+        }
     }
 
     pub(super) fn record(&self) -> Option<&Rc<RecordType>> {
@@ -411,11 +489,12 @@ impl Type {
     // are the types that live in storage and travel by address: a parameter of
     // one is a reference, and an assignment between two of them is a copy.
     pub(super) fn structured(&self) -> bool {
-        matches!(self, Type::Array(_) | Type::Record(_))
+        matches!(self, Type::Array(_) | Type::OpenArray(_) | Type::Record(_))
     }
 
-    // A one-dimensional array whose element type is CHAR. Report 9.1's string
-    // assignment and 8.2.4's array relations apply to exactly these.
+    // A one-dimensional fixed or open array whose element type is CHAR.
+    // Report 9.1's string assignment and 8.2.4's array relations apply to
+    // exactly these; the place supplies its fixed or dynamic bound.
     pub(super) fn char_array(&self) -> bool {
         matches!(self.array_elem(), Some(Type::Char))
     }
@@ -423,6 +502,7 @@ impl Type {
     pub(super) fn size(&self) -> i64 {
         match self {
             Type::Array(array) => array.size,
+            Type::OpenArray(_) => panic!("an open array has no storage size"),
             Type::Record(record) => record.size,
             Type::Nil => panic!("NIL has no storage size"),
             scalar => ir::scalar_size(scalar.ir()),
@@ -436,6 +516,7 @@ impl Type {
     pub(super) fn align(&self) -> i64 {
         match self {
             Type::Array(array) => array.elem.align(),
+            Type::OpenArray(_) => panic!("an open array has no storage alignment"),
             Type::Record(record) => record.align,
             Type::Nil => panic!("NIL has no storage alignment"),
             scalar => ir::scalar_size(scalar.ir()),
@@ -448,6 +529,7 @@ impl Type {
                 len: array.len,
                 elem: Box::new(array.elem.storage()),
             },
+            Type::OpenArray(_) => panic!("an open array has no storage"),
             Type::Record(record) => ir::Storage::Record {
                 size: record.size,
                 align: record.align,
@@ -461,6 +543,7 @@ impl Type {
         match self {
             Type::Pointer(_) => true,
             Type::Array(array) => array.len > 0 && array.elem.contains_pointers(),
+            Type::OpenArray(_) => panic!("an open array owns no pointer-containing storage"),
             Type::Record(record) => record.contains_pointers,
             _ => false,
         }
@@ -517,6 +600,7 @@ impl PartialEq for Type {
             | (Type::Byte, Type::Byte) => true,
             (Type::String(a), Type::String(b)) => a == b,
             (Type::Array(a), Type::Array(b)) => Rc::ptr_eq(a, b),
+            (Type::OpenArray(a), Type::OpenArray(b)) => a == b,
             (Type::Record(a), Type::Record(b)) => Rc::ptr_eq(a, b),
             (Type::Pointer(a), Type::Pointer(b)) => Rc::ptr_eq(a, b),
             (Type::Procedure(a), Type::Procedure(b)) => Rc::ptr_eq(a, b),
@@ -540,6 +624,7 @@ impl fmt::Display for Type {
             Type::String(1) => write!(f, "string of 1 character"),
             Type::String(n) => write!(f, "string of {n} characters"),
             Type::Array(array) => write!(f, "ARRAY {} OF {}", array.len, array.elem),
+            Type::OpenArray(elem) => write!(f, "ARRAY OF {elem}"),
             // A record's field list would swamp the message it appears in, so
             // the declared name stands for it. A constructor written inline in
             // a variable declaration or a field list never had one.

@@ -1,0 +1,10 @@
+tests/errors/OpenArrayMutabilityBad.Mod:13:3: cannot assign to 'a': it is read-only
+tests/errors/OpenArrayMutabilityBad.Mod:14:3: cannot assign to 'a[...].n': it is read-only
+tests/errors/OpenArrayMutabilityBad.Mod:15:3: cannot assign to 'nested[...]': it is read-only
+tests/errors/OpenArrayMutabilityBad.Mod:16:10: argument 1 is read-only
+tests/errors/OpenArrayMutabilityBad.Mod:17:7: argument 1 is read-only
+tests/errors/OpenArrayMutabilityBad.Mod:18:3: cannot assign to 'p[...].n': it is read-only
+tests/errors/OpenArrayMutabilityBad.Mod:19:3: cannot assign to 'p[...]^.n': it is read-only
+tests/errors/OpenArrayMutabilityBad.Mod:20:7: argument 1 is read-only
+tests/errors/OpenArrayMutabilityBad.Mod:21:17: argument 1 is read-only
+Error: 9 error(s)

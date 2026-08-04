@@ -366,7 +366,15 @@ impl Analyzer {
                 // reference formals, structured value formals included, so
                 // the constant precheck cannot accept what lowering rejects.
                 && if formal.var || formal.ty.structured() {
-                    found != formal.ty
+                    let expected = &formal.ty;
+                    if expected.open_rank() > 0 {
+                        !(open_actual_compatible(expected, &found)
+                            || (!formal.var
+                                && matches!(found, Type::String(_))
+                                && open_string_formal(expected)))
+                    } else {
+                        found != *expected
+                    }
                 } else {
                     assign_kind(&formal.ty, &found).is_none()
                 }
@@ -1042,6 +1050,12 @@ impl Analyzer {
     // constant: a fixed length is a property of its type.
     fn const_array_type(&self, designator: &ast::Designator) -> Result<Rc<ArrayType>, Diagnostic> {
         let ty = self.len_designator_type(designator)?;
+        if matches!(ty, Type::OpenArray(_)) {
+            return Err(Diagnostic::new(
+                designator.pos,
+                "LEN of an open array is not a constant",
+            ));
+        }
         ty.array().cloned().ok_or_else(|| {
             Diagnostic::new(
                 designator.pos,
