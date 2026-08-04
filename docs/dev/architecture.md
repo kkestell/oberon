@@ -31,7 +31,9 @@ The root source file's directory is the build's root directory. An import of mod
 1. The root directory.
 2. The bundled `lib/` directory.
 
-The root directory comes first so an application can supply a module that shadows a bundled one. If neither directory has the file, the module name `Out` falls back to a temporary interface backed by the C runtime. That fallback is the last piece of the standard library with no Oberon source, and it goes away when `lib/Out.Mod` arrives.
+The root directory comes first so an application can supply a module that shadows a bundled one. `Out`, `In`, `Math`, `Strings`, and `Files` are ordinary bundled source modules. They pass through the same lexer, parser, analysis, IR, initialization, and interface paths as application source, and an unused bundled module emits nothing.
+
+Bundled source may import the compiler-private `OberonRuntime` interface. Source lookup records whether a file came from the root or bundled directory and passes that origin through dependency compilation. Only an actual bundled importer receives the synthesized native interface. The private interface is selected before ordinary dependency lookup, returned directly to that importer, and never stored in the completed-module map. A root shadow remains user source, and a user-defined `OberonRuntime.Mod` remains an ordinary module without capturing or receiving the private interface.
 
 Every source module must live in a file named after it. There are no search paths, packages, or serialized interfaces, and nothing is cached between invocations: each build rereads and reanalyzes every source it needs.
 
@@ -69,7 +71,7 @@ Assignment, value substitution, equality, and inequality compare procedure signa
 
 A procedure value is one eight-byte code address, or zero for `NIL`. It loads and stores with QBE's long operations and can occupy globals, locals, parameters, results, array elements, and record fields. It is not a data pointer, does not make an aggregate pointer-containing, and is never a GC root by virtue of its source type. No descriptor, registry, trampoline, static link, or closure object exists.
 
-Only a procedure declared in a module scope can become a value. The rule includes exported procedures reached through an imported module and the runtime-backed `Out` members because those members are ordinary module procedures. Nested and predefined procedures remain directly callable but cannot be assigned, passed, returned, or compared as values. This restriction eliminates the need for closures while retaining direct recursion and nested direct calls.
+Only a procedure declared in a module scope can become a value. The rule includes exported procedures reached through an imported module, including the source procedures in bundled modules. Nested and predefined procedures remain directly callable but cannot be assigned, passed, returned, or compared as values. This restriction eliminates the need for closures while retaining direct recursion and nested direct calls.
 
 A procedure value parameter receives one copied code address and lives in a writable local slot like another scalar value parameter. A procedure `VAR` parameter receives the address of writable procedure storage. A function may return a basic, pointer, or procedure value; arrays, open arrays, and records remain invalid results. An imported procedure variable can be read, compared, passed by value, and called, but its read-only status prevents assignment and `VAR` substitution.
 
@@ -221,6 +223,14 @@ A module's interface carries its exported type names alongside its constants, va
 
 An exported variable may have a private or inline structured type. Its interface carries the type needed to read and select from the variable without giving the client a name to declare another variable of that type, so the type stays private while the variable stays usable. A record descriptor also carries its defining module, which lets field lookup hide unmarked fields in every client without rebuilding the type.
 
+## Standard library boundary
+
+The public standard modules are Oberon source in `lib/`. They own exports, initialization, string algorithms, file pointer and rider representations, source preconditions, and public procedure values. `runtime/standard.c` supplies only operations that source cannot express: standard-stream byte I/O and token conversion, finite-width formatting, float libm calls, and operating-system file operations. `runtime/oberon.c` remains responsible for allocation, predefined operations, and language runtime checks.
+
+Every private native symbol begins with `oberon_lib_`. The synthesized signatures use ordinary semantic types, scalar `VAR` parameters, and bounded open arrays, so existing call lowering supplies the ABI. No record, record descriptor, native address, allocator, or general symbol-call operation crosses the boundary. `Files` stores an integer table handle in a private Oberon record and passes only that integer, explicit positions, scalar values, and bounded buffers to C.
+
+Language runtime failures such as a nil dereference, failed assertion, or invalid array index print their fixed diagnostic and exit. A fallible library operation instead returns a status, preserves the documented destinations, and records a bounded error string without printing unsolicited diagnostics.
+
 ## Backend
 
 The backend targets QBE.
@@ -245,9 +255,9 @@ A small C runtime provides:
 * open-array assignment capacity checks
 * whole-value copying
 * basic runtime support
-* standard library implementation
+* predefined scalar operations
 
-The runtime intentionally remains minimal.
+The runtime intentionally remains minimal. Standard-library operating-system support is separated into `runtime/standard.c` as described above.
 
 ### Heap objects and allocation
 
@@ -267,3 +277,7 @@ Generated code allocates through runtime wrappers rather than calling BDWGC dire
 * `oberon_alloc_atomic`
 
 This isolates the compiler from the underlying allocator and allows the GC implementation to be replaced in the future if desired.
+
+## Corpus execution
+
+The corpus compiler process runs from the repository root so runtime sources, build outputs, and diagnostic paths stay stable. Each compiled positive or runtime-failure program runs in a fresh temporary working directory. A sibling `.stdin` file, when present, becomes that program's deterministic standard input. The harness verifies the exact directory it created and removes only that directory after the child exits, so file-library cases neither modify the checkout nor share state.

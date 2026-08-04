@@ -1,0 +1,2 @@
+tests/errors/MissingUpperOut.Mod:2:8: cannot find module 'OUT'
+Error: 1 error(s)

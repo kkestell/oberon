@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
 
 // Three corpora, one test. Failures are collected so one broken module doesn't
 // hide the rest.
@@ -13,9 +16,10 @@ use std::process::Command;
 // sibling .expected file is a test root; the rest of the directory is the
 // dependencies that root imports.
 //
-// Everything runs from the repo root, which pins the driver's relative
-// runtime/oberon.c and build/ paths and keeps the source paths the compiler
-// prints in diagnostics stable across machines.
+// The compiler runs from the repository root, which pins its runtime and
+// build paths and keeps diagnostics stable. Each generated program runs in a
+// fresh directory, so file operations cannot touch the checkout or another
+// corpus case.
 #[test]
 fn corpus() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -33,9 +37,7 @@ fn corpus() {
             continue;
         }
 
-        let run = Command::new(root.join("build").join(&stem))
-            .output()
-            .expect("running compiled module");
+        let run = run(root, &source, &stem);
         let expected = expected(root, &source);
         if !run.status.success() || !run.stderr.is_empty() || run.stdout != expected {
             failures.push(format!(
@@ -79,9 +81,7 @@ fn corpus() {
             continue;
         }
 
-        let run = Command::new(root.join("build").join(&stem))
-            .output()
-            .expect("running compiled module");
+        let run = run(root, &source, &stem);
         if run.status.success() {
             failures.push(format!(
                 "{stem}: expected runtime failure, but it exited successfully"
@@ -150,6 +150,42 @@ fn compile(root: &Path, source: &Path) -> std::process::Output {
         .current_dir(root)
         .output()
         .expect("running compiler")
+}
+
+fn run(root: &Path, source: &Path, stem: &str) -> std::process::Output {
+    let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "oberon-corpus-{}-{sequence}-{stem}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory)
+        .unwrap_or_else(|e| panic!("creating isolated directory {}: {e}", directory.display()));
+    assert!(
+        directory.is_dir() && !directory.is_symlink(),
+        "isolated run path is not the created directory: {}",
+        directory.display()
+    );
+
+    let mut command = Command::new(root.join("build").join(stem));
+    command.current_dir(&directory);
+    let input = root.join(source).with_extension("stdin");
+    if input.is_file() {
+        command.stdin(Stdio::from(
+            fs::File::open(&input).unwrap_or_else(|e| panic!("opening {}: {e}", input.display())),
+        ));
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|e| panic!("running {stem} in {}: {e}", directory.display()));
+
+    assert!(
+        directory.is_dir() && !directory.is_symlink(),
+        "isolated run path changed before cleanup: {}",
+        directory.display()
+    );
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|e| panic!("removing isolated directory {}: {e}", directory.display()));
+    output
 }
 
 fn expected(root: &Path, source: &Path) -> Vec<u8> {

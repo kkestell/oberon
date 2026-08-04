@@ -125,14 +125,6 @@ void oberon_copy(void *destination, const void *source, size_t count)
     memmove(destination, source, count);
 }
 
-/* Oakwood Out.Int(i, n): right-justified in a field of at least n spaces. */
-void oberon_out_int(int32_t v, int32_t n) { printf("%*d", (int)n, (int)v); }
-void oberon_out_ln(void)                  { putchar('\n'); }
-
-/* Out.Char writes the low byte and nothing else, so a program's output is
-   exactly the bytes it asked for. */
-void oberon_out_char(int32_t c) { putchar((unsigned char)c); }
-
 /* Report 8.2.4's relations on character arrays and strings. Each length
    bounds its operand: a character array's is its declared length and a
    string literal's counts its terminator. strncmp stops at the first

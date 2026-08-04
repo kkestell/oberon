@@ -1,0 +1,2 @@
+tests/errors/MissingOberonRuntime.Mod:2:8: cannot find module 'OberonRuntime'
+Error: 1 error(s)

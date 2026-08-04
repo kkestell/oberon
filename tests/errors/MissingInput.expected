@@ -1,0 +1,2 @@
+tests/errors/MissingInput.Mod:2:8: cannot find module 'Input'
+Error: 1 error(s)

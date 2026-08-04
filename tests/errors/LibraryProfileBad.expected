@@ -1,0 +1,7 @@
+tests/errors/LibraryProfileBad.Mod:3:21: 'Handle' is not declared in module 'Files'
+tests/errors/LibraryProfileBad.Mod:7:5: cannot select 'pos': Rider has no such field
+tests/errors/LibraryProfileBad.Mod:8:5: cannot select 'base': Rider has no such field
+tests/errors/LibraryProfileBad.Mod:9:3: cannot assign to 'In.Done': it is read-only
+tests/errors/LibraryProfileBad.Mod:10:14: argument 1 has type ARRAY 2 OF BYTE, expected ARRAY OF CHAR
+tests/errors/LibraryProfileBad.Mod:11:8: cannot assign PROCEDURE(VAR ARRAY OF CHAR) to PROCEDURE(VAR ARRAY OF BYTE)
+Error: 6 error(s)

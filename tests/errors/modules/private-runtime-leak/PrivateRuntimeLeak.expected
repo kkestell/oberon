@@ -1,0 +1,2 @@
+tests/errors/modules/private-runtime-leak/PrivateRuntimeLeak.Mod:2:13: cannot find module 'OberonRuntime'
+Error: 1 error(s)
