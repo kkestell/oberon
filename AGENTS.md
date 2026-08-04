@@ -16,6 +16,8 @@ A small, native Oberon-07 compiler written in Rust. The project prioritizes simp
 
 The normative language definition is Niklaus Wirth's *The Programming Language Oberon (Revised Oberon-07)*, May 2016, referred to here as the Report. An extracted EBNF grammar is kept alongside it for convenient reference. Three Oberon compilers are also vendored as secondary references for cases where the language definition is ambiguous. See [docs/dev/references.md](docs/dev/references.md) for the language definition files, the reference implementations, and guidance on when to consult each one.
 
+[docs/about-oberon-07.md](docs/about-oberon-07.md) introduces the language itself, for a reader who has not written Oberon before. It explains rather than defines, and defers to the Report throughout.
+
 ### The test
 
 Reread your draft as someone who skimmed the visible messages and took no notes. Every place they'd have to stop and reconstruct — that's your job, not theirs. Unpack it.
