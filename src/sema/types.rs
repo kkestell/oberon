@@ -49,6 +49,8 @@ pub(super) enum AssignKind {
     // Report 9.1: two identical structured types copy the whole
     // representation, padding included.
     WholeCopy,
+    // A derived record assigned to a base copies only the destination prefix.
+    RecordPrefixCopy,
     // Report 9.1's open-array exception. The statement checks a dynamic
     // source length against a fixed destination before copying that prefix.
     OpenPrefixCopy,
@@ -79,6 +81,9 @@ pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
         });
     }
     match (target, found) {
+        (Type::Record(target), Type::Record(found)) if record_extends(found, target) => {
+            Some(AssignKind::RecordPrefixCopy)
+        }
         (Type::Pointer(_), Type::Nil) => Some(AssignKind::Store),
         (Type::Pointer(_), Type::Pointer(_)) if pointer_extends(found, target) => {
             Some(AssignKind::Store)
@@ -339,6 +344,7 @@ pub struct RecordType {
     // travels, so an imported type, a re-exported alias, and an exported
     // variable of a private type all answer the same way.
     pub(super) module: String,
+    pub(super) base: Option<Rc<RecordType>>,
     pub(super) descriptor: String,
     pub(super) contains_pointers: bool,
 }
@@ -350,6 +356,10 @@ impl fmt::Debug for RecordType {
             .field("size", &self.size)
             .field("align", &self.align)
             .field("field_count", &self.fields.len())
+            .field(
+                "base",
+                &self.base.as_ref().and_then(|base| base.name.clone()),
+            )
             .field("descriptor", &self.descriptor)
             .field("contains_pointers", &self.contains_pointers)
             .finish()
@@ -566,10 +576,26 @@ pub(super) fn find_field<'a>(
         .fields
         .iter()
         .find(|field| field.name == name && (field.export || record.module == module))
+        .or_else(|| {
+            record
+                .base
+                .as_deref()
+                .and_then(|base| find_field(base, name, module))
+        })
 }
 
 pub(super) fn record_extends(derived: &RecordType, base: &RecordType) -> bool {
-    std::ptr::eq(derived, base)
+    if std::ptr::eq(derived, base) {
+        return true;
+    }
+    let mut current = derived.base.as_deref();
+    while let Some(record) = current {
+        if std::ptr::eq(record, base) {
+            return true;
+        }
+        current = record.base.as_deref();
+    }
+    false
 }
 
 pub(super) fn pointer_extends(derived: &Type, base: &Type) -> bool {

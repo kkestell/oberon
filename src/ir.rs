@@ -23,6 +23,7 @@ pub struct Module {
 #[derive(Debug)]
 pub struct Descriptor {
     pub symbol: String,
+    pub base: Option<String>,
 }
 
 // The characters of one string literal. The emitted data object appends the
@@ -229,6 +230,20 @@ pub enum Inst {
         size: i64,
         scanned: bool,
         descriptor: String,
+    },
+    HeapDescriptor {
+        dst: usize,
+        pointer: Value,
+    },
+    TypeTestPointer {
+        dst: usize,
+        pointer: Value,
+        target: String,
+    },
+    TypeTestDescriptor {
+        dst: usize,
+        descriptor: Value,
+        target: String,
     },
     // The address of one element: `dst = base + index * stride`, after
     // checking `0 <= index < len`. The applicable length travels with the

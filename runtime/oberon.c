@@ -36,6 +36,9 @@ static void oberon_fail(const char *message, const char *module, int32_t line, i
 }
 
 typedef struct OberonTypeDescriptor OberonTypeDescriptor;
+struct OberonTypeDescriptor {
+    const OberonTypeDescriptor *base;
+};
 
 static void *oberon_alloc_with_header(size_t n, const OberonTypeDescriptor *type, int atomic)
 {
@@ -58,6 +61,30 @@ void *oberon_alloc(size_t n, const OberonTypeDescriptor *type)
 void *oberon_alloc_atomic(size_t n, const OberonTypeDescriptor *type)
 {
     return oberon_alloc_with_header(n, type, 1);
+}
+
+const OberonTypeDescriptor *oberon_heap_descriptor(const void *pointer)
+{
+    return ((const OberonTypeDescriptor *const *)pointer)[-1];
+}
+
+int32_t oberon_type_test_descriptor(
+    const OberonTypeDescriptor *actual,
+    const OberonTypeDescriptor *target)
+{
+    while (actual != NULL) {
+        if (actual == target) {
+            return 1;
+        }
+        actual = actual->base;
+    }
+    return 0;
+}
+
+int32_t oberon_type_test_pointer(const void *pointer, const OberonTypeDescriptor *target)
+{
+    return pointer != NULL
+        && oberon_type_test_descriptor(oberon_heap_descriptor(pointer), target);
 }
 
 /* Report 8.1: p^ and the implicit dereference in p.f both require p to point
@@ -186,6 +213,11 @@ void oberon_abs_overflow(const char *module, int32_t line, int32_t col)
 void oberon_case_no_match(const char *module, int32_t line, int32_t col)
 {
     oberon_fail("CASE without matching label", module, line, col);
+}
+
+void oberon_type_guard_failed(const char *module, int32_t line, int32_t col)
+{
+    oberon_fail("type guard failed", module, line, col);
 }
 
 void oberon_shift_range(const char *module, int32_t line, int32_t col)

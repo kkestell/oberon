@@ -11,12 +11,21 @@ pub fn emit(program: &ir::Program) -> String {
     let names = Names::new(program);
     for module in &program.modules {
         for descriptor in &module.descriptors {
-            writeln!(
-                out,
-                "data ${} = align 8 {{ l 0 }}",
-                names.symbol(&descriptor.symbol)
-            )
-            .unwrap();
+            match &descriptor.base {
+                Some(base) => writeln!(
+                    out,
+                    "data ${} = align 8 {{ l ${} }}",
+                    names.symbol(&descriptor.symbol),
+                    names.symbol(base)
+                )
+                .unwrap(),
+                None => writeln!(
+                    out,
+                    "data ${} = align 8 {{ l 0 }}",
+                    names.symbol(&descriptor.symbol)
+                )
+                .unwrap(),
+            }
         }
         for global in &module.globals {
             // A zero-length array reserves nothing; QBE accepts `z 0` and the
@@ -232,6 +241,43 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
                 "\t{} =l call ${symbol}(l {size}, l ${})",
                 temp(*dst),
                 names.symbol(descriptor)
+            )
+            .unwrap();
+        }
+        ir::Inst::HeapDescriptor { dst, pointer } => {
+            writeln!(
+                out,
+                "\t{} =l call $oberon_heap_descriptor(l {})",
+                temp(*dst),
+                value(pointer, names)
+            )
+            .unwrap();
+        }
+        ir::Inst::TypeTestPointer {
+            dst,
+            pointer,
+            target,
+        } => {
+            writeln!(
+                out,
+                "\t{} =w call $oberon_type_test_pointer(l {}, l ${})",
+                temp(*dst),
+                value(pointer, names),
+                names.symbol(target)
+            )
+            .unwrap();
+        }
+        ir::Inst::TypeTestDescriptor {
+            dst,
+            descriptor,
+            target,
+        } => {
+            writeln!(
+                out,
+                "\t{} =w call $oberon_type_test_descriptor(l {}, l ${})",
+                temp(*dst),
+                value(descriptor, names),
+                names.symbol(target)
             )
             .unwrap();
         }

@@ -64,6 +64,7 @@ pub enum TypeExpr {
     },
     // RecordType = RECORD ["(" BaseType ")"] [FieldListSequence] END.
     Record {
+        base: Option<Designator>,
         fields: Vec<FieldList>,
         pos: Pos,
     },
@@ -132,6 +133,7 @@ pub enum Selector {
     // list, which Report 8.1 defines as one index selector per expression.
     Index(Vec<Expr>, Pos),
     Deref(Pos),
+    Guard(Designator, Pos),
 }
 
 impl Designator {
@@ -148,6 +150,11 @@ impl Designator {
                 }
                 Selector::Index(..) => s.push_str("[...]"),
                 Selector::Deref(_) => s.push('^'),
+                Selector::Guard(ty, _) => {
+                    s.push('(');
+                    s.push_str(&ty.name());
+                    s.push(')');
+                }
             }
         }
         s
@@ -243,9 +250,16 @@ pub enum Expr {
         elements: Vec<SetElement>,
         pos: Pos,
     },
+    // A terminal parenthesized postfix is ambiguous until the prefix is
+    // resolved: it can be a call or the final type guard of a designator.
     Apply {
         callee: Designator,
         args: Vec<Expr>,
+        pos: Pos,
+    },
+    TypeTest {
+        expr: Box<Expr>,
+        ty: Designator,
         pos: Pos,
     },
     Unary {
@@ -310,6 +324,7 @@ impl Expr {
             | Expr::Str { pos, .. }
             | Expr::Set { pos, .. }
             | Expr::Apply { pos, .. }
+            | Expr::TypeTest { pos, .. }
             | Expr::Unary { pos, .. }
             | Expr::Binary { pos, .. } => *pos,
             Expr::Name(d) => d.pos,

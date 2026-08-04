@@ -1,0 +1,16 @@
+tests/errors/TypeCaseBad.Mod:12:14: record type CASE requires a record VAR parameter
+tests/errors/TypeCaseBad.Mod:16:19: record type test requires a record type, found PChild
+tests/errors/TypeCaseBad.Mod:16:29: 'target' is not a type
+tests/errors/TypeCaseBad.Mod:16:39: type-test target Other must extend Root
+tests/errors/TypeCaseBad.Mod:23:8: record type CASE requires a record VAR parameter
+tests/errors/TypeCaseBad.Mod:24:8: type CASE requires a qualified variable without selectors
+tests/errors/TypeCaseBad.Mod:25:13: 'PChild' is not a constant
+tests/errors/TypeCaseBad.Mod:26:8: CASE expression must be INTEGER or CHAR, found BOOLEAN
+tests/errors/TypeCaseBad.Mod:27:8: type CASE requires a qualified variable without selectors
+tests/errors/TypeCaseBad.Mod:28:19: 'target' is not a type
+tests/errors/TypeCaseBad.Mod:29:19: pointer type test requires a pointer type, found Child
+tests/errors/TypeCaseBad.Mod:30:19: type-test target POther must extend PRoot
+tests/errors/TypeCaseBad.Mod:31:19: a type CASE arm requires exactly one type label
+tests/errors/TypeCaseBad.Mod:32:19: a type CASE label cannot be a range
+tests/errors/TypeCaseBad.Mod:33:29: type CASE label PChild is duplicated
+Error: 15 error(s)
