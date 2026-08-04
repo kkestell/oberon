@@ -46,6 +46,17 @@ void oberon_check_index(int32_t index, int32_t length)
     }
 }
 
+/* Report 9.1: an open array may be assigned to an array only when the whole
+   source prefix fits. The check is separate from the move so failure cannot
+   change even the first destination byte. */
+void oberon_check_array_copy(int32_t source_length, int32_t destination_length)
+{
+    if (source_length > destination_length) {
+        fputs("array assignment exceeds destination length\n", stderr);
+        exit(1);
+    }
+}
+
 /* Report 9.1: an array assignment copies the value. memmove rather than memcpy
    because assigning a variable to itself is legal and has to mean something.
    A count of zero is the ordinary result of copying a zero-length array. */

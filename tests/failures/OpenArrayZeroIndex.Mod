@@ -1,0 +1,7 @@
+MODULE OpenArrayZeroIndex;
+VAR a: ARRAY 0 OF INTEGER;
+    n: INTEGER;
+PROCEDURE Fail(x: ARRAY OF INTEGER): INTEGER;
+BEGIN RETURN x[0] END Fail;
+BEGIN n := Fail(a)
+END OpenArrayZeroIndex.

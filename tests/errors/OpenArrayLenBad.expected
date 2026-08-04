@@ -1,0 +1,6 @@
+tests/errors/OpenArrayLenBad.Mod:7:19: LEN of an open array is not a constant
+tests/errors/OpenArrayLenBad.Mod:9:24: LEN of an open array is not a constant
+tests/errors/OpenArrayLenBad.Mod:12:14: cannot select 'missing' from ARRAY OF ARRAY OF INTEGER: only a record has fields
+tests/errors/OpenArrayLenBad.Mod:13:9: cannot index INTEGER: only an array can be indexed
+tests/errors/OpenArrayLenBad.Mod:14:10: array index must be INTEGER, found BOOLEAN
+Error: 5 error(s)

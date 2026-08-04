@@ -197,14 +197,17 @@ pub enum Inst {
     // checking `0 <= index < len`. The applicable length travels with the
     // instruction rather than being recovered from the base allocation,
     // because the base of an inner dimension is an address with no allocation
-    // of its own, and because an open array will supply a dynamic length here
-    // without changing the address rule.
+    // of its own, and because an open dimension's length exists only as an
+    // incoming value that no allocation records.
     Index {
         dst: usize,
         base: Addr,
         index: Value,
-        len: i32,
+        len: Value,
+        // The byte stride is `stride` multiplied by each dynamic inner
+        // length. Fixed inner dimensions are already folded into stride.
         stride: i64,
+        dynamic_stride: Vec<Value>,
     },
     // The address of one field: `dst = base + offset`. The offset is the one
     // the record's layout assigned, so nothing downstream recomputes it, and
@@ -221,6 +224,23 @@ pub enum Inst {
         dst: Addr,
         src: Addr,
         size: i64,
+    },
+    // Report 9.1's open-array assignment fits only when the source is no
+    // longer than the destination. The check is its own instruction so it can
+    // be emitted before the copy and fail without moving a byte.
+    CheckArrayCopy {
+        source_len: Value,
+        destination_len: Value,
+    },
+    // Copy `count` elements whose complete immediate type occupies `stride`
+    // bytes. The count is an INTEGER value and is widened before byte
+    // multiplication in the backend.
+    CopyElements {
+        temp: usize,
+        dst: Addr,
+        src: Addr,
+        count: Value,
+        stride: i64,
     },
     Call {
         dst: Option<(usize, Ty)>,

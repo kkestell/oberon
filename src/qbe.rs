@@ -178,16 +178,39 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
             index,
             len,
             stride,
+            dynamic_stride,
         } => {
             writeln!(
                 out,
-                "\tcall $oberon_check_index(w {}, w {len})",
-                value(index)
+                "\tcall $oberon_check_index(w {}, w {})",
+                value(index),
+                value(len)
             )
             .unwrap();
             writeln!(out, "\t%.x{dst} =l extsw {}", value(index)).unwrap();
-            writeln!(out, "\t%.s{dst} =l mul %.x{dst}, {stride}").unwrap();
-            writeln!(out, "\t{} =l add {}, %.s{dst}", temp(*dst), address(base)).unwrap();
+            if dynamic_stride.is_empty() {
+                writeln!(out, "\t%.s{dst} =l mul %.x{dst}, {stride}").unwrap();
+                writeln!(out, "\t{} =l add {}, %.s{dst}", temp(*dst), address(base)).unwrap();
+            } else {
+                writeln!(out, "\t%.s{dst}.0 =l mul %.x{dst}, {stride}").unwrap();
+                for (i, factor) in dynamic_stride.iter().enumerate() {
+                    writeln!(out, "\t%.f{dst}.{i} =l extsw {}", value(factor)).unwrap();
+                    writeln!(
+                        out,
+                        "\t%.s{dst}.{} =l mul %.s{dst}.{i}, %.f{dst}.{i}",
+                        i + 1
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "\t{} =l add {}, %.s{dst}.{}",
+                    temp(*dst),
+                    address(base),
+                    dynamic_stride.len()
+                )
+                .unwrap();
+            }
         }
         // One add, offset zero included: there is no optimization pass, and
         // one literal path is the same choice the constant index made.
@@ -198,6 +221,35 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
             writeln!(
                 out,
                 "\tcall $oberon_copy(l {}, l {}, l {size})",
+                address(dst),
+                address(src)
+            )
+            .unwrap();
+        }
+        ir::Inst::CheckArrayCopy {
+            source_len,
+            destination_len,
+        } => {
+            writeln!(
+                out,
+                "\tcall $oberon_check_array_copy(w {}, w {})",
+                value(source_len),
+                value(destination_len)
+            )
+            .unwrap();
+        }
+        ir::Inst::CopyElements {
+            temp: copy_temp,
+            dst,
+            src,
+            count,
+            stride,
+        } => {
+            writeln!(out, "\t%.c{copy_temp} =l extsw {}", value(count)).unwrap();
+            writeln!(out, "\t%.b{copy_temp} =l mul %.c{copy_temp}, {stride}").unwrap();
+            writeln!(
+                out,
+                "\tcall $oberon_copy(l {}, l {}, l %.b{copy_temp})",
                 address(dst),
                 address(src)
             )

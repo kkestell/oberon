@@ -108,13 +108,14 @@ pub struct ProcDecl {
     pub ret_val: Option<Expr>,
 }
 
-// FormalType = {ARRAY OF} qualident, so a formal is always Named until open
-// arrays arrive. It is a TypeExpr anyway so sema resolves every source type
-// through one path and can reject a formal that turns out to be an array.
+// FormalType = {ARRAY OF} qualident. The ordinary TypeExpr stays unable to
+// represent an open array, so only this formal-parameter production can make
+// one. Each position names one ARRAY prefix, outermost first.
 #[derive(Debug, Clone)]
 pub struct FpSection {
     pub var: bool,
     pub names: Vec<(String, Pos)>,
+    pub open_arrays: Vec<Pos>,
     pub ty: TypeExpr,
 }
 

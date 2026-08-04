@@ -48,6 +48,9 @@ pub enum Type {
     // declaration's names, an alias, an interface member, and a client's view
     // of an exported type all hold the same handle.
     Array(Rc<ArrayType>),
+    // Report 10.1. An open array exists only as a formal type. It owns no
+    // layout; a bound for this dimension arrives beside the data address.
+    OpenArray(Box<Type>),
     // Report 6.3, under the same identity rule as Array: one RECORD
     // constructor in the source is one type.
     Record(Rc<RecordType>),
@@ -156,7 +159,7 @@ impl Type {
             Type::Set => Some(ir::Ty::Set),
             Type::Char | Type::Byte => Some(ir::Ty::Byte),
             Type::Pointer(_) | Type::Nil => Some(ir::Ty::Pointer),
-            Type::String(_) | Type::Array(_) | Type::Record(_) => None,
+            Type::String(_) | Type::Array(_) | Type::OpenArray(_) | Type::Record(_) => None,
         }
     }
 
@@ -169,6 +172,25 @@ impl Type {
         match self {
             Type::Array(array) => Some(array),
             _ => None,
+        }
+    }
+
+    fn array_elem(&self) -> Option<&Type> {
+        match self {
+            Type::Array(array) => Some(&array.elem),
+            Type::OpenArray(elem) => Some(elem),
+            _ => None,
+        }
+    }
+
+    fn is_array(&self) -> bool {
+        self.array_elem().is_some()
+    }
+
+    fn open_rank(&self) -> usize {
+        match self {
+            Type::OpenArray(elem) => 1 + elem.open_rank(),
+            _ => 0,
         }
     }
 
@@ -190,22 +212,20 @@ impl Type {
     // are the types that live in storage and travel by address: a parameter of
     // one is a reference, and an assignment between two of them is a copy.
     fn structured(&self) -> bool {
-        matches!(self, Type::Array(_) | Type::Record(_))
+        matches!(self, Type::Array(_) | Type::OpenArray(_) | Type::Record(_))
     }
 
-    // The declared length, when this is a character array: a one-dimensional
-    // array whose element type is CHAR. Report 9.1's string assignment and
-    // 8.2.4's array relations apply to exactly these.
-    fn char_array(&self) -> Option<i32> {
-        match self {
-            Type::Array(array) if array.elem == Type::Char => Some(array.len),
-            _ => None,
-        }
+    // A one-dimensional fixed or open array whose element type is CHAR.
+    // Report 9.1's string assignment and 8.2.4's array relations apply to
+    // exactly these; the place supplies its fixed or dynamic bound.
+    fn char_array(&self) -> bool {
+        matches!(self.array_elem(), Some(Type::Char))
     }
 
     fn size(&self) -> i64 {
         match self {
             Type::Array(array) => array.size,
+            Type::OpenArray(_) => panic!("an open array has no storage size"),
             Type::Record(record) => record.size,
             Type::Nil => panic!("NIL has no storage size"),
             scalar => ir::scalar_size(scalar.ir()),
@@ -219,6 +239,7 @@ impl Type {
     fn align(&self) -> i64 {
         match self {
             Type::Array(array) => array.elem.align(),
+            Type::OpenArray(_) => panic!("an open array has no storage alignment"),
             Type::Record(record) => record.align,
             Type::Nil => panic!("NIL has no storage alignment"),
             scalar => ir::scalar_size(scalar.ir()),
@@ -231,6 +252,7 @@ impl Type {
                 len: array.len,
                 elem: Box::new(array.elem.storage()),
             },
+            Type::OpenArray(_) => panic!("an open array has no storage"),
             Type::Record(record) => ir::Storage::Record {
                 size: record.size,
                 align: record.align,
@@ -244,6 +266,7 @@ impl Type {
         match self {
             Type::Pointer(_) => true,
             Type::Array(array) => array.len > 0 && array.elem.contains_pointers(),
+            Type::OpenArray(_) => panic!("an open array owns no pointer-containing storage"),
             Type::Record(record) => record.contains_pointers,
             _ => false,
         }
@@ -282,6 +305,7 @@ impl PartialEq for Type {
             | (Type::Byte, Type::Byte) => true,
             (Type::String(a), Type::String(b)) => a == b,
             (Type::Array(a), Type::Array(b)) => Rc::ptr_eq(a, b),
+            (Type::OpenArray(a), Type::OpenArray(b)) => a == b,
             (Type::Record(a), Type::Record(b)) => Rc::ptr_eq(a, b),
             (Type::Pointer(a), Type::Pointer(b)) => Rc::ptr_eq(a, b),
             (Type::Nil, Type::Nil) => true,
@@ -304,6 +328,7 @@ impl fmt::Display for Type {
             Type::String(1) => write!(f, "string of 1 character"),
             Type::String(n) => write!(f, "string of {n} characters"),
             Type::Array(array) => write!(f, "ARRAY {} OF {}", array.len, array.elem),
+            Type::OpenArray(elem) => write!(f, "ARRAY OF {elem}"),
             // A record's field list would swamp the message it appears in, so
             // the declared name stands for it. A constructor written inline in
             // a variable declaration or a field list never had one.
@@ -380,6 +405,7 @@ enum Symbol {
     Var {
         ty: Type,
         addr: ir::Addr,
+        shape: Vec<ir::Value>,
         // Set on an imported variable, and while a FOR statement's body is
         // being lowered so the body cannot move its own control variable.
         read_only: bool,
@@ -435,6 +461,7 @@ impl Member {
             Member::Var { ty, symbol } => Symbol::Var {
                 ty: ty.clone(),
                 addr: ir::Addr::Global(symbol.clone()),
+                shape: fixed_shape(ty),
                 read_only: true,
             },
             Member::Proc {
@@ -514,6 +541,10 @@ fn universe_scope() -> Scope {
 struct Place {
     addr: ir::Addr,
     ty: Type,
+    // One length for every array constructor reachable by indexing from this
+    // place. Open dimensions hold incoming temporaries; fixed dimensions hold
+    // immediates. Indexing consumes the first entry.
+    shape: Vec<ir::Value>,
     read_only: bool,
 }
 
@@ -776,6 +807,7 @@ impl Analyzer {
                     Symbol::Var {
                         ty: ty.clone(),
                         addr,
+                        shape: fixed_shape(&ty),
                         read_only: false,
                     },
                 ) {
@@ -806,7 +838,7 @@ impl Analyzer {
         let mut formals = Vec::new();
         let mut params_ok = true;
         for section in &declaration.params {
-            let Some(ty) = self.resolve_type(&section.ty) else {
+            let Some(ty) = self.resolve_formal_type(section) else {
                 params_ok = false;
                 continue;
             };
@@ -888,17 +920,28 @@ impl Analyzer {
                     ir::ParamPass::Value(ty.ir())
                 },
             });
+            let mut open_lengths = Vec::new();
+            for _ in 0..ty.open_rank() {
+                let length = self.builder().temp();
+                self.builder().proc.params.push(ir::Param {
+                    temp: length,
+                    pass: ir::ParamPass::Value(ir::Ty::Int),
+                });
+                open_lengths.push(ir::Value::Temp(length));
+            }
             let addr = if by_ref {
                 ir::Addr::Temp(temp)
             } else {
                 ir::Addr::Slot(name.clone())
             };
+            let shape = shape_with_open_lengths(&ty, &open_lengths);
             if self.declare(
                 &name,
                 pos,
                 Symbol::Var {
                     ty: ty.clone(),
                     addr: addr.clone(),
+                    shape,
                     // Read-only in its entirety, all the way down: the place
                     // walk carries the flag through every field and element.
                     read_only: !var && ty.structured(),
@@ -942,6 +985,7 @@ impl Analyzer {
                     Symbol::Var {
                         ty: ty.clone(),
                         addr,
+                        shape: fixed_shape(&ty),
                         read_only: false,
                     },
                 ) {
@@ -1102,7 +1146,9 @@ impl Analyzer {
                     addr: target.addr,
                 });
             }
-            (Some(AssignKind::StringCopy), Source::Str(bytes)) => {
+            // The fixed and open destinations differ only in where the fit is
+            // decided, which copy_string reads off the destination type.
+            (Some(AssignKind::StringCopy | AssignKind::OpenStringCopy), Source::Str(bytes)) => {
                 self.copy_string(&bytes, target, rhs.pos());
             }
             (Some(AssignKind::WholeCopy), Source::Structured(source)) => {
@@ -1114,6 +1160,25 @@ impl Analyzer {
                     dst: target.addr,
                     src: source.addr,
                     size: target.ty.size(),
+                });
+            }
+            (Some(AssignKind::OpenPrefixCopy), Source::Structured(source)) => {
+                let source_len = source.shape[0].clone();
+                let destination_len = target.shape[0].clone();
+                self.emit(ir::Inst::CheckArrayCopy {
+                    source_len: source_len.clone(),
+                    destination_len,
+                });
+                let Type::Array(array) = &target.ty else {
+                    unreachable!("an open prefix copies into a fixed array")
+                };
+                let temp = self.temp();
+                self.emit(ir::Inst::CopyElements {
+                    temp,
+                    dst: target.addr,
+                    src: source.addr,
+                    count: source_len,
+                    stride: array.elem.size(),
                 });
             }
             (Some(_), _) => unreachable!("assign_kind agrees with the source's shape"),
@@ -1132,26 +1197,34 @@ impl Analyzer {
     // of the destination untouched; cf. Project Oberon, whose word-at-a-time
     // copy can write up to three bytes past the terminator.
     fn copy_string(&mut self, bytes: &[u8], target: Place, pos: Pos) {
-        let len = target
-            .ty
-            .char_array()
-            .expect("assign_kind chose a character array");
-        if bytes.len() as i64 >= i64::from(len) {
-            self.diags.push(Diagnostic::new(
-                pos,
-                format!(
-                    "a {} and its null terminator do not fit in {}",
-                    Type::String(bytes.len()),
-                    target.ty
-                ),
-            ));
-            return;
+        assert!(
+            target.ty.char_array(),
+            "assign_kind chose a character array"
+        );
+        let count = i32::try_from(bytes.len() + 1).expect("a string fits the source file");
+        if let Type::Array(array) = &target.ty {
+            if count > array.len {
+                self.diags.push(Diagnostic::new(
+                    pos,
+                    format!(
+                        "a {} and its null terminator do not fit in {}",
+                        Type::String(bytes.len()),
+                        target.ty
+                    ),
+                ));
+                return;
+            }
+        } else {
+            self.emit(ir::Inst::CheckArrayCopy {
+                source_len: ir::Value::Int(count),
+                destination_len: target.shape[0].clone(),
+            });
         }
         let src = self.literal(bytes);
         self.emit(ir::Inst::CopyBytes {
             dst: target.addr,
             src,
-            size: bytes.len() as i64 + 1,
+            size: i64::from(count),
         });
     }
 
@@ -2121,7 +2194,7 @@ impl Analyzer {
 
         let stringy = |source: &Source| match source {
             Source::Str(_) => true,
-            Source::Structured(place) => place.ty.char_array().is_some(),
+            Source::Structured(place) => place.ty.char_array(),
             Source::Value(..) => false,
         };
         let is_array = |source: &Source| matches!(source, Source::Structured(_));
@@ -2132,9 +2205,9 @@ impl Analyzer {
                 "oberon_str_cmp",
                 vec![
                     ir::Arg::Ref(lhs_addr),
-                    ir::Arg::Val(ir::Ty::Int, ir::Value::Int(lhs_len)),
+                    ir::Arg::Val(ir::Ty::Int, lhs_len),
                     ir::Arg::Ref(rhs_addr),
-                    ir::Arg::Val(ir::Ty::Int, ir::Value::Int(rhs_len)),
+                    ir::Arg::Val(ir::Ty::Int, rhs_len),
                 ],
                 ir::Ty::Int,
             );
@@ -2188,18 +2261,15 @@ impl Analyzer {
     // that bounds the walk. A character array is bounded by its declared
     // length, and a string by its character count plus one for the
     // terminator its data object carries.
-    fn cmp_operand(&mut self, source: Source) -> (ir::Addr, i32) {
+    fn cmp_operand(&mut self, source: Source) -> (ir::Addr, ir::Value) {
         match source {
             Source::Structured(place) => {
-                let len = place
-                    .ty
-                    .char_array()
-                    .expect("the operand was checked to be a character array");
-                (place.addr, len)
+                assert!(place.ty.char_array(), "the operand is a character array");
+                (place.addr, place.shape[0].clone())
             }
             Source::Str(bytes) => {
                 let len = i32::try_from(bytes.len() + 1).expect("a literal fits the source file");
-                (self.literal(&bytes), len)
+                (self.literal(&bytes), ir::Value::Int(len))
             }
             Source::Value(..) => unreachable!("the operand was checked to be characters"),
         }
@@ -2306,15 +2376,24 @@ impl Analyzer {
             // expression is lowered so it reports as a string where a
             // variable is required rather than as a CHAR mismatch.
             if var || expected.structured() {
-                if expected.structured() && self.is_string_expr(actual) {
-                    self.diags.push(Diagnostic::new(
-                        actual.pos(),
-                        format!(
-                            "argument {} is a string where a variable is required",
-                            i + 1
-                        ),
-                    ));
-                    ok = false;
+                if expected.structured()
+                    && let Some(bytes) = self.string_expr(actual)
+                {
+                    if !var && open_string_formal(&expected) {
+                        let len = i32::try_from(bytes.len() + 1)
+                            .expect("a string literal fits the source file");
+                        args.push(ir::Arg::Ref(self.literal(&bytes)));
+                        args.push(ir::Arg::Val(ir::Ty::Int, ir::Value::Int(len)));
+                    } else {
+                        self.diags.push(Diagnostic::new(
+                            actual.pos(),
+                            format!(
+                                "argument {} is a string where a variable is required",
+                                i + 1
+                            ),
+                        ));
+                        ok = false;
+                    }
                     continue;
                 }
                 // A structured value actual is a read, so a read-only
@@ -2322,15 +2401,23 @@ impl Analyzer {
                 // parameter — may be passed on. A VAR actual will be written
                 // and may not be.
                 match self.ref_actual(actual, i + 1, var) {
-                    Some((addr, found)) => {
-                        if found == expected {
-                            args.push(ir::Arg::Ref(addr));
+                    Some(place) => {
+                        let compatible = if expected.open_rank() > 0 {
+                            open_actual_compatible(&expected, &place.ty)
+                        } else {
+                            place.ty == expected
+                        };
+                        if compatible {
+                            args.push(ir::Arg::Ref(place.addr));
+                            for length in place.shape.iter().take(expected.open_rank()) {
+                                args.push(ir::Arg::Val(ir::Ty::Int, length.clone()));
+                            }
                         } else {
                             self.diags.push(argument_type_error(
                                 actual.pos(),
                                 i + 1,
                                 &expected,
-                                &found,
+                                &place.ty,
                             ));
                             ok = false;
                         }
@@ -2516,14 +2603,14 @@ impl Analyzer {
             return None;
         };
         let place = self.place(designator, "argument 1 must be an array variable".into())?;
-        let Some(array) = place.ty.array() else {
+        if !place.ty.is_array() {
             self.diags.push(Diagnostic::new(
                 actuals[0].pos(),
                 format!("argument 1 has type {}, expected an array", place.ty),
             ));
             return None;
-        };
-        Some((Some(ir::Value::Int(array.len)), Some(Type::Integer)))
+        }
+        Some((Some(place.shape[0].clone()), Some(Type::Integer)))
     }
 
     // Report 10.2: PACK(x, n) is x := x * 2^n on a writable REAL variable.
@@ -2958,18 +3045,14 @@ impl Analyzer {
     // selected element reaches a VAR parameter with no extra machinery.
     fn var_actual(&mut self, actual: &ast::Expr, number: usize) -> Option<(ir::Addr, Type)> {
         self.ref_actual(actual, number, true)
+            .map(|place| (place.addr, place.ty))
     }
 
     // The address an actual supplies to a reference formal. `writable` is
     // false only for a structured value actual, which is a read and therefore
     // the one reference an imported variable or another structured value
     // parameter can be.
-    fn ref_actual(
-        &mut self,
-        actual: &ast::Expr,
-        number: usize,
-        writable: bool,
-    ) -> Option<(ir::Addr, Type)> {
+    fn ref_actual(&mut self, actual: &ast::Expr, number: usize, writable: bool) -> Option<Place> {
         let ast::Expr::Name(designator) = actual else {
             let _ = self.lower_expr(actual);
             self.diags.push(Diagnostic::new(
@@ -2986,20 +3069,20 @@ impl Analyzer {
             ));
             return None;
         }
-        Some((place.addr, place.ty))
+        Some(place)
     }
 
     // A string in actual-parameter position: a literal or a constant declared
     // from one. Recognized before lowering, the way every context that treats
     // a string specially examines the expression first.
-    fn is_string_expr(&self, expr: &ast::Expr) -> bool {
+    fn string_expr(&self, expr: &ast::Expr) -> Option<Rc<Vec<u8>>> {
         match expr {
-            ast::Expr::Str { .. } => true,
-            ast::Expr::Name(designator) => matches!(
-                self.qualident(designator),
-                Ok((Symbol::Const(ConstValue::Str(_)), []))
-            ),
-            _ => false,
+            ast::Expr::Str { bytes, .. } => Some(Rc::new(bytes.clone())),
+            ast::Expr::Name(designator) => match self.qualident(designator) {
+                Ok((Symbol::Const(ConstValue::Str(bytes)), [])) => Some(bytes),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -3018,6 +3101,7 @@ impl Analyzer {
         let Symbol::Var {
             ty,
             addr,
+            shape,
             read_only,
         } = symbol
         else {
@@ -3028,6 +3112,7 @@ impl Analyzer {
         let mut place = Place {
             addr,
             ty,
+            shape,
             read_only,
         };
         for selector in rest {
@@ -3085,6 +3170,7 @@ impl Analyzer {
         });
         Some(Place {
             addr: ir::Addr::Temp(dst),
+            shape: fixed_shape(&ty),
             ty,
             read_only: base.read_only,
         })
@@ -3112,6 +3198,7 @@ impl Analyzer {
         Some(Place {
             addr: ir::Addr::Temp(temp),
             ty: Type::Record(record),
+            shape: Vec::new(),
             read_only: base.read_only,
         })
     }
@@ -3122,7 +3209,7 @@ impl Analyzer {
     // check and no invalid address is ever computed.
     fn index(&mut self, base: Place, expr: &ast::Expr, pos: Pos) -> Option<Place> {
         let index = self.lower_int(expr, "array index");
-        let Some(array) = base.ty.array().cloned() else {
+        let Some(elem) = base.ty.array_elem().cloned() else {
             self.diags.push(Diagnostic::new(
                 pos,
                 format!("cannot index {}: only an array can be indexed", base.ty),
@@ -3134,32 +3221,44 @@ impl Analyzer {
         // out-of-range SET element is. A valid constant one still takes the
         // ordinary checked lowering; there is no optimization pass, and one
         // executable path is what makes the IR invariant literal.
-        match self.try_eval_const(expr) {
-            Ok(Some(ConstValue::Int(value))) => {
-                if !(0..array.len).contains(&value) {
-                    self.diags
-                        .push(index_range_error(expr.pos(), value, array.len));
+        if let Some(array) = base.ty.array() {
+            match self.try_eval_const(expr) {
+                Ok(Some(ConstValue::Int(value))) => {
+                    if !(0..array.len).contains(&value) {
+                        self.diags
+                            .push(index_range_error(expr.pos(), value, array.len));
+                        return None;
+                    }
+                }
+                Ok(Some(_)) => unreachable!("the index was type-checked as INTEGER"),
+                Ok(None) => {}
+                Err(diag) => {
+                    self.diags.push(diag);
                     return None;
                 }
             }
-            Ok(Some(_)) => unreachable!("the index was type-checked as INTEGER"),
-            Ok(None) => {}
-            Err(diag) => {
-                self.diags.push(diag);
-                return None;
-            }
         }
+        let len = base
+            .shape
+            .first()
+            .cloned()
+            .expect("an array place has a length");
+        let remaining_shape = base.shape[1..].to_vec();
+        let dynamic_count = elem.open_rank();
+        let fixed_base = open_base(&elem);
         let dst = self.temp();
         self.emit(ir::Inst::Index {
             dst,
             base: base.addr,
             index,
-            len: array.len,
-            stride: array.elem.size(),
+            len,
+            stride: fixed_base.size(),
+            dynamic_stride: remaining_shape[..dynamic_count].to_vec(),
         });
         Some(Place {
             addr: ir::Addr::Temp(dst),
-            ty: array.elem.clone(),
+            ty: elem,
+            shape: remaining_shape,
             // Report 9.1: an imported variable is read-only, and selecting
             // part of it does not make that part writable.
             read_only: base.read_only,
@@ -3363,7 +3462,14 @@ impl Analyzer {
                 // reference formals, structured value formals included, so
                 // the constant precheck cannot accept what lowering rejects.
                 && if *var || expected.structured() {
-                    found != *expected
+                    if expected.open_rank() > 0 {
+                        !(open_actual_compatible(expected, &found)
+                            || (!*var
+                                && matches!(found, Type::String(_))
+                                && open_string_formal(expected)))
+                    } else {
+                        found != *expected
+                    }
                 } else {
                     assign_kind(expected, &found).is_none()
                 }
@@ -3479,7 +3585,7 @@ impl Analyzer {
             return None;
         };
         let ty = self.check_len_designator_type(designator)?;
-        if ty.array().is_some() {
+        if ty.is_array() {
             Some(Type::Integer)
         } else {
             self.diags.push(Diagnostic::new(
@@ -3762,7 +3868,7 @@ impl Analyzer {
                 },
                 ast::Selector::Index(exprs, pos) => {
                     for expr in exprs {
-                        let Some(array) = ty.array().cloned() else {
+                        let Some(elem) = ty.array_elem().cloned() else {
                             self.diags.push(Diagnostic::new(
                                 *pos,
                                 format!("cannot index {ty}: only an array can be indexed"),
@@ -3788,12 +3894,14 @@ impl Analyzer {
                                 return None;
                             }
                         };
-                        if !(0..array.len).contains(&value) {
+                        if let Some(array) = ty.array()
+                            && !(0..array.len).contains(&value)
+                        {
                             self.diags
                                 .push(index_range_error(expr.pos(), value, array.len));
                             return None;
                         }
-                        ty = array.elem.clone();
+                        ty = elem;
                     }
                 }
                 ast::Selector::Deref(pos) => match self.const_dereference(&ty, *pos) {
@@ -3849,7 +3957,7 @@ impl Analyzer {
                 },
                 ast::Selector::Index(exprs, pos) => {
                     for expr in exprs {
-                        let Some(array) = ty.array().cloned() else {
+                        let Some(elem) = ty.array_elem().cloned() else {
                             self.diags.push(Diagnostic::new(
                                 *pos,
                                 format!("cannot index {ty}: only an array can be indexed"),
@@ -3872,21 +3980,26 @@ impl Analyzer {
                             None => return None,
                         }
                         match self.try_eval_const(expr) {
-                            Ok(Some(ConstValue::Int(value)))
-                                if !(0..array.len).contains(&value) =>
-                            {
-                                self.diags
-                                    .push(index_range_error(expr.pos(), value, array.len));
-                                return None;
+                            Ok(Some(ConstValue::Int(value))) => {
+                                if let Some(array) = ty.array()
+                                    && !(0..array.len).contains(&value)
+                                {
+                                    self.diags.push(index_range_error(
+                                        expr.pos(),
+                                        value,
+                                        array.len,
+                                    ));
+                                    return None;
+                                }
                             }
-                            Ok(Some(ConstValue::Int(_))) | Ok(None) => {}
+                            Ok(None) => {}
                             Ok(Some(_)) => unreachable!("index was type-checked as INTEGER"),
                             Err(diag) => {
                                 self.diags.push(diag);
                                 return None;
                             }
                         }
-                        ty = array.elem.clone();
+                        ty = elem;
                     }
                 }
             }
@@ -3915,7 +4028,7 @@ impl Analyzer {
                 ast::Selector::Deref(pos) => ty = self.const_dereference(&ty, *pos)?,
                 ast::Selector::Index(exprs, pos) => {
                     for expr in exprs {
-                        let Some(array) = ty.array() else {
+                        let Some(elem) = ty.array_elem() else {
                             return Err(Diagnostic::new(
                                 *pos,
                                 format!("cannot index {ty}: only an array can be indexed"),
@@ -3924,7 +4037,7 @@ impl Analyzer {
                         if let Some(diag) = self.const_index_call(expr) {
                             return Err(diag);
                         }
-                        ty = array.elem.clone();
+                        ty = elem.clone();
                     }
                 }
             }
@@ -4023,6 +4136,12 @@ impl Analyzer {
     // constant: a fixed length is a property of its type.
     fn const_array_type(&self, designator: &ast::Designator) -> Result<Rc<ArrayType>, Diagnostic> {
         let ty = self.len_designator_type(designator)?;
+        if matches!(ty, Type::OpenArray(_)) {
+            return Err(Diagnostic::new(
+                designator.pos,
+                "LEN of an open array is not a constant",
+            ));
+        }
         ty.array().cloned().ok_or_else(|| {
             Diagnostic::new(
                 designator.pos,
@@ -4046,6 +4165,14 @@ impl Analyzer {
 
     fn resolve_type(&mut self, source: &ast::TypeExpr) -> Option<Type> {
         self.resolve_type_named(source, None)
+    }
+
+    fn resolve_formal_type(&mut self, section: &ast::FpSection) -> Option<Type> {
+        let mut ty = self.resolve_type(&section.ty)?;
+        for _ in section.open_arrays.iter().rev() {
+            ty = Type::OpenArray(Box::new(ty));
+        }
+        Some(ty)
     }
 
     // `name` is the type declaration this constructor is the right side of, if
@@ -4678,15 +4805,37 @@ enum AssignKind {
     // appended. The length rule is checked at the assignment, the one site
     // that can reach this.
     StringCopy,
+    // The same string rule with a dynamic open destination capacity. The
+    // statement emits the runtime fit check before its fixed-size copy.
+    OpenStringCopy,
     // Report 9.1: two identical structured types copy the whole
     // representation, padding included. For records the Report asks for the
     // source to be an extension of the destination, which reduces to identity
     // until extension exists.
     WholeCopy,
+    // Report 9.1's open-array exception. The statement checks a dynamic
+    // source length against a fixed destination before copying that prefix.
+    OpenPrefixCopy,
+}
+
+fn open_actual_compatible(formal: &Type, actual: &Type) -> bool {
+    match formal {
+        Type::OpenArray(formal_elem) => actual
+            .array_elem()
+            .is_some_and(|actual_elem| open_actual_compatible(formal_elem, actual_elem)),
+        _ => formal == actual,
+    }
+}
+
+fn open_string_formal(ty: &Type) -> bool {
+    matches!(ty, Type::OpenArray(elem) if **elem == Type::Char)
 }
 
 fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
     if target == found {
+        if matches!(target, Type::OpenArray(_)) {
+            return None;
+        }
         return Some(if target.structured() {
             AssignKind::WholeCopy
         } else {
@@ -4697,8 +4846,12 @@ fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
         (Type::Pointer(_), _) if pointer_value_compatible(target, found) => Some(AssignKind::Store),
         (Type::Byte, Type::Integer) => Some(AssignKind::ByteRange),
         (Type::Char, Type::String(1)) => Some(AssignKind::CharFromString),
-        (Type::Array(_), Type::String(_)) if target.char_array().is_some() => {
-            Some(AssignKind::StringCopy)
+        (Type::Array(_), Type::String(_)) if target.char_array() => Some(AssignKind::StringCopy),
+        (Type::OpenArray(_), Type::String(_)) if target.char_array() => {
+            Some(AssignKind::OpenStringCopy)
+        }
+        (Type::Array(target), Type::OpenArray(source)) if target.elem == **source => {
+            Some(AssignKind::OpenPrefixCopy)
         }
         _ => None,
     }
@@ -4817,9 +4970,9 @@ fn text_relation_ok(lhs: &Type, rhs: &Type) -> bool {
     ) {
         return true;
     }
-    let lhs_text = lhs.char_array().is_some() || matches!(lhs, Type::String(_));
-    let rhs_text = rhs.char_array().is_some() || matches!(rhs, Type::String(_));
-    lhs_text && rhs_text && (lhs.char_array().is_some() || rhs.char_array().is_some())
+    let lhs_text = lhs.char_array() || matches!(lhs, Type::String(_));
+    let rhs_text = rhs.char_array() || matches!(rhs, Type::String(_));
+    lhs_text && rhs_text && (lhs.char_array() || rhs.char_array())
 }
 
 // Report 8.2 overloads "+", "-", "*", and "/". The first three take two
@@ -5058,6 +5211,52 @@ fn index_range_error(pos: Pos, index: i32, len: i32) -> Diagnostic {
         pos,
         format!("index {index} is out of bounds: the array has length {len}"),
     )
+}
+
+fn fixed_shape(ty: &Type) -> Vec<ir::Value> {
+    match ty {
+        Type::Array(array) => {
+            let mut shape = vec![ir::Value::Int(array.len)];
+            shape.extend(fixed_shape(&array.elem));
+            shape
+        }
+        Type::OpenArray(_) => panic!("an open array needs incoming lengths"),
+        _ => Vec::new(),
+    }
+}
+
+fn open_base(mut ty: &Type) -> &Type {
+    while let Type::OpenArray(elem) = ty {
+        ty = elem;
+    }
+    ty
+}
+
+fn shape_with_open_lengths(ty: &Type, open_lengths: &[ir::Value]) -> Vec<ir::Value> {
+    fn walk(ty: &Type, lengths: &[ir::Value], next: &mut usize, shape: &mut Vec<ir::Value>) {
+        match ty {
+            Type::OpenArray(elem) => {
+                shape.push(lengths[*next].clone());
+                *next += 1;
+                walk(elem, lengths, next, shape);
+            }
+            Type::Array(array) => {
+                shape.push(ir::Value::Int(array.len));
+                walk(&array.elem, lengths, next, shape);
+            }
+            _ => {}
+        }
+    }
+
+    let mut next = 0;
+    let mut shape = Vec::new();
+    walk(ty, open_lengths, &mut next, &mut shape);
+    assert_eq!(
+        next,
+        open_lengths.len(),
+        "every open length belongs to a dimension"
+    );
+    shape
 }
 
 // One object's contribution to a running frame or static-storage total, padded

@@ -1,0 +1,13 @@
+tests/errors/OpenArrayBad.Mod:21:7: argument 1 has type INTEGER, expected ARRAY OF INTEGER
+tests/errors/OpenArrayBad.Mod:22:7: argument 1 has type ARRAY 3 OF REAL, expected ARRAY OF INTEGER
+tests/errors/OpenArrayBad.Mod:23:7: argument 1 has type ARRAY 2 OF ARRAY 3 OF INTEGER, expected ARRAY OF INTEGER
+tests/errors/OpenArrayBad.Mod:24:7: argument 1 has type ARRAY 3 OF INTEGER, expected ARRAY OF ARRAY OF INTEGER
+tests/errors/OpenArrayBad.Mod:25:14: argument 1 has type ARRAY 1 OF ARRAY 2 OF INTEGER, expected ARRAY OF ARRAY 2 OF INTEGER
+tests/errors/OpenArrayBad.Mod:26:15: argument 1 has type ARRAY 1 OF S, expected ARRAY OF R
+tests/errors/OpenArrayBad.Mod:27:7: argument 1 is a string where a variable is required
+tests/errors/OpenArrayBad.Mod:28:7: argument 1 is a string where a variable is required
+tests/errors/OpenArrayBad.Mod:29:5: argument 1 is a string where a variable is required
+tests/errors/OpenArrayBad.Mod:30:3: wrong number of arguments: expected 1, found 0
+tests/errors/OpenArrayBad.Mod:31:3: wrong number of arguments: expected 1, found 2
+tests/errors/OpenArrayBad.Mod:31:13: 'ints' has type ARRAY 3 OF INTEGER and cannot be used as a value
+Error: 12 error(s)

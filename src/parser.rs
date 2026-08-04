@@ -377,14 +377,22 @@ impl Parser {
                     names.push(self.expect_ident("parameter name")?);
                 }
                 self.expect(Tok::Colon, "':'")?;
-                // FormalType = {ARRAY OF} qualident, so a structured formal is
-                // written as a named type and needs no syntax of its own. The
-                // open-array prefix is the one form still unsupported.
-                if *self.peek() == Tok::Array {
-                    return self.unsupported("ARRAY OF formal types");
+                // FormalType = {ARRAY OF} qualident. Keeping the prefixes
+                // outside TypeExpr prevents open arrays from appearing in an
+                // ordinary declaration.
+                let mut open_arrays = Vec::new();
+                while *self.peek() == Tok::Array {
+                    open_arrays.push(self.pos());
+                    self.advance();
+                    self.expect(Tok::Of, "'OF'")?;
                 }
                 let ty = TypeExpr::Named(self.qualident("parameter type name")?);
-                sections.push(FpSection { var, names, ty });
+                sections.push(FpSection {
+                    var,
+                    names,
+                    open_arrays,
+                    ty,
+                });
                 if *self.peek() != Tok::Semi {
                     break;
                 }
@@ -898,6 +906,14 @@ mod tests {
         }
     }
 
+    fn formal_shape(section: &FpSection) -> String {
+        format!(
+            "{}{}",
+            "ARRAY OF ".repeat(section.open_arrays.len()),
+            shape(&section.ty)
+        )
+    }
+
     #[test]
     fn exported_type_alias_and_arrays() {
         let m = module("TYPE Row* = ARRAY 8 OF INTEGER; Alias = Row; Grid = ARRAY 2 OF Row;");
@@ -1111,9 +1127,41 @@ mod tests {
             error("TYPE P = PROCEDURE (n: INTEGER);"),
             "not yet supported: PROCEDURE types"
         );
+    }
+
+    #[test]
+    fn open_array_formals() {
+        let m = module(
+            "TYPE Row = ARRAY 4 OF INTEGER;\n\
+             PROCEDURE P(a, b: ARRAY OF INTEGER; VAR grid: ARRAY OF ARRAY OF Row);\n\
+             PROCEDURE Q(bytes: ARRAY OF ARRAY OF ARRAY OF BYTE); END Q;\n\
+             END P;\n\
+             PROCEDURE R*(text: ARRAY OF CHAR); END R;",
+        );
+        let p = &m.procs[0];
+        assert_eq!(formal_shape(&p.params[0]), "ARRAY OF INTEGER");
+        assert_eq!(p.params[0].names.len(), 2);
+        assert!(!p.params[0].var);
+        assert_eq!(formal_shape(&p.params[1]), "ARRAY OF ARRAY OF Row");
+        assert!(p.params[1].var);
         assert_eq!(
-            error("PROCEDURE P(a: ARRAY OF INTEGER); END P;"),
-            "not yet supported: ARRAY OF formal types"
+            formal_shape(&p.procs[0].params[0]),
+            "ARRAY OF ARRAY OF ARRAY OF BYTE"
+        );
+        let r = &m.procs[1];
+        assert!(r.id.export);
+        assert_eq!(formal_shape(&r.params[0]), "ARRAY OF CHAR");
+    }
+
+    #[test]
+    fn malformed_open_array_formals() {
+        assert_eq!(
+            error("PROCEDURE P(a: ARRAY INTEGER); END P;"),
+            "expected 'OF', found Ident(\"INTEGER\")"
+        );
+        assert_eq!(
+            error("PROCEDURE P(a: ARRAY OF); END P;"),
+            "expected parameter type name, found RParen"
         );
     }
 }
