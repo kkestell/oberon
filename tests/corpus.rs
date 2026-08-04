@@ -114,6 +114,63 @@ fn root_filename_must_end_in_mod() {
     assert_eq!(compile.stderr, expected(root, source));
 }
 
+#[test]
+fn deeply_nested_source_compiles_and_runs() {
+    let parens = 850;
+    generated_module(
+        "DeepExprRegression",
+        format!(
+            "MODULE DeepExprRegression; VAR x: INTEGER; BEGIN x := {}1{} END DeepExprRegression.",
+            "(".repeat(parens),
+            ")".repeat(parens)
+        ),
+    );
+
+    let ifs = 700;
+    generated_module(
+        "DeepIfRegression",
+        format!(
+            "MODULE DeepIfRegression; VAR x: INTEGER; BEGIN x := 0; {}x := 1{} END DeepIfRegression.",
+            "IF x = 0 THEN ".repeat(ifs),
+            " END".repeat(ifs)
+        ),
+    );
+}
+
+fn generated_module(name: &str, text: String) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "oberon-generated-{}-{sequence}-{name}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap_or_else(|e| panic!("creating {}: {e}", directory.display()));
+    let source = directory.join(format!("{name}.Mod"));
+    fs::write(&source, text).unwrap_or_else(|e| panic!("writing {}: {e}", source.display()));
+
+    let compile = compile(root, &source);
+    assert!(
+        compile.status.success() && compile.stderr.is_empty(),
+        "{name}: compile failed ({}):\n{}",
+        compile.status,
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(root.join("build").join(name))
+        .output()
+        .unwrap_or_else(|e| panic!("running {name}: {e}"));
+    assert!(
+        run.status.success() && run.stdout.is_empty() && run.stderr.is_empty(),
+        "{name}: run failed ({}), stdout {:?}, stderr {:?}",
+        run.status,
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|e| panic!("removing {}: {e}", directory.display()));
+}
+
 fn modules(root: &Path, dir: &str) -> Vec<PathBuf> {
     // Relative to the root, so the compiler prints "tests/errors/X.Mod:2:8: ..."
     // and the .expected files are not tied to one checkout location.

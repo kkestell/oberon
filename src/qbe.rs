@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 
 use crate::ir;
@@ -7,16 +8,23 @@ use crate::ir;
 // rule that sema has already applied by this point.
 pub fn emit(program: &ir::Program) -> String {
     let mut out = String::new();
+    let names = Names::new(program);
     for module in &program.modules {
         for descriptor in &module.descriptors {
             match &descriptor.base {
                 Some(base) => writeln!(
                     out,
                     "data ${} = align 8 {{ l ${} }}",
-                    descriptor.symbol, base
+                    names.symbol(&descriptor.symbol),
+                    names.symbol(base)
                 )
                 .unwrap(),
-                None => writeln!(out, "data ${} = align 8 {{ l 0 }}", descriptor.symbol).unwrap(),
+                None => writeln!(
+                    out,
+                    "data ${} = align 8 {{ l 0 }}",
+                    names.symbol(&descriptor.symbol)
+                )
+                .unwrap(),
             }
         }
         for global in &module.globals {
@@ -25,7 +33,7 @@ pub fn emit(program: &ir::Program) -> String {
             writeln!(
                 out,
                 "data ${} = align {} {{ z {} }}",
-                global.symbol,
+                names.symbol(&global.symbol),
                 global.ty.align(),
                 global.ty.size()
             )
@@ -36,7 +44,12 @@ pub fn emit(program: &ir::Program) -> String {
             // every value including zero is emitted the same way. The
             // terminator the Report appends on assignment is part of the data
             // object, so one literal serves both the copy and the comparison.
-            write!(out, "data ${} = align 1 {{ b", literal.symbol).unwrap();
+            write!(
+                out,
+                "data ${} = align 1 {{ b",
+                names.symbol(&literal.symbol)
+            )
+            .unwrap();
             for byte in &literal.bytes {
                 write!(out, " {byte}").unwrap();
             }
@@ -50,7 +63,7 @@ pub fn emit(program: &ir::Program) -> String {
         }
 
         for proc in &module.procs {
-            emit_proc(&mut out, proc);
+            emit_proc(&mut out, proc, &names);
             writeln!(out).unwrap();
         }
     }
@@ -62,19 +75,30 @@ pub fn emit(program: &ir::Program) -> String {
     // already dependency-first, so each body runs after the bodies of every
     // module it imports, and exactly once.
     for module in &program.modules {
-        writeln!(out, "\tcall $.{}.init()", module.name).unwrap();
+        writeln!(
+            out,
+            "\tcall ${}()",
+            names.symbol(&format!(".{}.init", module.name))
+        )
+        .unwrap();
     }
     writeln!(out, "\tret 0").unwrap();
     writeln!(out, "}}").unwrap();
     out
 }
 
-fn emit_proc(out: &mut String, proc: &ir::Proc) {
+fn emit_proc(out: &mut String, proc: &ir::Proc, names: &Names) {
+    let slots: HashMap<_, _> = proc
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| (name.as_str(), format!("v{i}")))
+        .collect();
     write!(out, "function ").unwrap();
     if let Some(ty) = proc.ret {
         write!(out, "{} ", class(ty)).unwrap();
     }
-    write!(out, "${}(", proc.symbol).unwrap();
+    write!(out, "${}(", names.symbol(&proc.symbol)).unwrap();
     for (i, param) in proc.params.iter().enumerate() {
         if i != 0 {
             write!(out, ", ").unwrap();
@@ -92,7 +116,8 @@ fn emit_proc(out: &mut String, proc: &ir::Proc) {
         // over-aligned, which is harmless.
         writeln!(
             out,
-            "\t%{slot} =l {} {}",
+            "\t%{} =l {} {}",
+            slots[slot.as_str()],
             alloc(ty.align().max(4)),
             ty.size()
         )
@@ -107,7 +132,7 @@ fn emit_proc(out: &mut String, proc: &ir::Proc) {
                 "instruction after terminator must be a label"
             );
         }
-        emit_inst(out, inst);
+        emit_inst(out, inst, names, &slots);
         terminated = matches!(
             inst,
             ir::Inst::Jmp(_) | ir::Inst::Br { .. } | ir::Inst::Ret(_) | ir::Inst::Halt
@@ -119,7 +144,7 @@ fn emit_proc(out: &mut String, proc: &ir::Proc) {
     writeln!(out, "}}").unwrap();
 }
 
-fn emit_inst(out: &mut String, inst: &ir::Inst) {
+fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&str, String>) {
     match inst {
         ir::Inst::Label(label) => writeln!(out, "@{label}").unwrap(),
         ir::Inst::Load { dst, ty, addr } => {
@@ -129,24 +154,45 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
                 temp(*dst),
                 class(*ty),
                 load_op(*ty),
-                address(addr)
+                address(addr, names, slots)
             )
             .unwrap();
         }
         ir::Inst::Store { ty, val, addr } => {
-            writeln!(out, "\t{} {}, {}", store_op(*ty), value(val), address(addr)).unwrap();
+            writeln!(
+                out,
+                "\t{} {}, {}",
+                store_op(*ty),
+                value(val, names),
+                address(addr, names, slots)
+            )
+            .unwrap();
         }
         ir::Inst::Copy { dst, ty, src } => {
-            writeln!(out, "\t{} ={} copy {}", temp(*dst), class(*ty), value(src)).unwrap();
+            writeln!(
+                out,
+                "\t{} ={} copy {}",
+                temp(*dst),
+                class(*ty),
+                value(src, names)
+            )
+            .unwrap();
         }
         ir::Inst::Un { dst, op, ty, arg } => match op {
             ir::UnOp::Neg => {
-                writeln!(out, "\t{} ={} neg {}", temp(*dst), class(*ty), value(arg)).unwrap();
+                writeln!(
+                    out,
+                    "\t{} ={} neg {}",
+                    temp(*dst),
+                    class(*ty),
+                    value(arg, names)
+                )
+                .unwrap();
             }
             // QBE has no logical negation, so ~b is b = 0. The operand is
             // always BOOLEAN, which is already 0 or 1 in a word.
             ir::UnOp::Not => {
-                writeln!(out, "\t{} =w ceqw {}, 0", temp(*dst), value(arg)).unwrap();
+                writeln!(out, "\t{} =w ceqw {}, 0", temp(*dst), value(arg, names)).unwrap();
             }
         },
         ir::Inst::Bin {
@@ -162,22 +208,22 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
                 "\t{} ={result} {} {}, {}",
                 temp(*dst),
                 bin_op(*op, *ty),
-                value(lhs),
-                value(rhs)
+                value(lhs, names),
+                value(rhs, names)
             )
             .unwrap();
         }
         ir::Inst::IntToReal { dst, arg } => {
-            writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg)).unwrap();
+            writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg, names)).unwrap();
         }
         ir::Inst::CheckNil { pointer } => {
-            writeln!(out, "\tcall $oberon_check_nil(l {})", value(pointer)).unwrap();
+            writeln!(out, "\tcall $oberon_check_nil(l {})", value(pointer, names)).unwrap();
         }
         ir::Inst::CheckProcedure { procedure } => {
             writeln!(
                 out,
                 "\tcall $oberon_check_procedure(l {})",
-                value(procedure)
+                value(procedure, names)
             )
             .unwrap();
         }
@@ -194,8 +240,9 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
             };
             writeln!(
                 out,
-                "\t{} =l call ${symbol}(l {size}, l ${descriptor})",
-                temp(*dst)
+                "\t{} =l call ${symbol}(l {size}, l ${})",
+                temp(*dst),
+                names.symbol(descriptor)
             )
             .unwrap();
         }
@@ -204,7 +251,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
                 out,
                 "\t{} =l call $oberon_heap_descriptor(l {})",
                 temp(*dst),
-                value(pointer)
+                value(pointer, names)
             )
             .unwrap();
         }
@@ -215,9 +262,10 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
         } => {
             writeln!(
                 out,
-                "\t{} =w call $oberon_type_test_pointer(l {}, l ${target})",
+                "\t{} =w call $oberon_type_test_pointer(l {}, l ${})",
                 temp(*dst),
-                value(pointer)
+                value(pointer, names),
+                names.symbol(target)
             )
             .unwrap();
         }
@@ -228,9 +276,10 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
         } => {
             writeln!(
                 out,
-                "\t{} =w call $oberon_type_test_descriptor(l {}, l ${target})",
+                "\t{} =w call $oberon_type_test_descriptor(l {}, l ${})",
                 temp(*dst),
-                value(descriptor)
+                value(descriptor, names),
+                names.symbol(target)
             )
             .unwrap();
         }
@@ -249,19 +298,25 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
         } => {
             writeln!(
                 out,
-                "\tcall $oberon_check_index(w {}, w {})",
-                value(index),
-                value(len)
+                "\t%.i{dst} =w call $oberon_check_index(w {}, w {})",
+                value(index, names),
+                value(len, names)
             )
             .unwrap();
-            writeln!(out, "\t%.x{dst} =l extsw {}", value(index)).unwrap();
+            writeln!(out, "\t%.x{dst} =l extsw %.i{dst}").unwrap();
             if dynamic_stride.is_empty() {
                 writeln!(out, "\t%.s{dst} =l mul %.x{dst}, {stride}").unwrap();
-                writeln!(out, "\t{} =l add {}, %.s{dst}", temp(*dst), address(base)).unwrap();
+                writeln!(
+                    out,
+                    "\t{} =l add {}, %.s{dst}",
+                    temp(*dst),
+                    address(base, names, slots)
+                )
+                .unwrap();
             } else {
                 writeln!(out, "\t%.s{dst}.0 =l mul %.x{dst}, {stride}").unwrap();
                 for (i, factor) in dynamic_stride.iter().enumerate() {
-                    writeln!(out, "\t%.f{dst}.{i} =l extsw {}", value(factor)).unwrap();
+                    writeln!(out, "\t%.f{dst}.{i} =l extsw {}", value(factor, names)).unwrap();
                     writeln!(
                         out,
                         "\t%.s{dst}.{} =l mul %.s{dst}.{i}, %.f{dst}.{i}",
@@ -273,7 +328,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
                     out,
                     "\t{} =l add {}, %.s{dst}.{}",
                     temp(*dst),
-                    address(base),
+                    address(base, names, slots),
                     dynamic_stride.len()
                 )
                 .unwrap();
@@ -282,14 +337,20 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
         // One add, offset zero included: there is no optimization pass, and
         // one literal path is the same choice the constant index made.
         ir::Inst::Field { dst, base, offset } => {
-            writeln!(out, "\t{} =l add {}, {offset}", temp(*dst), address(base)).unwrap();
+            writeln!(
+                out,
+                "\t{} =l add {}, {offset}",
+                temp(*dst),
+                address(base, names, slots)
+            )
+            .unwrap();
         }
         ir::Inst::CopyBytes { dst, src, size } => {
             writeln!(
                 out,
                 "\tcall $oberon_copy(l {}, l {}, l {size})",
-                address(dst),
-                address(src)
+                address(dst, names, slots),
+                address(src, names, slots)
             )
             .unwrap();
         }
@@ -300,8 +361,8 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
             writeln!(
                 out,
                 "\tcall $oberon_check_array_copy(w {}, w {})",
-                value(source_len),
-                value(destination_len)
+                value(source_len, names),
+                value(destination_len, names)
             )
             .unwrap();
         }
@@ -312,13 +373,13 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
             count,
             stride,
         } => {
-            writeln!(out, "\t%.c{copy_temp} =l extsw {}", value(count)).unwrap();
+            writeln!(out, "\t%.c{copy_temp} =l extsw {}", value(count, names)).unwrap();
             writeln!(out, "\t%.b{copy_temp} =l mul %.c{copy_temp}, {stride}").unwrap();
             writeln!(
                 out,
                 "\tcall $oberon_copy(l {}, l {}, l %.b{copy_temp})",
-                address(dst),
-                address(src)
+                address(dst, names, slots),
+                address(src, names, slots)
             )
             .unwrap();
         }
@@ -328,27 +389,33 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
                 write!(out, "{} ={} ", temp(*dst), class(*ty)).unwrap();
             }
             match target {
-                ir::CallTarget::Direct(symbol) => write!(out, "call ${symbol}(").unwrap(),
-                ir::CallTarget::Indirect(value_) => write!(out, "call {}(", value(value_)).unwrap(),
+                ir::CallTarget::Direct(symbol) => {
+                    write!(out, "call ${}(", names.symbol(symbol)).unwrap()
+                }
+                ir::CallTarget::Indirect(value_) => {
+                    write!(out, "call {}(", value(value_, names)).unwrap()
+                }
             }
             for (i, arg) in args.iter().enumerate() {
                 if i != 0 {
                     write!(out, ", ").unwrap();
                 }
                 match arg {
-                    ir::Arg::Val(ty, val) => write!(out, "{} {}", class(*ty), value(val)).unwrap(),
-                    ir::Arg::Ref(addr) => write!(out, "l {}", address(addr)).unwrap(),
+                    ir::Arg::Val(ty, val) => {
+                        write!(out, "{} {}", class(*ty), value(val, names)).unwrap()
+                    }
+                    ir::Arg::Ref(addr) => write!(out, "l {}", address(addr, names, slots)).unwrap(),
                 }
             }
             writeln!(out, ")").unwrap();
         }
         ir::Inst::Jmp(label) => writeln!(out, "\tjmp @{label}").unwrap(),
         ir::Inst::Br { cond, then, els } => {
-            writeln!(out, "\tjnz {}, @{then}, @{els}", value(cond)).unwrap();
+            writeln!(out, "\tjnz {}, @{then}, @{els}", value(cond, names)).unwrap();
         }
         ir::Inst::Ret(value_) => {
             if let Some(value_) = value_ {
-                writeln!(out, "\tret {}", value(value_)).unwrap();
+                writeln!(out, "\tret {}", value(value_, names)).unwrap();
             } else {
                 writeln!(out, "\tret").unwrap();
             }
@@ -405,7 +472,7 @@ fn temp(id: usize) -> String {
     format!("%.t{id}")
 }
 
-fn value(value: &ir::Value) -> String {
+fn value(value: &ir::Value, names: &Names) -> String {
     match value {
         ir::Value::Int(value) => value.to_string(),
         ir::Value::Bool(value) => usize::from(*value).to_string(),
@@ -420,16 +487,48 @@ fn value(value: &ir::Value) -> String {
         ir::Value::Real(v) => (v.to_bits() as i32).to_string(),
         ir::Value::Byte(v) => v.to_string(),
         ir::Value::Pointer(v) => v.to_string(),
-        ir::Value::Symbol(symbol) => format!("${symbol}"),
+        ir::Value::Symbol(symbol) => format!("${}", names.symbol(symbol)),
         ir::Value::Temp(id) => temp(*id),
     }
 }
 
-fn address(addr: &ir::Addr) -> String {
+fn address(addr: &ir::Addr, names: &Names, slots: &HashMap<&str, String>) -> String {
     match addr {
-        ir::Addr::Global(symbol) => format!("${symbol}"),
-        ir::Addr::Slot(name) => format!("%{name}"),
+        ir::Addr::Global(symbol) => format!("${}", names.symbol(symbol)),
+        ir::Addr::Slot(name) => format!("%{}", slots[name.as_str()]),
         ir::Addr::Temp(id) => temp(*id),
+    }
+}
+
+// Oberon identifiers have no length limit, while QBE identifiers do. Keep
+// source names in the IR and assign compact, collision-free names only at the
+// backend boundary. Unknown symbols are C runtime entry points and retain the
+// spelling their definitions export.
+struct Names {
+    symbols: HashMap<String, String>,
+}
+
+impl Names {
+    fn new(program: &ir::Program) -> Self {
+        let mut symbols = HashMap::new();
+        for module in &program.modules {
+            for symbol in module
+                .descriptors
+                .iter()
+                .map(|item| &item.symbol)
+                .chain(module.globals.iter().map(|item| &item.symbol))
+                .chain(module.literals.iter().map(|item| &item.symbol))
+                .chain(module.procs.iter().map(|item| &item.symbol))
+            {
+                let next = symbols.len();
+                symbols.insert(symbol.clone(), format!("g{next}"));
+            }
+        }
+        Self { symbols }
+    }
+
+    fn symbol<'a>(&'a self, name: &'a str) -> &'a str {
+        self.symbols.get(name).map_or(name, String::as_str)
     }
 }
 

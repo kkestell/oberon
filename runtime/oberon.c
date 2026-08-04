@@ -98,12 +98,13 @@ void oberon_check_procedure(const void *procedure)
 /* Report 8.1: an index must lie between zero and the length less one. The
    check runs before the element address is formed, so a zero-length array
    rejects every index and no invalid address is ever computed. */
-void oberon_check_index(int32_t index, int32_t length)
+int32_t oberon_check_index(int32_t index, int32_t length)
 {
     if (index < 0 || index >= length) {
         fputs("array index out of bounds\n", stderr);
         exit(1);
     }
+    return index;
 }
 
 /* Report 9.1: an open array may be assigned to an array only when the whole
