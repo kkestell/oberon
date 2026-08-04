@@ -1,0 +1,53 @@
+(*  Source: AntKrotov/oberon-07-compiler (BSD-2-Clause),
+    samples/windows-console/MultiplicationTables.ob07, adapted to Oberon-07 by
+    0CodErr of the KolibriOS team.
+
+    Changed: Dropped the KolibriOS Console module and the closing keypress
+    pause.
+*)
+
+(*
+   Produce a formatted NxN multiplication table
+   Only print the top half triangle of products
+*)
+
+MODULE MultiplicationTables;
+
+IMPORT Out;
+
+
+CONST
+    N = 18;
+
+
+VAR
+    I, J: INTEGER;
+
+
+BEGIN
+
+    FOR J := 1 TO N - 1 DO
+        Out.Int(J, 3);
+        Out.String(" ")
+    END;
+    Out.Int(N, 3);
+    Out.Ln;
+    FOR J := 0 TO N - 1 DO
+        Out.String("----")
+    END;
+    Out.String("+");
+    Out.Ln;
+    FOR I := 1 TO N DO
+        FOR J := 1 TO N DO
+            IF J < I THEN
+                Out.String("    ")
+            ELSE
+                Out.Int(I * J, 3);
+                Out.String(" ")
+            END
+        END;
+        Out.String("| ");
+        Out.Int(I, 2);
+        Out.Ln
+    END
+END MultiplicationTables.

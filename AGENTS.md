@@ -20,6 +20,8 @@ The normative language definition is Niklaus Wirth's *The Programming Language O
 
 The Report defines no standard library. [docs/standard-library.md](docs/standard-library.md) is the reference for the bundled modules in [lib/](lib/): every exported declaration, the formatting and scanner rules, and the file encodings.
 
+[examples/](examples/) holds working Oberon-07 programs drawn from other Oberon projects, each attributed in a comment at its top. They are illustrations, not tests; nothing in the build depends on them.
+
 ### The test
 
 Reread your draft as someone who skimmed the visible messages and took no notes. Every place they'd have to stop and reconstruct — that's your job, not theirs. Unpack it.

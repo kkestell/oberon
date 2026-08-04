@@ -18,6 +18,8 @@ Native Executable
 
 The compiler uses a small typed intermediate representation between semantic analysis and code generation. The IR makes addresses, values, storage, calls, and runtime operations explicit while remaining much smaller than LLVM IR.
 
+Apple ARM64 builds require QBE 1.3 or later. QBE 1.2 used the platform-reserved `x18` register to resolve parallel-copy cycles, so an otherwise correct generated program could be corrupted asynchronously. `HailstoneLoop.Mod` exercises the loop-carried copies that exposed that backend defect.
+
 ## Modules
 
 A build starts from one root source file and compiles every module that file reaches through imports. Imports are followed depth first, in the order they are written, and a module reached twice is compiled once. An import naming a module whose compilation has already started is an import cycle and ends the build.
