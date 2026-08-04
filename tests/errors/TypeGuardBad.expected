@@ -1,0 +1,14 @@
+tests/errors/TypeGuardBad.Mod:11:19: a record guard requires a record VAR parameter
+tests/errors/TypeGuardBad.Mod:14:20: record guard requires a record type, found PChild
+tests/errors/TypeGuardBad.Mod:17:24: constant expression contains a type guard
+tests/errors/TypeGuardBad.Mod:22:12: a record guard requires a record VAR parameter
+tests/errors/TypeGuardBad.Mod:23:8: a type guard requires a pointer or record VAR parameter, found INTEGER
+tests/errors/TypeGuardBad.Mod:24:16: 'target' is not a type
+tests/errors/TypeGuardBad.Mod:25:16: pointer guard requires a pointer type, found Child
+tests/errors/TypeGuardBad.Mod:26:14: guard type PRoot must extend PChild
+tests/errors/TypeGuardBad.Mod:27:16: guard type POther must extend PRoot
+tests/errors/TypeGuardBad.Mod:28:8: a type guard requires exactly one qualified type name
+tests/errors/TypeGuardBad.Mod:28:16: 'PChild' cannot be used as a value
+tests/errors/TypeGuardBad.Mod:28:24: 'PRoot' cannot be used as a value
+tests/errors/TypeGuardBad.Mod:29:8: a type guard requires exactly one qualified type name
+Error: 13 error(s)

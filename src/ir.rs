@@ -8,12 +8,19 @@ pub struct Program {
 #[derive(Debug)]
 pub struct Module {
     pub name: String,
+    pub descriptors: Vec<Descriptor>,
     pub globals: Vec<Global>,
     // The string literals whose bytes have to exist at run time: one data
     // object each, numbered within the module and never shared between two
     // occurrences of the same text.
     pub literals: Vec<Literal>,
     pub procs: Vec<Proc>,
+}
+
+#[derive(Debug)]
+pub struct Descriptor {
+    pub symbol: String,
+    pub base: Option<String>,
 }
 
 // The characters of one string literal. The emitted data object appends the
@@ -131,6 +138,7 @@ pub enum Value {
     Real(f32),
     Byte(u8),
     Pointer(u64),
+    Symbol(String),
     Temp(usize),
 }
 
@@ -192,6 +200,21 @@ pub enum Inst {
         dst: usize,
         size: i64,
         scanned: bool,
+        descriptor: String,
+    },
+    HeapDescriptor {
+        dst: usize,
+        pointer: Value,
+    },
+    TypeTestPointer {
+        dst: usize,
+        pointer: Value,
+        target: String,
+    },
+    TypeTestDescriptor {
+        dst: usize,
+        descriptor: Value,
+        target: String,
     },
     // The address of one element: `dst = base + index * stride`, after
     // checking `0 <= index < len`. The applicable length travels with the

@@ -227,9 +227,14 @@ impl Parser {
     fn record_type(&mut self) -> PResult<TypeExpr> {
         let pos = self.pos();
         self.expect(Tok::Record, "'RECORD'")?;
-        if *self.peek() == Tok::LParen {
-            return self.unsupported("record extension");
-        }
+        let base = if *self.peek() == Tok::LParen {
+            self.advance();
+            let base = self.qualident("record base type")?;
+            self.expect(Tok::RParen, "')'")?;
+            Some(base)
+        } else {
+            None
+        };
         // The field list sequence is optional, so RECORD END is a legal empty
         // record. A semicolon separates two field lists and none precedes END.
         let mut fields = Vec::new();
@@ -241,7 +246,7 @@ impl Parser {
             }
         }
         self.expect(Tok::End, "'END'")?;
-        Ok(TypeExpr::Record { fields, pos })
+        Ok(TypeExpr::Record { base, fields, pos })
     }
 
     // FieldList = IdentList ":" type
@@ -586,7 +591,7 @@ impl Parser {
 
     fn statement(&mut self) -> PResult<Stmt> {
         let pos = self.pos();
-        let d = self.designator()?;
+        let mut d = self.designator()?;
         match self.peek() {
             Tok::Assign => {
                 self.advance();
@@ -595,7 +600,15 @@ impl Parser {
             }
             Tok::LParen => {
                 let args = self.actual_parameters()?;
-                Ok(Stmt::Call { proc: d, args, pos })
+                if *self.peek() == Tok::Assign {
+                    let guard = self.guard_from_args(args, pos)?;
+                    d.selectors.push(Selector::Guard(guard, pos));
+                    self.advance();
+                    let rhs = self.expression()?;
+                    Ok(Stmt::Assign { lhs: d, rhs, pos })
+                } else {
+                    Ok(Stmt::Call { proc: d, args, pos })
+                }
             }
             _ => Ok(Stmt::Call {
                 proc: d,
@@ -649,6 +662,13 @@ impl Parser {
                     self.advance();
                     selectors.push(Selector::Deref(pos));
                 }
+                Tok::LParen if self.application_has_following_selector() => {
+                    let guard_pos = self.pos();
+                    self.advance();
+                    let ty = self.qualident("type name in guard")?;
+                    self.expect(Tok::RParen, "')'")?;
+                    selectors.push(Selector::Guard(ty, guard_pos));
+                }
                 _ => break,
             }
         }
@@ -670,7 +690,16 @@ impl Parser {
             Tok::Gt => BinOp::Gt,
             Tok::Ge => BinOp::Ge,
             Tok::In => BinOp::In,
-            Tok::Is => return self.unsupported("IS relations"),
+            Tok::Is => {
+                let pos = self.pos();
+                self.advance();
+                let ty = self.qualident("type name after IS")?;
+                return Ok(Expr::TypeTest {
+                    expr: Box::new(lhs),
+                    ty,
+                    pos,
+                });
+            }
             _ => return Ok(lhs),
         };
         let pos = self.pos();
@@ -793,7 +822,7 @@ impl Parser {
                 let d = self.designator()?;
                 if *self.peek() == Tok::LParen {
                     let pos = d.pos;
-                    return Ok(Expr::Call {
+                    return Ok(Expr::Apply {
                         callee: d,
                         args: self.actual_parameters()?,
                         pos,
@@ -844,6 +873,52 @@ impl Parser {
         self.expect(Tok::RBrace, "'}'")?;
         Ok(Expr::Set { elements, pos })
     }
+
+    // A parenthesized postfix followed by another selector cannot be a call.
+    // This lookahead only classifies the postfix; the ordinary parser still
+    // reads its contents and produces the precise malformed-guard diagnostic.
+    fn application_has_following_selector(&self) -> bool {
+        let mut depth = 0usize;
+        let mut i = self.i;
+        while i < self.toks.len() {
+            match self.toks[i].tok {
+                Tok::LParen => depth += 1,
+                Tok::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.toks.get(i + 1).is_some_and(|token| {
+                            matches!(token.tok, Tok::Dot | Tok::LBrack | Tok::Caret | Tok::LParen)
+                        });
+                    }
+                }
+                Tok::Eof => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        true
+    }
+
+    fn guard_from_args(&self, args: Vec<Expr>, pos: Pos) -> PResult<Designator> {
+        let [Expr::Name(ty)] = args.as_slice() else {
+            return Err(Diagnostic::new(
+                pos,
+                "a type guard requires exactly one qualified type name",
+            ));
+        };
+        if ty.selectors.len() > 1
+            || matches!(
+                ty.selectors.first(),
+                Some(Selector::Index(..) | Selector::Deref(_) | Selector::Guard(..))
+            )
+        {
+            return Err(Diagnostic::new(
+                pos,
+                "a type guard requires exactly one qualified type name",
+            ));
+        }
+        Ok(ty.clone())
+    }
 }
 
 // The type and selector grammar is where this slice adds syntax, so these
@@ -884,7 +959,7 @@ mod tests {
                     .collect();
                 format!("ARRAY {} OF {}", lengths.join(", "), shape(elem))
             }
-            TypeExpr::Record { fields, .. } => {
+            TypeExpr::Record { base, fields, .. } => {
                 let fields: Vec<String> = fields
                     .iter()
                     .map(|field| {
@@ -896,10 +971,14 @@ mod tests {
                         format!("{}: {}", names.join(", "), shape(&field.ty))
                     })
                     .collect();
+                let base = base
+                    .as_ref()
+                    .map(|base| format!(" ({})", base.name()))
+                    .unwrap_or_default();
                 if fields.is_empty() {
-                    "RECORD END".into()
+                    format!("RECORD{base} END")
                 } else {
-                    format!("RECORD {} END", fields.join("; "))
+                    format!("RECORD{base} {} END", fields.join("; "))
                 }
             }
             TypeExpr::Pointer { base, .. } => format!("POINTER TO {}", shape(base)),
@@ -968,7 +1047,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 Selector::Index(exprs, _) => Some(exprs.len()),
-                Selector::Field(..) | Selector::Deref(_) => None,
+                Selector::Field(..) | Selector::Deref(_) | Selector::Guard(..) => None,
             })
             .collect();
         assert_eq!(counts, vec![1, 2, 1]);
@@ -1089,6 +1168,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn record_bases_and_guard_selectors() {
+        let m = module(
+            "TYPE Root = RECORD END; Child = RECORD (Root) n: INTEGER END; Imported = RECORD (M.Root) END;\n\
+             VAR x: INTEGER;\nBEGIN x := p(PChild)(PGrand).field[0]^ .n",
+        );
+        assert_eq!(shape(&m.types[0].ty), "RECORD END");
+        assert_eq!(shape(&m.types[1].ty), "RECORD (Root) n: INTEGER END");
+        assert_eq!(shape(&m.types[2].ty), "RECORD (M.Root) END");
+        let Stmt::Assign { rhs, .. } = &m.body[0] else {
+            panic!("expected assignment")
+        };
+        let Expr::Name(designator) = rhs else {
+            panic!("expected guarded designator")
+        };
+        assert_eq!(designator.name(), "p(PChild)(PGrand).field[...]^.n");
+    }
+
+    #[test]
+    fn terminal_application_and_type_test_stay_explicit() {
+        let m = module("VAR b: BOOLEAN;\nBEGIN b := p(PChild); b := f(x); b := p IS PChild");
+        for stmt in &m.body[..2] {
+            let Stmt::Assign {
+                rhs: Expr::Apply { .. },
+                ..
+            } = stmt
+            else {
+                panic!("expected neutral terminal application")
+            };
+        }
+        let Stmt::Assign {
+            rhs: Expr::TypeTest { ty, .. },
+            ..
+        } = &m.body[2]
+        else {
+            panic!("expected type test")
+        };
+        assert_eq!(ty.name(), "PChild");
+    }
+
+    #[test]
+    fn malformed_certain_guards() {
+        assert_eq!(
+            error("VAR x: INTEGER;\nBEGIN x := p()^.n"),
+            "expected type name in guard, found RParen"
+        );
+        assert_eq!(
+            error("VAR x: INTEGER;\nBEGIN x := p(a, b)^.n"),
+            "expected ')', found Comma"
+        );
+        assert_eq!(
+            error("VAR x: INTEGER;\nBEGIN x := p(a + 1)^.n"),
+            "expected ')', found Plus"
+        );
+        assert_eq!(
+            error("VAR x: INTEGER;\nBEGIN x := p(T^.n"),
+            "expected ')', found Caret"
+        );
+    }
+
     // A record field may itself be a record or an array, and an array's
     // element type may be a record, so the two constructors nest both ways.
     #[test]
@@ -1118,11 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_types_still_unsupported() {
-        assert_eq!(
-            error("TYPE R = RECORD (Base) n: INTEGER END;"),
-            "not yet supported: record extension"
-        );
+    fn procedure_types_still_unsupported() {
         assert_eq!(
             error("TYPE P = PROCEDURE (n: INTEGER);"),
             "not yet supported: PROCEDURE types"

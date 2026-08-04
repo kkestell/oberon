@@ -5,6 +5,13 @@ use crate::ir;
 
 use super::types::{Type, fixed_shape};
 
+#[derive(Debug, Clone)]
+pub(super) enum RecordDynamic {
+    Static(String),
+    Incoming(ir::Value),
+    Heap(ir::Value),
+}
+
 pub(super) type Scope = HashMap<String, Symbol>;
 
 // The string case ends the enum's days as a Copy type: the bytes are owned
@@ -65,6 +72,7 @@ pub(super) enum Symbol {
         // Set on an imported variable, and while a FOR statement's body is
         // being lowered so the body cannot move its own control variable.
         read_only: bool,
+        dynamic: Option<RecordDynamic>,
     },
     Proc {
         symbol: String,
@@ -119,6 +127,9 @@ impl Member {
                 addr: ir::Addr::Global(symbol.clone()),
                 shape: fixed_shape(ty),
                 read_only: true,
+                dynamic: ty
+                    .record()
+                    .map(|record| RecordDynamic::Static(record.descriptor.clone())),
             },
             Member::Proc {
                 symbol,

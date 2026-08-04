@@ -12,7 +12,8 @@ mod types;
 
 use constant::{floor_const, relation_holds, str_const_cmp};
 use symbols::{
-    Builtin, ConstValue, Member, Scope, Symbol, builtin_signature, type_list, universe_scope,
+    Builtin, ConstValue, Member, RecordDynamic, Scope, Symbol, builtin_signature, type_list,
+    universe_scope,
 };
 pub use symbols::{Interface, out_interface};
 use types::*;
@@ -47,6 +48,7 @@ struct Place {
     // immediates. Indexing consumes the first entry.
     shape: Vec<ir::Value>,
     read_only: bool,
+    dynamic: Option<RecordDynamic>,
 }
 
 // What the source of an assignment or a relation operand turned out to be.
@@ -85,6 +87,7 @@ struct Analyzer {
     scopes: Vec<Scope>,
     diags: Vec<Diagnostic>,
     globals: Vec<ir::Global>,
+    descriptors: Vec<ir::Descriptor>,
     // The aligned bytes the module's globals have reserved so far, so the
     // declaration that would take the data object past the target limit is the
     // one that reports it.
@@ -108,6 +111,7 @@ impl Analyzer {
             scopes: vec![universe_scope(), Scope::new()],
             diags: Vec::new(),
             globals: Vec::new(),
+            descriptors: Vec::new(),
             globals_size: 0,
             literals: Vec::new(),
             procs: Vec::new(),
@@ -147,6 +151,7 @@ impl Analyzer {
             Ok((
                 ir::Module {
                     name: self.module,
+                    descriptors: self.descriptors,
                     globals: self.globals,
                     literals: self.literals,
                     procs: self.procs,
@@ -310,6 +315,9 @@ impl Analyzer {
                         addr,
                         shape: fixed_shape(&ty),
                         read_only: false,
+                        dynamic: ty
+                            .record()
+                            .map(|record| RecordDynamic::Static(record.descriptor.clone())),
                     },
                 ) {
                     match reserve(self.globals_size, &ty) {
@@ -422,6 +430,18 @@ impl Analyzer {
                 },
             });
             let mut open_lengths = Vec::new();
+            let dynamic = if var {
+                ty.record().map(|_| {
+                    let descriptor = self.builder().temp();
+                    self.builder().proc.params.push(ir::Param {
+                        temp: descriptor,
+                        pass: ir::ParamPass::Value(ir::Ty::Pointer),
+                    });
+                    RecordDynamic::Incoming(ir::Value::Temp(descriptor))
+                })
+            } else {
+                None
+            };
             for _ in 0..ty.open_rank() {
                 let length = self.builder().temp();
                 self.builder().proc.params.push(ir::Param {
@@ -446,6 +466,7 @@ impl Analyzer {
                     // Read-only in its entirety, all the way down: the place
                     // walk carries the flag through every field and element.
                     read_only: !var && ty.structured(),
+                    dynamic,
                 },
             ) && !by_ref
             {
@@ -488,6 +509,9 @@ impl Analyzer {
                         addr,
                         shape: fixed_shape(&ty),
                         read_only: false,
+                        dynamic: ty
+                            .record()
+                            .map(|record| RecordDynamic::Static(record.descriptor.clone())),
                     },
                 ) {
                     self.reserve_slot(&id.name, &ty, id.pos);
@@ -652,7 +676,10 @@ impl Analyzer {
             (Some(AssignKind::StringCopy | AssignKind::OpenStringCopy), Source::Str(bytes)) => {
                 self.copy_string(&bytes, target, rhs.pos());
             }
-            (Some(AssignKind::WholeCopy), Source::Structured(source)) => {
+            (
+                Some(AssignKind::WholeCopy | AssignKind::RecordPrefixCopy),
+                Source::Structured(source),
+            ) => {
                 // A zero-length array or an empty record still resolved both
                 // designators and ran both sides' checks; only the byte count
                 // is zero. A record's count includes its padding, which no
@@ -751,6 +778,20 @@ impl Analyzer {
     fn lower_source(&mut self, expr: &ast::Expr) -> Option<Source> {
         if let ast::Expr::Str { bytes, .. } = expr {
             return Some(Source::Str(Rc::new(bytes.clone())));
+        }
+        if let ast::Expr::Apply { callee, args, pos } = expr
+            && !self.application_is_call(callee)
+        {
+            let place = self.terminal_guard_place(
+                callee,
+                args,
+                *pos,
+                format!("'{}' cannot be used as a value", callee.name()),
+            )?;
+            return Some(match place.ty.scalar() {
+                Some(ty) => Source::Value(self.load(place.addr, ty), place.ty),
+                None => Source::Structured(place),
+            });
         }
         let ast::Expr::Name(designator) = expr else {
             let (value, ty) = self.lower_expr(expr)?;
@@ -1037,15 +1078,31 @@ impl Analyzer {
         }
     }
 
-    // Report 9.5. The INTEGER and CHAR forms: labels reduce to ordinals, so
-    // ranges, overlap, and the no-match trap are one mechanism for both. The
-    // record and pointer forms remain with dynamic type operations in Slice 15.
+    // Report 9.5. The INTEGER and CHAR forms reduce labels to ordinals, while
+    // the record and pointer forms select the dynamic-type path first.
     fn lower_case(&mut self, expr: &ast::Expr, arms: &[ast::CaseArm]) {
+        if let ast::Expr::Name(designator) = expr
+            && let Ok((Symbol::Var { ty, .. }, _)) = self.qualident(designator)
+            && matches!(ty, Type::Pointer(_) | Type::Record(_))
+        {
+            self.lower_type_case(designator, arms);
+            return;
+        }
         // "First the case expression is evaluated": once, into a temporary
         // that every arm's test then compares against.
         let (selector, char_labels) = match self.lower_expr(expr) {
             Some((value, Type::Integer)) => (Some(value), false),
             Some((value, Type::Char)) => (Some(value), true),
+            Some((_, Type::Pointer(_))) => {
+                self.diags.push(Diagnostic::new(
+                    expr.pos(),
+                    "type CASE requires a qualified variable without selectors",
+                ));
+                for arm in arms {
+                    self.lower_stmts(&arm.body);
+                }
+                return;
+            }
             Some((_, ty)) => {
                 self.diags.push(Diagnostic::new(
                     expr.pos(),
@@ -1155,6 +1212,182 @@ impl Analyzer {
         self.emit(ir::Inst::Label(end));
     }
 
+    fn lower_type_case(&mut self, designator: &ast::Designator, arms: &[ast::CaseArm]) {
+        let (symbol, rest) = match self.qualident(designator) {
+            Ok(found) => found,
+            Err(diag) => {
+                self.diags.push(diag);
+                return;
+            }
+        };
+        let Symbol::Var { ty: declared, .. } = symbol else {
+            unreachable!("the caller selected a variable")
+        };
+        if !rest.is_empty() {
+            self.diags.push(Diagnostic::new(
+                designator.pos,
+                "type CASE requires a qualified variable without selectors",
+            ));
+            for arm in arms {
+                self.lower_stmts(&arm.body);
+            }
+            return;
+        }
+        let place = match self.place(designator, "type CASE requires a variable".into()) {
+            Some(place) => place,
+            None => return,
+        };
+        if matches!(declared, Type::Record(_))
+            && !matches!(place.dynamic, Some(RecordDynamic::Incoming(_)))
+        {
+            self.diags.push(Diagnostic::new(
+                designator.pos,
+                "record type CASE requires a record VAR parameter",
+            ));
+            for arm in arms {
+                self.lower_stmts(&arm.body);
+            }
+            return;
+        }
+
+        let actual = match &declared {
+            Type::Pointer(_) => self.load(place.addr.clone(), ir::Ty::Pointer),
+            Type::Record(_) => self.materialize_descriptor(&place),
+            _ => unreachable!("the caller selected a dynamic type"),
+        };
+
+        let mut labels = Vec::new();
+        let mut seen: Vec<Type> = Vec::new();
+        for arm in arms {
+            let target = if arm.labels.len() != 1 {
+                self.diags.push(Diagnostic::new(
+                    arm.labels
+                        .first()
+                        .map_or(designator.pos, |label| label.low.pos()),
+                    "a type CASE arm requires exactly one type label",
+                ));
+                None
+            } else {
+                let label = &arm.labels[0];
+                if label.high.is_some() {
+                    self.diags.push(Diagnostic::new(
+                        label.low.pos(),
+                        "a type CASE label cannot be a range",
+                    ));
+                    None
+                } else if let ast::Expr::Name(name) = &label.low {
+                    let target = self.named_type(name);
+                    match target {
+                        Some(target)
+                            if (matches!(declared, Type::Pointer(_))
+                                && matches!(target, Type::Pointer(_))
+                                || matches!(declared, Type::Record(_))
+                                    && matches!(target, Type::Record(_)))
+                                && match (&target, &declared) {
+                                    (Type::Pointer(_), Type::Pointer(_)) => {
+                                        pointer_extends(&target, &declared)
+                                    }
+                                    (Type::Record(target), Type::Record(declared)) => {
+                                        record_extends(target, declared)
+                                    }
+                                    _ => false,
+                                } =>
+                        {
+                            if seen.contains(&target) {
+                                self.diags.push(Diagnostic::new(
+                                    name.pos,
+                                    format!("type CASE label {target} is duplicated"),
+                                ));
+                                None
+                            } else {
+                                seen.push(target.clone());
+                                Some(target)
+                            }
+                        }
+                        Some(target) => {
+                            self.type_test_mismatch(label.low.pos(), name.pos, &declared, &target);
+                            None
+                        }
+                        None => None,
+                    }
+                } else {
+                    self.diags.push(Diagnostic::new(
+                        label.low.pos(),
+                        "a type CASE label must be a qualified type name",
+                    ));
+                    None
+                }
+            };
+            labels.push(target);
+        }
+
+        let end = self.label("typecase.end");
+        for (arm, target) in arms.iter().zip(labels) {
+            let Some(target) = target else {
+                self.lower_stmts(&arm.body);
+                continue;
+            };
+            let descriptor = match &target {
+                Type::Pointer(pointer) => pointer.record().map(|record| record.descriptor.clone()),
+                Type::Record(record) => Some(record.descriptor.clone()),
+                _ => None,
+            };
+            let Some(descriptor) = descriptor else {
+                continue;
+            };
+            let test = self.temp();
+            match declared {
+                Type::Pointer(_) => self.emit(ir::Inst::TypeTestPointer {
+                    dst: test,
+                    pointer: actual.clone(),
+                    target: descriptor,
+                }),
+                Type::Record(_) => self.emit(ir::Inst::TypeTestDescriptor {
+                    dst: test,
+                    descriptor: actual.clone(),
+                    target: descriptor,
+                }),
+                _ => unreachable!(),
+            }
+            let body = self.label("typecase.arm");
+            let next = self.label("typecase.next");
+            self.emit(ir::Inst::Br {
+                cond: ir::Value::Temp(test),
+                then: body.clone(),
+                els: next.clone(),
+            });
+            self.emit(ir::Inst::Label(body));
+            let old = self.narrow_variable(designator, target);
+            self.lower_stmts(&arm.body);
+            if let Some(old) = old {
+                self.narrow_variable(designator, old);
+            }
+            self.emit(ir::Inst::Jmp(end.clone()));
+            self.emit(ir::Inst::Label(next));
+        }
+        self.emit(ir::Inst::Jmp(end.clone()));
+        self.emit(ir::Inst::Label(end));
+    }
+
+    fn narrow_variable(&mut self, designator: &ast::Designator, ty: Type) -> Option<Type> {
+        if let Some(ast::Selector::Field(member, _)) = designator.selectors.first() {
+            for scope in self.scopes.iter_mut().rev() {
+                if let Some(Symbol::Module(members)) = scope.get_mut(&designator.ident)
+                    && let Some(Symbol::Var { ty: current, .. }) = members.get_mut(member)
+                {
+                    return Some(std::mem::replace(current, ty));
+                }
+            }
+        } else {
+            for scope in self.scopes.iter_mut().rev() {
+                if let Some(Symbol::Var { ty: current, .. }) = scope.get_mut(&designator.ident) {
+                    return Some(std::mem::replace(current, ty));
+                }
+            }
+        }
+        None
+    }
+
     // Report 9.5: under an INTEGER selector every label is an integer, and
     // under a CHAR selector every label and range endpoint is a
     // single-character string or a CHAR constant. Both reduce to ordinals.
@@ -1238,18 +1471,41 @@ impl Analyzer {
                 let source = self.lower_source(expr)?;
                 self.source_scalar(expr, source)
             }
-            ast::Expr::Call { callee, args, pos } => match self.lower_call(callee, args, *pos) {
-                Some((Some(value), Some(ty))) => Some((value, ty)),
-                Some((None, None)) => {
-                    self.diags.push(Diagnostic::new(
+            ast::Expr::Apply { callee, args, pos } => {
+                if !self.application_is_call(callee) {
+                    let place = self.terminal_guard_place(
+                        callee,
+                        args,
                         *pos,
                         format!("'{}' cannot be used as a value", callee.name()),
-                    ));
-                    None
+                    )?;
+                    let Some(ty) = place.ty.scalar() else {
+                        self.diags.push(Diagnostic::new(
+                            *pos,
+                            format!(
+                                "'{}' has type {} and cannot be used as a value",
+                                callee.name(),
+                                place.ty
+                            ),
+                        ));
+                        return None;
+                    };
+                    return Some((self.load(place.addr, ty), place.ty));
                 }
-                Some(_) => unreachable!("call result and return type agree"),
-                None => None,
-            },
+                match self.lower_call(callee, args, *pos) {
+                    Some((Some(value), Some(ty))) => Some((value, ty)),
+                    Some((None, None)) => {
+                        self.diags.push(Diagnostic::new(
+                            *pos,
+                            format!("'{}' cannot be used as a value", callee.name()),
+                        ));
+                        None
+                    }
+                    Some(_) => unreachable!("call result and return type agree"),
+                    None => None,
+                }
+            }
+            ast::Expr::TypeTest { expr, ty, pos } => self.lower_type_test(expr, ty, *pos),
             ast::Expr::Unary { op, expr, pos } => {
                 let (arg, found) = self.lower_expr(expr)?;
                 match (op, &found) {
@@ -1905,11 +2161,19 @@ impl Analyzer {
                     Some(place) => {
                         let compatible = if expected.open_rank() > 0 {
                             open_actual_compatible(&expected, &place.ty)
+                        } else if let (Some(expected), Some(actual)) =
+                            (expected.record(), place.ty.record())
+                        {
+                            record_extends(actual, expected)
                         } else {
                             place.ty == expected
                         };
                         if compatible {
-                            args.push(ir::Arg::Ref(place.addr));
+                            args.push(ir::Arg::Ref(place.addr.clone()));
+                            if var && expected.record().is_some() {
+                                let descriptor = self.materialize_descriptor(&place);
+                                args.push(ir::Arg::Val(ir::Ty::Pointer, descriptor));
+                            }
                             for length in place.shape.iter().take(expected.open_rank()) {
                                 args.push(ir::Arg::Val(ir::Ty::Int, length.clone()));
                             }
@@ -2179,6 +2443,7 @@ impl Analyzer {
                         dst,
                         size: record.size,
                         scanned: record.contains_pointers,
+                        descriptor: record.descriptor.clone(),
                     });
                     self.emit(ir::Inst::Store {
                         ty: ir::Ty::Pointer,
@@ -2554,15 +2819,26 @@ impl Analyzer {
     // the one reference an imported variable or another structured value
     // parameter can be.
     fn ref_actual(&mut self, actual: &ast::Expr, number: usize, writable: bool) -> Option<Place> {
-        let ast::Expr::Name(designator) = actual else {
-            let _ = self.lower_expr(actual);
-            self.diags.push(Diagnostic::new(
-                actual.pos(),
-                format!("argument {number} must be a variable"),
-            ));
-            return None;
-        };
-        let place = self.place(designator, format!("argument {number} must be a variable"))?;
+        let place = match actual {
+            ast::Expr::Name(designator) => {
+                self.place(designator, format!("argument {number} must be a variable"))
+            }
+            ast::Expr::Apply { callee, args, pos } if !self.application_is_call(callee) => self
+                .terminal_guard_place(
+                    callee,
+                    args,
+                    *pos,
+                    format!("argument {number} must be a variable"),
+                ),
+            _ => {
+                let _ = self.lower_expr(actual);
+                self.diags.push(Diagnostic::new(
+                    actual.pos(),
+                    format!("argument {number} must be a variable"),
+                ));
+                return None;
+            }
+        }?;
         if writable && place.read_only {
             self.diags.push(Diagnostic::new(
                 actual.pos(),
@@ -2587,6 +2863,268 @@ impl Analyzer {
         }
     }
 
+    fn application_is_call(&self, callee: &ast::Designator) -> bool {
+        matches!(
+            self.resolve(callee),
+            Ok(Symbol::Proc { .. } | Symbol::Builtin(_))
+        )
+    }
+
+    fn terminal_guard_place(
+        &mut self,
+        callee: &ast::Designator,
+        args: &[ast::Expr],
+        pos: Pos,
+        not_a_variable: String,
+    ) -> Option<Place> {
+        let [ast::Expr::Name(target)] = args else {
+            for arg in args {
+                let _ = self.lower_expr(arg);
+            }
+            self.diags.push(Diagnostic::new(
+                pos,
+                "a type guard requires exactly one qualified type name",
+            ));
+            return None;
+        };
+        if target.selectors.len() > 1
+            || matches!(
+                target.selectors.first(),
+                Some(ast::Selector::Index(..) | ast::Selector::Deref(_) | ast::Selector::Guard(..))
+            )
+        {
+            self.diags.push(Diagnostic::new(
+                pos,
+                "a type guard requires exactly one qualified type name",
+            ));
+            return None;
+        }
+        let place = self.place(callee, not_a_variable)?;
+        self.guard_place(place, target, pos)
+    }
+
+    fn named_type(&mut self, target: &ast::Designator) -> Option<Type> {
+        match self.resolve(target) {
+            Ok(Symbol::TypeName(ty)) => Some(ty),
+            Ok(_) => {
+                self.diags.push(Diagnostic::new(
+                    target.pos,
+                    format!("'{}' is not a type", target.name()),
+                ));
+                None
+            }
+            Err(diag) => {
+                self.diags.push(diag);
+                None
+            }
+        }
+    }
+
+    fn guard_place(
+        &mut self,
+        mut place: Place,
+        target_name: &ast::Designator,
+        pos: Pos,
+    ) -> Option<Place> {
+        let target = self.named_type(target_name)?;
+        match (&place.ty, &target) {
+            (Type::Pointer(_), Type::Pointer(target_pointer))
+                if pointer_extends(&target, &place.ty) =>
+            {
+                let pointer = self.load(place.addr.clone(), ir::Ty::Pointer);
+                let target_record = target_pointer.record()?;
+                let test = self.temp();
+                self.emit(ir::Inst::TypeTestPointer {
+                    dst: test,
+                    pointer,
+                    target: target_record.descriptor.clone(),
+                });
+                self.emit_guard_check(ir::Value::Temp(test));
+                place.ty = target;
+                Some(place)
+            }
+            (Type::Pointer(_), Type::Pointer(_)) => {
+                self.diags.push(Diagnostic::new(
+                    target_name.pos,
+                    format!("guard type {target} must extend {}", place.ty),
+                ));
+                None
+            }
+            (Type::Pointer(_), _) => {
+                self.diags.push(Diagnostic::new(
+                    target_name.pos,
+                    format!("pointer guard requires a pointer type, found {target}"),
+                ));
+                None
+            }
+            (Type::Record(subject), Type::Record(target_record))
+                if matches!(place.dynamic, Some(RecordDynamic::Incoming(_)))
+                    && record_extends(target_record, subject) =>
+            {
+                let descriptor = self.materialize_descriptor(&place);
+                let test = self.temp();
+                self.emit(ir::Inst::TypeTestDescriptor {
+                    dst: test,
+                    descriptor,
+                    target: target_record.descriptor.clone(),
+                });
+                self.emit_guard_check(ir::Value::Temp(test));
+                place.ty = target;
+                Some(place)
+            }
+            (Type::Record(_), Type::Record(_))
+                if !matches!(place.dynamic, Some(RecordDynamic::Incoming(_))) =>
+            {
+                self.diags.push(Diagnostic::new(
+                    pos,
+                    "a record guard requires a record VAR parameter",
+                ));
+                None
+            }
+            (Type::Record(_), Type::Record(_)) => {
+                self.diags.push(Diagnostic::new(
+                    target_name.pos,
+                    format!("guard type {target} must extend {}", place.ty),
+                ));
+                None
+            }
+            (Type::Record(_), _) => {
+                self.diags.push(Diagnostic::new(
+                    target_name.pos,
+                    format!("record guard requires a record type, found {target}"),
+                ));
+                None
+            }
+            _ => {
+                self.diags.push(Diagnostic::new(
+                    pos,
+                    format!(
+                        "a type guard requires a pointer or record VAR parameter, found {}",
+                        place.ty
+                    ),
+                ));
+                None
+            }
+        }
+    }
+
+    fn emit_guard_check(&mut self, test: ir::Value) {
+        let ok = self.label("typeguard.ok");
+        let bad = self.label("typeguard.bad");
+        self.emit(ir::Inst::Br {
+            cond: test,
+            then: ok.clone(),
+            els: bad.clone(),
+        });
+        self.emit(ir::Inst::Label(bad));
+        self.trap("oberon_type_guard_failed");
+        self.emit(ir::Inst::Label(ok));
+    }
+
+    fn lower_type_test(
+        &mut self,
+        expr: &ast::Expr,
+        target_name: &ast::Designator,
+        pos: Pos,
+    ) -> Option<(ir::Value, Type)> {
+        if let ast::Expr::Name(designator) = expr
+            && matches!(self.qualident(designator), Ok((Symbol::Var { .. }, _)))
+        {
+            let place = self.place(
+                designator,
+                format!("'{}' cannot be used in a type test", designator.name()),
+            )?;
+            let target = self.named_type(target_name)?;
+            return match (&place.ty, &target) {
+                (Type::Pointer(_), Type::Pointer(target_pointer))
+                    if pointer_extends(&target, &place.ty) =>
+                {
+                    let pointer = self.load(place.addr, ir::Ty::Pointer);
+                    let record = target_pointer.record()?;
+                    let dst = self.temp();
+                    self.emit(ir::Inst::TypeTestPointer {
+                        dst,
+                        pointer,
+                        target: record.descriptor.clone(),
+                    });
+                    Some((ir::Value::Temp(dst), Type::Boolean))
+                }
+                (Type::Record(subject), Type::Record(target_record))
+                    if matches!(place.dynamic, Some(RecordDynamic::Incoming(_)))
+                        && record_extends(target_record, subject) =>
+                {
+                    let descriptor = self.materialize_descriptor(&place);
+                    let dst = self.temp();
+                    self.emit(ir::Inst::TypeTestDescriptor {
+                        dst,
+                        descriptor,
+                        target: target_record.descriptor.clone(),
+                    });
+                    Some((ir::Value::Temp(dst), Type::Boolean))
+                }
+                (Type::Record(_), _)
+                    if !matches!(place.dynamic, Some(RecordDynamic::Incoming(_))) =>
+                {
+                    self.diags.push(Diagnostic::new(
+                        pos,
+                        "a record type test requires a record VAR parameter",
+                    ));
+                    None
+                }
+                _ => {
+                    self.type_test_mismatch(pos, target_name.pos, &place.ty, &target);
+                    None
+                }
+            };
+        }
+
+        let (value, subject) = self.lower_expr(expr)?;
+        let target = self.named_type(target_name)?;
+        match (&subject, &target) {
+            (Type::Nil, Type::Pointer(_)) => Some((ir::Value::Bool(false), Type::Boolean)),
+            (Type::Pointer(_), Type::Pointer(target_pointer))
+                if pointer_extends(&target, &subject) =>
+            {
+                let record = target_pointer.record()?;
+                let dst = self.temp();
+                self.emit(ir::Inst::TypeTestPointer {
+                    dst,
+                    pointer: value,
+                    target: record.descriptor.clone(),
+                });
+                Some((ir::Value::Temp(dst), Type::Boolean))
+            }
+            _ => {
+                self.type_test_mismatch(pos, target_name.pos, &subject, &target);
+                None
+            }
+        }
+    }
+
+    fn type_test_mismatch(&mut self, pos: Pos, target_pos: Pos, subject: &Type, target: &Type) {
+        let diagnostic = match (subject, target) {
+            (Type::Pointer(_), Type::Pointer(_)) | (Type::Record(_), Type::Record(_)) => {
+                Diagnostic::new(
+                    target_pos,
+                    format!("type-test target {target} must extend {subject}"),
+                )
+            }
+            (Type::Pointer(_) | Type::Nil, _) => Diagnostic::new(
+                target_pos,
+                format!("pointer type test requires a pointer type, found {target}"),
+            ),
+            (Type::Record(_), _) => Diagnostic::new(
+                target_pos,
+                format!("record type test requires a record type, found {target}"),
+            ),
+            _ => Diagnostic::new(
+                pos,
+                format!("a type test requires a pointer or record VAR parameter, found {subject}"),
+            ),
+        };
+        self.diags.push(diagnostic);
+    }
+
     // The storage a designator denotes, with every selector applied in source
     // order. `not_a_variable` is the caller's own wording for a designator
     // that names something else, because assignment, an argument, and an
@@ -2604,6 +3142,7 @@ impl Analyzer {
             addr,
             shape,
             read_only,
+            dynamic,
         } = symbol
         else {
             self.diags
@@ -2615,6 +3154,7 @@ impl Analyzer {
             ty,
             shape,
             read_only,
+            dynamic,
         };
         for selector in rest {
             match selector {
@@ -2632,6 +3172,9 @@ impl Analyzer {
                 }
                 ast::Selector::Deref(pos) => {
                     place = self.dereference(place, *pos)?;
+                }
+                ast::Selector::Guard(ty, pos) => {
+                    place = self.guard_place(place, ty, *pos)?;
                 }
             }
         }
@@ -2672,8 +3215,11 @@ impl Analyzer {
         Some(Place {
             addr: ir::Addr::Temp(dst),
             shape: fixed_shape(&ty),
-            ty,
+            ty: ty.clone(),
             read_only: base.read_only,
+            dynamic: ty
+                .record()
+                .map(|record| RecordDynamic::Static(record.descriptor.clone())),
         })
     }
 
@@ -2701,6 +3247,9 @@ impl Analyzer {
             ty: Type::Record(record),
             shape: Vec::new(),
             read_only: base.read_only,
+            // The checked pointer is enough to recover the hidden descriptor.
+            // Loading it is deferred until a call or dynamic operation needs it.
+            dynamic: Some(RecordDynamic::Heap(ir::Value::Temp(temp))),
         })
     }
 
@@ -2758,11 +3307,14 @@ impl Analyzer {
         });
         Some(Place {
             addr: ir::Addr::Temp(dst),
-            ty: elem,
+            ty: elem.clone(),
             shape: remaining_shape,
             // Report 9.1: an imported variable is read-only, and selecting
             // part of it does not make that part writable.
             read_only: base.read_only,
+            dynamic: elem
+                .record()
+                .map(|record| RecordDynamic::Static(record.descriptor.clone())),
         })
     }
 
@@ -2801,7 +3353,9 @@ impl Analyzer {
     // `TYPE T = ARRAY 4 OF RECORD ... END` the name belongs to the array.
     fn resolve_type_named(&mut self, source: &ast::TypeExpr, name: Option<&str>) -> Option<Type> {
         match source {
-            ast::TypeExpr::Record { fields, pos } => self.record_type(fields, name, *pos),
+            ast::TypeExpr::Record { base, fields, pos } => {
+                self.record_type(base.as_ref(), fields, name, *pos)
+            }
             ast::TypeExpr::Named(designator) => match self.resolve(designator) {
                 Ok(Symbol::TypeName(ty)) => Some(ty),
                 Ok(_) => {
@@ -2962,6 +3516,7 @@ impl Analyzer {
     // rather than a cycle. The layout below relies on that.
     fn record_type(
         &mut self,
+        base_name: Option<&ast::Designator>,
         lists: &[ast::FieldList],
         name: Option<&str>,
         pos: Pos,
@@ -2975,9 +3530,33 @@ impl Analyzer {
         // Oberon's rule instead aligns everything wider than a byte to four
         // and rounds every size up to four, which would make ARRAY 3 OF CHAR
         // occupy four bytes; this compiler keeps the exact-size array rule.
+        let base = match base_name {
+            Some(base) => match self.resolve(base) {
+                Ok(Symbol::TypeName(Type::Record(record))) => Some(record),
+                Ok(Symbol::TypeName(found)) => {
+                    self.diags.push(Diagnostic::new(
+                        base.pos,
+                        format!("record base must be a record type, found {found}"),
+                    ));
+                    return None;
+                }
+                Ok(_) => {
+                    self.diags.push(Diagnostic::new(
+                        base.pos,
+                        format!("'{}' is not a type", base.name()),
+                    ));
+                    return None;
+                }
+                Err(diag) => {
+                    self.diags.push(diag);
+                    return None;
+                }
+            },
+            None => None,
+        };
         let mut fields: Vec<Field> = Vec::new();
-        let mut offset: i64 = 0;
-        let mut align: i64 = 1;
+        let mut offset: i64 = base.as_ref().map_or(0, |base| base.size);
+        let mut align: i64 = base.as_ref().map_or(1, |base| base.align);
         let mut ok = true;
         for list in lists {
             // Every field list is resolved even after one of them fails, so a
@@ -2987,7 +3566,11 @@ impl Analyzer {
                 continue;
             };
             for id in &list.names {
-                if fields.iter().any(|field| field.name == id.name) {
+                if fields.iter().any(|field| field.name == id.name)
+                    || base
+                        .as_deref()
+                        .is_some_and(|base| find_field(base, &id.name, &self.module).is_some())
+                {
                     self.diags.push(Diagnostic::new(
                         id.pos,
                         format!("field '{}' is already declared", id.name),
@@ -3033,15 +3616,24 @@ impl Analyzer {
             ));
             return None;
         }
-        let contains_pointers = fields.iter().any(|field| field.ty.contains_pointers());
-        Some(Type::Record(Rc::new(RecordType {
+        let contains_pointers = base.as_ref().is_some_and(|base| base.contains_pointers)
+            || fields.iter().any(|field| field.ty.contains_pointers());
+        let descriptor = format!(".{}.type{}", self.module, self.descriptors.len());
+        let record = Rc::new(RecordType {
             fields,
             size,
             align,
             name: name.map(str::to_string),
             module: self.module.clone(),
+            base: base.clone(),
+            descriptor: descriptor.clone(),
             contains_pointers,
-        })))
+        });
+        self.descriptors.push(ir::Descriptor {
+            symbol: descriptor,
+            base: base.map(|base| base.descriptor.clone()),
+        });
+        Some(Type::Record(record))
     }
 
     // A designator that names an object directly, with no selectors left over.
@@ -3176,6 +3768,23 @@ impl Analyzer {
         ir::Value::Temp(dst)
     }
 
+    fn materialize_descriptor(&mut self, place: &Place) -> ir::Value {
+        match place
+            .dynamic
+            .as_ref()
+            .expect("a record place carries its dynamic descriptor")
+            .clone()
+        {
+            RecordDynamic::Static(symbol) => ir::Value::Symbol(symbol),
+            RecordDynamic::Incoming(value) => value,
+            RecordDynamic::Heap(pointer) => {
+                let dst = self.temp();
+                self.emit(ir::Inst::HeapDescriptor { dst, pointer });
+                ir::Value::Temp(dst)
+            }
+        }
+    }
+
     // Sets the flag on the innermost binding of `name` and returns what it
     // was, so a FOR statement can restore it rather than clearing it: a
     // nested FOR over the same variable must leave the outer one read-only.
@@ -3308,6 +3917,10 @@ fn selector_error(designator: &ast::Designator, selector: &ast::Selector) -> Dia
         ast::Selector::Deref(pos) => Diagnostic::new(
             *pos,
             format!("'{}' cannot be dereferenced here", designator.ident),
+        ),
+        ast::Selector::Guard(_, pos) => Diagnostic::new(
+            *pos,
+            format!("'{}' cannot be type-guarded here", designator.ident),
         ),
     }
 }

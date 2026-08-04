@@ -49,7 +49,7 @@ A pointer occupies eight bytes, has alignment eight, and travels in QBE's long c
 
 ### Pointers and `NIL`
 
-Each `POINTER` constructor creates one semantic type identity. Aliases and imported interfaces share that identity. Two separately written pointer constructors are nevertheless assignment-compatible and equality-compatible when their bases are the identical record type. A pointer `VAR` formal keeps the stricter identical-type rule.
+Each `POINTER` constructor creates one semantic type identity. Aliases and imported interfaces share that identity. Pointer types inherit the extension relation of their bound records, including across separately written pointer constructors. Assignment and value parameters accept a pointer whose base record extends the destination's base record. Equality and inequality accept two pointer types when either one extends the other. A pointer `VAR` formal keeps the stricter identical-type rule.
 
 A pointer base must be a record. While a `TYPE` section is being analyzed, an otherwise undeclared bare name used as a pointer base becomes a pending same-scope reference. Pending bases are resolved after that section. Ordinary lexical lookup runs first, qualified names never become pending, and every missing or non-record base is diagnosed before variables or statements are lowered.
 
@@ -57,7 +57,7 @@ Recursive source types form bounded shared descriptor graphs. A pointer descript
 
 `NIL` is a polymorphic constant whose pointer-class value is zero. It has a semantic pseudo-type but no source type name or storage layout. It is compatible with every pointer for assignment, value arguments, results, equality, and inequality. It is not an integer zero and is rejected in arithmetic, ordering, conditions, indexing, `CASE`, and other unrelated scalar operations.
 
-Explicit `p^` and implicit field selection through `p.f` use one checked dereference operation. The compiler loads the pointer once, emits `oberon_check_nil`, and only then treats the checked value as the address of its base record. Read-only status follows the address through dereference, fields, and indices. Short-circuit Boolean evaluation remains the way a source program guards a dereference.
+Explicit `p^` and implicit field selection through `p.f` use one checked dereference operation. The compiler loads the pointer once, emits `oberon_check_nil`, and only then treats the checked value as the address of its base record. The checked pointer also makes the heap object's dynamic record descriptor recoverable without loading it until a polymorphic call or dynamic-type operation needs it. Read-only status follows the address through dereference, fields, and indices. Short-circuit Boolean evaluation remains the way a source program guards a dereference.
 
 Fixed `LEN` has separate executable and required-constant paths. Executable `LEN(p.row)` resolves the designator and therefore executes nil and index checks before returning the declared length. Required-constant `LEN` follows selector types without loading pointers or evaluating indices; it still type-checks every index and diagnoses a constant index outside its fixed bound.
 
@@ -111,13 +111,15 @@ Assigning a string to a fixed character array requires the character count to be
 
 ## Structured representation
 
-Arrays and records live in storage and are represented by addresses whenever they cross a procedure boundary. A structured `VAR` parameter is a writable reference. A structured value parameter is a read-only reference, including every field and element selected from it, and no callee-side copy is made. A fixed structured formal requires a variable of the identical type. An open-array formal instead uses the recursive compatibility rule described below. A read-only variable may be passed to either kind of structured value parameter but not to a `VAR` parameter.
+Arrays and records live in storage and are represented by addresses whenever they cross a procedure boundary. A structured `VAR` parameter is a writable reference. A structured value parameter is a read-only reference, including every field and element selected from it, and no callee-side copy is made. A fixed array formal requires a variable of the identical type. A record value or `VAR` formal also accepts an actual whose static record type extends the formal type. An open-array formal uses the recursive compatibility rule described below. A read-only variable may be passed to either kind of structured value parameter but not to a `VAR` parameter.
+
+A record `VAR` formal expands into a QBE long address followed immediately by a QBE long dynamic descriptor. An ordinary record actual supplies its static descriptor. A forwarded record `VAR` formal supplies its incoming descriptor. A record reached through a checked pointer dereference loads the descriptor from the heap header only when the call needs it. A record value formal still carries only one address because the language does not permit a dynamic type test, guard, or type case on it.
 
 A structured value parameter is an address rather than a local copy because Report 10.1 confines the rule that a value parameter is a local variable holding the actual's value to basic types, and Report 9.1 then forbids assigning to a structured value parameter or to any of its elements. That pairing licenses passing the address and copying nothing, and all three reference compilers read it the same way. The consequence is that aliasing is observable: when one variable is passed both to a value parameter and to a `VAR` parameter of the same call, an assignment through the `VAR` parameter is visible through the value parameter immediately.
 
 A string is not a variable, so it cannot be the actual for a fixed character-array formal, whatever its length. Report 9.1's string exception attaches to an assignment, and no assignment to a structured formal ever happens.
 
-Whole-array and whole-record assignment copy the complete representation through `oberon_copy`, a `memmove` wrapper. Assignment resolves the destination before the source and accepts self-assignment. Records include their padding in the copy.
+Whole-array assignment and identical-record assignment copy the complete representation through `oberon_copy`, a `memmove` wrapper. Assignment from an extended record to a base record copies exactly the destination type's base prefix. Assignment through a base-record `VAR` formal therefore leaves the actual object's derived tail and dynamic type unchanged. Assignment resolves the destination before the source and accepts self-assignment. Every copied record prefix includes its padding.
 
 ### Open array formals
 
@@ -145,17 +147,25 @@ A length is a constant expression that must yield a non-negative `INTEGER`. Zero
 
 ### Record types have identity and field visibility
 
-Each `RECORD` constructor creates one type, just as each `ARRAY` constructor does. A record type descriptor holds its fields in declaration order, with each field's type, offset, and export mark. It also holds the record's size, alignment, declared name when it has one, and defining module. Aliases and imported interfaces share the descriptor, so identity and field visibility survive module boundaries.
+Each `RECORD` constructor creates one type, just as each `ARRAY` constructor does. Its semantic descriptor holds its direct base, directly declared fields in declaration order, size, alignment, declared name when it has one, defining module, and internal runtime descriptor symbol. Each field records its type, offset, and export mark. Aliases and imported interfaces share the descriptor, so identity, extension, runtime identity, and field visibility survive module boundaries.
 
-An unmarked field is visible only inside the module that declared the record. A client sees only marked fields, including when it reads an exported variable whose record type itself is private. Field selection adds the descriptor's fixed byte offset to the base address and carries the base's read-only status through subsequent selectors.
+The record extension relation is reflexive and transitive through direct bases. Field lookup starts in the derived record and continues through its bases. An unmarked field is visible only inside the module that declared its owning record. A client sees only marked inherited fields, including when it reads an exported variable whose record type itself is private. A visible inherited field cannot be redeclared. An imported private field is invisible and may be redeclared by the client. Field selection adds the inherited or direct field's fixed byte offset to the base address and carries the base's read-only status through subsequent selectors.
 
-Record extension is not implemented. Without extension, record assignment and structured parameter compatibility require identical types. Record comparison is not part of the language.
+Every record constructor also emits one internal runtime descriptor data object. The object is one aligned pointer-sized word containing its direct base descriptor's address or zero for a root. Internal symbols use the defining module and a module-local ordinal, so anonymous and local records cannot collide and aliases emit no duplicate object. A dynamic test walks these direct-base pointers, using descriptor addresses as nominal type identities. Record comparison is not part of the language.
+
+### Dynamic type operations
+
+`v IS T` accepts a pointer-valued expression when `T` is a pointer type extending the expression's static pointer type. It also accepts a record `VAR` formal when `T` is a record type extending its declared type. The subject is captured once. Pointer tests obtain the dynamic descriptor from a nonnull heap payload, while record tests use the formal's incoming descriptor. A false test yields `FALSE` and does not trap. This compiler defines `NIL IS T` as `FALSE`, including in constant expressions.
+
+A designator guard `v(T)` has the same applicability rules. It tests before any following selector, traps through `oberon_type_guard_failed` when false, and otherwise keeps the same storage while narrowing the designator's static type. Record guards preserve the incoming descriptor. Pointer guards preserve the pointer storage, so a later explicit or implicit dereference still performs the ordinary nil check. A terminal parenthesized postfix remains neutral in the AST until semantic analysis resolves its prefix as either a procedure or an eligible guarded designator.
+
+A type `CASE` accepts one qualified pointer variable or record `VAR` formal. It captures the pointer value or incoming descriptor once, tests one extension type label per arm in source order, and narrows references to the case variable only within the matching arm. The original type is restored before the next arm and after the statement. A nil pointer or other unmatched dynamic type falls through without the scalar `CASE` no-match trap. Scalar `INTEGER` and `CHAR` cases retain their range, overlap, and trap rules.
 
 ### Size, alignment, and the target object-size limit
 
 An array occupies exactly its length times its element size, with element *i* at *base + i × element size*. There is no padding between elements and no header. Its alignment is its element type's alignment.
 
-A record lays out fields in declaration order. Each field starts at the next offset aligned for its type. The record's alignment is the largest field alignment, and its size is rounded up to that alignment so an array of records has the correct stride. An empty record has size zero and alignment one.
+A root record lays out fields in declaration order. Each field starts at the next offset aligned for its type. The record's alignment is the largest field alignment, and its size is rounded up to that alignment so an array of records has the correct stride. An empty root record has size zero and alignment one. A derived record begins with its direct base's complete size, including tail padding. New fields start no earlier than that size, the derived alignment includes the base alignment, and the final size is rounded as usual. Every base is therefore a stable byte-for-byte prefix. Pointer containment is inherited from the base and combined with the new fields.
 
 A zero-length array has size zero and keeps its element alignment. It gains no hidden element and no minimum payload byte: QBE accepts a zero-byte data object and a zero-byte stack allocation, and no valid selector can reach inside one. A zero-length array field reserves no payload but still contributes its alignment.
 
@@ -222,11 +232,11 @@ The runtime intentionally remains minimal.
 
 ### Heap objects and allocation
 
-`NEW(p)` allocates exactly the payload size of the record bound to `p`; there is no heap header or runtime type descriptor. Allocation failure is the allocator's null result and is stored as `NIL`. The generated program calls only `oberon_alloc` and `oberon_alloc_atomic`, never BDWGC directly.
+`NEW(p)` passes the payload size and the currently selected bound record's static descriptor to an allocation wrapper. The allocation contains one hidden pointer-sized descriptor header immediately before the source payload, while the returned pointer still addresses the first source field. Source field offsets, record sizes, array strides, and copy counts therefore exclude the header. Allocation failure returns null before any header write or pointer adjustment and is stored as `NIL`. A zero-size payload reserves one additional hidden byte so the returned interior pointer is nonnull, lies within its allocation, and remains distinct from other live empty objects. The generated program calls only `oberon_alloc` and `oberon_alloc_atomic`, never BDWGC directly.
 
-Each record layout records whether its stored payload contains a pointer. A pointer field makes the record scanned without following the pointer's base. A positive-length array inherits the property from its element, a zero-length array does not, and a nested record contributes its already computed property. `NEW` selects `oberon_alloc` for a pointer-containing payload and `oberon_alloc_atomic` otherwise.
+Each record layout records whether its complete source payload contains a pointer. A pointer field makes the record scanned without following the pointer's base. A derived record inherits pointer containment from its base. A positive-length array inherits the property from its element, a zero-length array does not, and a nested record contributes its already computed property. `NEW` selects `oberon_alloc` for a pointer-containing payload and `oberon_alloc_atomic` otherwise. A descriptor pointer in an atomic object's header names static data rather than a GC allocation and does not require scanning.
 
-Pointer globals, stack slots, parameters, temporaries, and scanned heap fields are ordinary conservative roots. A selected `NEW` target may leave only an interior address live across the allocation call, so `oberon_init` enables arbitrary interior-pointer recognition before `GC_INIT`. This preserves the containing heap object and also preserves source evaluation order because every target selector is evaluated once before allocation.
+Pointer globals, stack slots, parameters, temporaries, and scanned heap fields are ordinary conservative roots. Every returned payload pointer is an interior pointer because of the descriptor header. A selected `NEW` target may also leave only an interior field address live across the allocation call, so `oberon_init` enables arbitrary interior-pointer recognition before `GC_INIT`. This preserves both heap objects and source evaluation order because every target selector is evaluated once before allocation.
 
 ## Garbage Collection
 

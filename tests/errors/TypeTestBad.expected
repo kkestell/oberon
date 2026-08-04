@@ -1,0 +1,12 @@
+tests/errors/TypeTestBad.Mod:13:20: a record type test requires a record VAR parameter
+tests/errors/TypeTestBad.Mod:16:23: record type test requires a record type, found PChild
+tests/errors/TypeTestBad.Mod:20:13: a record type test requires a record VAR parameter
+tests/errors/TypeTestBad.Mod:21:10: a type test requires a pointer or record VAR parameter, found INTEGER
+tests/errors/TypeTestBad.Mod:22:8: 'P' cannot be used as a value
+tests/errors/TypeTestBad.Mod:23:19: 'target' is not a type
+tests/errors/TypeTestBad.Mod:24:19: pointer type test requires a pointer type, found Child
+tests/errors/TypeTestBad.Mod:25:17: pointer type test requires a pointer type, found Root
+tests/errors/TypeTestBad.Mod:26:19: type-test target POther must extend PRoot
+tests/errors/TypeTestBad.Mod:27:17: type-test target PRoot must extend PChild
+tests/errors/TypeTestBad.Mod:28:15: pointer type test requires a pointer type, found Child
+Error: 11 error(s)

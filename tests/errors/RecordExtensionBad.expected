@@ -1,2 +1,12 @@
-tests/errors/RecordExtensionBad.Mod:3:25: not yet supported: record extension
-Error: 1 error(s)
+tests/errors/RecordExtensionBad.Mod:2:26: undeclared identifier 'Absent'
+tests/errors/RecordExtensionBad.Mod:3:28: record base must be a record type, found INTEGER
+tests/errors/RecordExtensionBad.Mod:4:26: undeclared identifier 'Later'
+tests/errors/RecordExtensionBad.Mod:7:30: field 'value' is already declared
+tests/errors/RecordExtensionBad.Mod:19:12: cannot assign Base to GoodChild
+tests/errors/RecordExtensionBad.Mod:20:12: cannot assign Sibling to GoodChild
+tests/errors/RecordExtensionBad.Mod:21:13: argument 1 has type Base, expected GoodChild
+tests/errors/RecordExtensionBad.Mod:22:13: cannot assign PBase to PChild
+tests/errors/RecordExtensionBad.Mod:23:15: cannot assign PChild to PSibling
+tests/errors/RecordExtensionBad.Mod:24:19: operator '=' requires operands of the same type, found PChild and PSibling
+tests/errors/RecordExtensionBad.Mod:25:14: argument 1 has type PChild, expected PBase
+Error: 11 error(s)

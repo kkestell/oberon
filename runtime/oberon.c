@@ -21,8 +21,57 @@ void oberon_init(void)
     GC_set_all_interior_pointers(1);
     GC_INIT();
 }
-void *oberon_alloc(size_t n)        { return GC_MALLOC(n); }
-void *oberon_alloc_atomic(size_t n) { return GC_MALLOC_ATOMIC(n); }
+typedef struct OberonTypeDescriptor OberonTypeDescriptor;
+struct OberonTypeDescriptor {
+    const OberonTypeDescriptor *base;
+};
+
+static void *oberon_alloc_with_header(size_t n, const OberonTypeDescriptor *type, int atomic)
+{
+    size_t payload = n == 0 ? 1 : n;
+    void *allocation = atomic
+        ? GC_MALLOC_ATOMIC(sizeof(type) + payload)
+        : GC_MALLOC(sizeof(type) + payload);
+    if (allocation == NULL) {
+        return NULL;
+    }
+    *(const OberonTypeDescriptor **)allocation = type;
+    return (char *)allocation + sizeof(type);
+}
+
+void *oberon_alloc(size_t n, const OberonTypeDescriptor *type)
+{
+    return oberon_alloc_with_header(n, type, 0);
+}
+
+void *oberon_alloc_atomic(size_t n, const OberonTypeDescriptor *type)
+{
+    return oberon_alloc_with_header(n, type, 1);
+}
+
+const OberonTypeDescriptor *oberon_heap_descriptor(const void *pointer)
+{
+    return ((const OberonTypeDescriptor *const *)pointer)[-1];
+}
+
+int32_t oberon_type_test_descriptor(
+    const OberonTypeDescriptor *actual,
+    const OberonTypeDescriptor *target)
+{
+    while (actual != NULL) {
+        if (actual == target) {
+            return 1;
+        }
+        actual = actual->base;
+    }
+    return 0;
+}
+
+int32_t oberon_type_test_pointer(const void *pointer, const OberonTypeDescriptor *target)
+{
+    return pointer != NULL
+        && oberon_type_test_descriptor(oberon_heap_descriptor(pointer), target);
+}
 
 /* Report 8.1: p^ and the implicit dereference in p.f both require p to point
    at a record, so a null pointer has no storage to select from. The check runs
@@ -151,6 +200,12 @@ void oberon_abs_overflow(void)
 void oberon_case_no_match(void)
 {
     fputs("CASE without matching label\n", stderr);
+    exit(1);
+}
+
+void oberon_type_guard_failed(void)
+{
+    fputs("type guard failed\n", stderr);
     exit(1);
 }
 

@@ -63,10 +63,9 @@ pub enum TypeExpr {
         elem: Box<TypeExpr>,
         pos: Pos,
     },
-    // RecordType = RECORD ["(" BaseType ")"] [FieldListSequence] END. The
-    // extension form is rejected in the parser, so only the field lists arrive
-    // here, and an empty sequence is legal.
+    // RecordType = RECORD ["(" BaseType ")"] [FieldListSequence] END.
     Record {
+        base: Option<Designator>,
         fields: Vec<FieldList>,
         pos: Pos,
     },
@@ -130,11 +129,12 @@ pub struct Designator {
 
 #[derive(Debug, Clone)]
 pub enum Selector {
-    Field(String, Pos), // TODO: TypeGuard
+    Field(String, Pos),
     // selector = "[" ExpList "]". One source selector holds the whole comma
     // list, which Report 8.1 defines as one index selector per expression.
     Index(Vec<Expr>, Pos),
     Deref(Pos),
+    Guard(Designator, Pos),
 }
 
 impl Designator {
@@ -151,6 +151,11 @@ impl Designator {
                 }
                 Selector::Index(..) => s.push_str("[...]"),
                 Selector::Deref(_) => s.push('^'),
+                Selector::Guard(ty, _) => {
+                    s.push('(');
+                    s.push_str(&ty.name());
+                    s.push(')');
+                }
             }
         }
         s
@@ -247,9 +252,16 @@ pub enum Expr {
         elements: Vec<SetElement>,
         pos: Pos,
     },
-    Call {
+    // A terminal parenthesized postfix is ambiguous until the prefix is
+    // resolved: it can be a call or the final type guard of a designator.
+    Apply {
         callee: Designator,
         args: Vec<Expr>,
+        pos: Pos,
+    },
+    TypeTest {
+        expr: Box<Expr>,
+        ty: Designator,
         pos: Pos,
     },
     Unary {
@@ -313,7 +325,8 @@ impl Expr {
             | Expr::Nil { pos }
             | Expr::Str { pos, .. }
             | Expr::Set { pos, .. }
-            | Expr::Call { pos, .. }
+            | Expr::Apply { pos, .. }
+            | Expr::TypeTest { pos, .. }
             | Expr::Unary { pos, .. }
             | Expr::Binary { pos, .. } => *pos,
             Expr::Name(d) => d.pos,

@@ -8,6 +8,17 @@ use crate::ir;
 pub fn emit(program: &ir::Program) -> String {
     let mut out = String::new();
     for module in &program.modules {
+        for descriptor in &module.descriptors {
+            match &descriptor.base {
+                Some(base) => writeln!(
+                    out,
+                    "data ${} = align 8 {{ l ${} }}",
+                    descriptor.symbol, base
+                )
+                .unwrap(),
+                None => writeln!(out, "data ${} = align 8 {{ l 0 }}", descriptor.symbol).unwrap(),
+            }
+        }
         for global in &module.globals {
             // A zero-length array reserves nothing; QBE accepts `z 0` and the
             // assembler emits an empty, still-addressable object.
@@ -31,7 +42,10 @@ pub fn emit(program: &ir::Program) -> String {
             }
             writeln!(out, " 0 }}").unwrap();
         }
-        if !module.globals.is_empty() || !module.literals.is_empty() {
+        if !module.descriptors.is_empty()
+            || !module.globals.is_empty()
+            || !module.literals.is_empty()
+        {
             writeln!(out).unwrap();
         }
 
@@ -159,13 +173,58 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
         ir::Inst::CheckNil { pointer } => {
             writeln!(out, "\tcall $oberon_check_nil(l {})", value(pointer)).unwrap();
         }
-        ir::Inst::Alloc { dst, size, scanned } => {
+        ir::Inst::Alloc {
+            dst,
+            size,
+            scanned,
+            descriptor,
+        } => {
             let symbol = if *scanned {
                 "oberon_alloc"
             } else {
                 "oberon_alloc_atomic"
             };
-            writeln!(out, "\t{} =l call ${symbol}(l {size})", temp(*dst)).unwrap();
+            writeln!(
+                out,
+                "\t{} =l call ${symbol}(l {size}, l ${descriptor})",
+                temp(*dst)
+            )
+            .unwrap();
+        }
+        ir::Inst::HeapDescriptor { dst, pointer } => {
+            writeln!(
+                out,
+                "\t{} =l call $oberon_heap_descriptor(l {})",
+                temp(*dst),
+                value(pointer)
+            )
+            .unwrap();
+        }
+        ir::Inst::TypeTestPointer {
+            dst,
+            pointer,
+            target,
+        } => {
+            writeln!(
+                out,
+                "\t{} =w call $oberon_type_test_pointer(l {}, l ${target})",
+                temp(*dst),
+                value(pointer)
+            )
+            .unwrap();
+        }
+        ir::Inst::TypeTestDescriptor {
+            dst,
+            descriptor,
+            target,
+        } => {
+            writeln!(
+                out,
+                "\t{} =w call $oberon_type_test_descriptor(l {}, l ${target})",
+                temp(*dst),
+                value(descriptor)
+            )
+            .unwrap();
         }
         // The check is a call, so it is textually and dynamically ahead of
         // every part of the address calculation: nothing scales or adds an
@@ -350,6 +409,7 @@ fn value(value: &ir::Value) -> String {
         ir::Value::Real(v) => (v.to_bits() as i32).to_string(),
         ir::Value::Byte(v) => v.to_string(),
         ir::Value::Pointer(v) => v.to_string(),
+        ir::Value::Symbol(symbol) => format!("${symbol}"),
         ir::Value::Temp(id) => temp(*id),
     }
 }

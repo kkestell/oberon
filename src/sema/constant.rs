@@ -217,7 +217,14 @@ impl Analyzer {
             // so the rest of the expression can be checked. eval_const is what
             // reports that it cannot be folded.
             ast::Expr::Name(designator) => self.check_const_designator_type(designator),
-            ast::Expr::Call { callee, args, pos } => self.check_const_call(callee, args, *pos),
+            ast::Expr::Apply { callee, args, pos } => {
+                if self.application_is_call(callee) {
+                    self.check_const_call(callee, args, *pos)
+                } else {
+                    self.check_const_guard(callee, args, *pos)
+                }
+            }
+            ast::Expr::TypeTest { expr, ty, pos } => self.check_const_type_test(expr, ty, *pos),
             ast::Expr::Unary { op, expr, pos } => {
                 let found = self.check_const_expr(expr)?;
                 match (op, &found) {
@@ -308,6 +315,94 @@ impl Analyzer {
         }
     }
 
+    fn check_const_type_test(
+        &mut self,
+        expr: &ast::Expr,
+        target_name: &ast::Designator,
+        pos: Pos,
+    ) -> Option<Type> {
+        let subject = self.check_const_expr(expr)?;
+        let target = self.named_type(target_name)?;
+        let valid = match (&subject, &target) {
+            (Type::Nil, Type::Pointer(_)) => true,
+            (Type::Pointer(_), Type::Pointer(_)) => pointer_extends(&target, &subject),
+            (Type::Record(subject), Type::Record(target)) => {
+                self.record_var_formal_expr(expr) && record_extends(target, subject)
+            }
+            _ => false,
+        };
+        if valid {
+            Some(Type::Boolean)
+        } else {
+            if matches!(subject, Type::Record(_)) && !self.record_var_formal_expr(expr) {
+                self.diags.push(Diagnostic::new(
+                    pos,
+                    "a record type test requires a record VAR parameter",
+                ));
+            } else {
+                self.type_test_mismatch(pos, target_name.pos, &subject, &target);
+            }
+            None
+        }
+    }
+
+    fn check_const_guard(
+        &mut self,
+        callee: &ast::Designator,
+        args: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<Type> {
+        let subject = self.check_const_designator_type(callee)?;
+        let [ast::Expr::Name(target_name)] = args else {
+            for arg in args {
+                let _ = self.check_const_expr(arg);
+            }
+            self.diags.push(Diagnostic::new(
+                pos,
+                "a type guard requires exactly one qualified type name",
+            ));
+            return None;
+        };
+        let target = self.named_type(target_name)?;
+        let valid = match (&subject, &target) {
+            (Type::Pointer(_), Type::Pointer(_)) => pointer_extends(&target, &subject),
+            (Type::Record(subject), Type::Record(target)) => {
+                self.record_var_formal_designator(callee) && record_extends(target, subject)
+            }
+            _ => false,
+        };
+        if valid {
+            Some(target)
+        } else {
+            if matches!(subject, Type::Record(_)) && !self.record_var_formal_designator(callee) {
+                self.diags.push(Diagnostic::new(
+                    pos,
+                    "a record guard requires a record VAR parameter",
+                ));
+            } else {
+                self.type_test_mismatch(pos, target_name.pos, &subject, &target);
+            }
+            None
+        }
+    }
+
+    fn record_var_formal_expr(&self, expr: &ast::Expr) -> bool {
+        matches!(expr, ast::Expr::Name(designator) if self.record_var_formal_designator(designator))
+    }
+
+    fn record_var_formal_designator(&self, designator: &ast::Designator) -> bool {
+        matches!(
+            self.qualident(designator),
+            Ok((
+                Symbol::Var {
+                    dynamic: Some(RecordDynamic::Incoming(_)),
+                    ..
+                },
+                []
+            ))
+        )
+    }
+
     fn check_const_call(
         &mut self,
         callee: &ast::Designator,
@@ -359,6 +454,10 @@ impl Analyzer {
                             || (!*var
                                 && matches!(found, Type::String(_))
                                 && open_string_formal(expected)))
+                    } else if let (Some(expected), Some(found)) =
+                        (expected.record(), found.record())
+                    {
+                        !record_extends(found, expected)
                     } else {
                         found != *expected
                     }
@@ -608,13 +707,41 @@ impl Analyzer {
                     format!("'{}' is not a constant", designator.name()),
                 )),
             },
-            ast::Expr::Call { callee, args, pos } => match self.resolve(callee)? {
-                Symbol::Builtin(builtin) => self.eval_const_builtin(builtin, callee, args, *pos),
-                _ => Err(Diagnostic::new(
-                    *pos,
-                    "constant expression contains a procedure call",
-                )),
-            },
+            ast::Expr::Apply { callee, args, pos } => {
+                if !self.application_is_call(callee) {
+                    return Err(Diagnostic::new(
+                        *pos,
+                        "constant expression contains a type guard",
+                    ));
+                }
+                match self.resolve(callee)? {
+                    Symbol::Builtin(builtin) => {
+                        self.eval_const_builtin(builtin, callee, args, *pos)
+                    }
+                    _ => Err(Diagnostic::new(
+                        *pos,
+                        "constant expression contains a procedure call",
+                    )),
+                }
+            }
+            ast::Expr::TypeTest { expr, ty, pos } => {
+                let target = match self.resolve(ty)? {
+                    Symbol::TypeName(target) => target,
+                    _ => {
+                        return Err(Diagnostic::new(
+                            ty.pos,
+                            format!("'{}' is not a type", ty.name()),
+                        ));
+                    }
+                };
+                match (self.eval_const(expr)?, target) {
+                    (ConstValue::Nil, Type::Pointer(_)) => Ok(ConstValue::Bool(false)),
+                    _ => Err(Diagnostic::new(
+                        *pos,
+                        "type test is not a constant operation",
+                    )),
+                }
+            }
             ast::Expr::Unary { op, expr, pos } => {
                 let value = self.eval_const(expr)?;
                 match (op, value) {
@@ -708,7 +835,7 @@ impl Analyzer {
             // anything: the argument names an array variable and every
             // selector on it is itself constant. A dynamic selector makes the
             // call nonconstant even though its result is statically known.
-            ast::Expr::Call { callee, args, .. }
+            ast::Expr::Apply { callee, args, .. }
                 if matches!(self.resolve(callee), Ok(Symbol::Builtin(Builtin::Len))) =>
             {
                 let [ast::Expr::Name(designator)] = args.as_slice() else {
@@ -716,11 +843,14 @@ impl Analyzer {
                 };
                 matches!(self.len_designator_type(designator), Ok(ty) if ty.array().is_some())
             }
-            ast::Expr::Call { callee, args, .. } => {
+            ast::Expr::Apply { callee, args, .. } => {
                 matches!(
                     self.resolve(callee),
                     Ok(Symbol::Builtin(builtin)) if builtin_signature(builtin).is_some()
                 ) && args.iter().all(|arg| self.is_const_expr(arg))
+            }
+            ast::Expr::TypeTest { expr, .. } => {
+                matches!(self.eval_const(expr), Ok(ConstValue::Nil))
             }
             ast::Expr::Unary { expr, .. } => self.is_const_expr(expr),
             ast::Expr::Binary { lhs, rhs, .. } => {
@@ -806,6 +936,13 @@ impl Analyzer {
                         return None;
                     }
                 },
+                ast::Selector::Guard(_, pos) => {
+                    self.diags.push(Diagnostic::new(
+                        *pos,
+                        "constant expression contains a type guard",
+                    ));
+                    return None;
+                }
             }
         }
         Some(ty)
@@ -897,6 +1034,13 @@ impl Analyzer {
                         ty = elem;
                     }
                 }
+                ast::Selector::Guard(_, pos) => {
+                    self.diags.push(Diagnostic::new(
+                        *pos,
+                        "constant expression contains a type guard",
+                    ));
+                    return None;
+                }
             }
         }
         Some(ty)
@@ -934,6 +1078,12 @@ impl Analyzer {
                         }
                         ty = elem.clone();
                     }
+                }
+                ast::Selector::Guard(_, pos) => {
+                    return Err(Diagnostic::new(
+                        *pos,
+                        "constant expression contains a type guard",
+                    ));
                 }
             }
         }
@@ -986,7 +1136,7 @@ impl Analyzer {
             // A designator carries index selectors of its own, and LEN of one
             // array can be the index into another.
             ast::Expr::Name(designator) => self.const_selector_call(designator),
-            ast::Expr::Call { callee, args, pos } => {
+            ast::Expr::Apply { callee, args, pos } => {
                 if !matches!(self.resolve(callee), Ok(Symbol::Builtin(_))) {
                     return Some(Diagnostic::new(
                         *pos,
@@ -995,6 +1145,7 @@ impl Analyzer {
                 }
                 args.iter().find_map(|arg| self.const_index_call(arg))
             }
+            ast::Expr::TypeTest { expr, .. } => self.const_index_call(expr),
             ast::Expr::Unary { expr, .. } => self.const_index_call(expr),
             ast::Expr::Binary { lhs, rhs, .. } => self
                 .const_index_call(lhs)
@@ -1011,6 +1162,10 @@ impl Analyzer {
                     exprs.iter().find_map(|expr| self.const_index_call(expr))
                 }
                 ast::Selector::Field(..) | ast::Selector::Deref(_) => None,
+                ast::Selector::Guard(_, pos) => Some(Diagnostic::new(
+                    *pos,
+                    "constant expression contains a type guard",
+                )),
             })
     }
 

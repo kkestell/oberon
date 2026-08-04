@@ -192,6 +192,13 @@ impl Build {
 fn check_static_data(program: &ir::Program) -> Result<()> {
     let mut total: i64 = 0;
     for module in &program.modules {
+        if !module.descriptors.is_empty() {
+            total = (total + 7) / 8 * 8
+                + i64::try_from(module.descriptors.len()).expect("descriptor count fits") * 8;
+        }
+        if total > ir::MAX_OBJECT_SIZE {
+            bail!("program static data exceeds target object-size limit");
+        }
         for global in &module.globals {
             let align = global.ty.align();
             total = (total + align - 1) / align * align + global.ty.size();
