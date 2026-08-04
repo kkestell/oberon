@@ -45,6 +45,22 @@ The generated `main` calls `oberon_init` and then calls each module's initialize
 
 `INTEGER` is a signed 32-bit number, `BOOLEAN` is 0 or 1, and `SET` is a 32-bit bit vector; all three occupy four bytes and travel in a QBE word. `REAL` is an IEEE 754 binary32 value and travels in a QBE single, which is the platform's native C `float` calling class. Not every scalar is four bytes: `CHAR` and `BYTE` occupy one unsigned byte each, load zero-extended with `loadub`, store with `storeb`, and still travel in a QBE word in every calling position. All six remain distinct semantic types: sharing a machine class never makes one assignable to another, and `INTEGER` and `REAL` never mix implicitly even though both are numeric.
 
+A pointer occupies eight bytes, has alignment eight, and travels in QBE's long class. Pointer storage loads with `loadl` and stores with `storel`. A pointer value is distinct from the address of the variable that stores it, so a value parameter receives and copies the pointer while a `VAR` parameter receives the address of pointer storage. Pointer function results also use the long class.
+
+### Pointers and `NIL`
+
+Each `POINTER` constructor creates one semantic type identity. Aliases and imported interfaces share that identity. Two separately written pointer constructors are nevertheless assignment-compatible and equality-compatible when their bases are the identical record type. A pointer `VAR` formal keeps the stricter identical-type rule.
+
+A pointer base must be a record. While a `TYPE` section is being analyzed, an otherwise undeclared bare name used as a pointer base becomes a pending same-scope reference. Pending bases are resolved after that section. Ordinary lexical lookup runs first, qualified names never become pending, and every missing or non-record base is diagnosed before variables or statements are lowered.
+
+Recursive source types form bounded shared descriptor graphs. A pointer descriptor holds a mutable pending, resolved, or invalid base state, and a record descriptor owns its field types. Debug formatting stays shallow so a recursive record and pointer pair cannot recurse while being printed.
+
+`NIL` is a polymorphic constant whose pointer-class value is zero. It has a semantic pseudo-type but no source type name or storage layout. It is compatible with every pointer for assignment, value arguments, results, equality, and inequality. It is not an integer zero and is rejected in arithmetic, ordering, conditions, indexing, `CASE`, and other unrelated scalar operations.
+
+Explicit `p^` and implicit field selection through `p.f` use one checked dereference operation. The compiler loads the pointer once, emits `oberon_check_nil`, and only then treats the checked value as the address of its base record. Read-only status follows the address through dereference, fields, and indices. Short-circuit Boolean evaluation remains the way a source program guards a dereference.
+
+Fixed `LEN` has separate executable and required-constant paths. Executable `LEN(p.row)` resolves the designator and therefore executes nil and index checks before returning the declared length. Required-constant `LEN` follows selector types without loading pointers or evaluating indices; it still type-checks every index and diagnoses a constant index outside its fixed bound.
+
 ### REAL
 
 Project Oberon gives `REAL` four bytes and operates on the binary32 sign, exponent, and fraction fields. QBE defines its `s` type as an IEEE 754 32-bit float and passes it in the platform's floating-point class. The two agree, so no compiler-specific calling convention is needed and no target description or configurable floating-point layer exists.
@@ -151,7 +167,9 @@ Arrays and records are never loaded as scalar values. A structured designator is
 
 `LEN(v)` is the length of the fixed array `v`, as an `INTEGER`. Because that length is a property of the type, the result is an immediate — but the argument designator is still resolved, so `LEN(a[f()])` calls `f` once and checks its result before answering with the statically known inner length. Nothing about a source effect or an invalid selection is erased by the answer being known.
 
-In a required constant context, such as a constant declaration or another array's length, `LEN` folds when every selector is constant and in range. The array variable itself need not be a constant. A dynamic selector makes the call nonconstant even though its eventual result is static, and an out-of-range constant selector is a source error. Nothing observable is skipped by folding, because a required constant expression cannot contain a call or an assignment in the first place.
+In a required constant context, such as a constant declaration or another array's length, `LEN` follows the designator's types without executing its selectors. The array variable itself need not be a constant, and a dynamic INTEGER index does not prevent folding. Every index is still type-checked, and an out-of-range constant index remains a source error. Pointer selectors are followed without loading or checking the pointer.
+
+Nothing observable is skipped, because the two things this path declines to do are both unobservable. Reading a variable has no effect, so an index that names one can be ignored. Calling a procedure does have an effect, so an index that contains a call is a source error instead — the same error a call anywhere else in a constant expression gets, and the reason Report 8 can define a constant expression as one a textual scan evaluates without running the program.
 
 ### Types across module boundaries
 
@@ -184,6 +202,14 @@ A small C runtime provides:
 * standard library implementation
 
 The runtime intentionally remains minimal.
+
+### Heap objects and allocation
+
+`NEW(p)` allocates exactly the payload size of the record bound to `p`; there is no heap header or runtime type descriptor. Allocation failure is the allocator's null result and is stored as `NIL`. The generated program calls only `oberon_alloc` and `oberon_alloc_atomic`, never BDWGC directly.
+
+Each record layout records whether its stored payload contains a pointer. A pointer field makes the record scanned without following the pointer's base. A positive-length array inherits the property from its element, a zero-length array does not, and a nested record contributes its already computed property. `NEW` selects `oberon_alloc` for a pointer-containing payload and `oberon_alloc_atomic` otherwise.
+
+Pointer globals, stack slots, parameters, temporaries, and scanned heap fields are ordinary conservative roots. A selected `NEW` target may leave only an interior address live across the allocation call, so `oberon_init` enables arbitrary interior-pointer recognition before `GC_INIT`. This preserves the containing heap object and also preserves source evaluation order because every target selector is evaluated once before allocation.
 
 ## Garbage Collection
 

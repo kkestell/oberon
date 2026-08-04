@@ -51,8 +51,8 @@ pub struct VarDecl {
 }
 
 // type = qualident | StrucType. The parser produces Named for a qualident and
-// Array or Record for the two StrucTypes this compiler has; POINTER and
-// PROCEDURE types are rejected in the parser and arrive with their slices.
+// Array, Record, or Pointer for the StrucTypes this compiler has; PROCEDURE
+// types are rejected in the parser and arrive with their slice.
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     Named(Designator),
@@ -70,6 +70,10 @@ pub enum TypeExpr {
         fields: Vec<FieldList>,
         pos: Pos,
     },
+    Pointer {
+        base: Box<TypeExpr>,
+        pos: Pos,
+    },
 }
 
 // FieldList = IdentList ":" type. The names are identdefs, so a field may
@@ -84,7 +88,9 @@ impl TypeExpr {
     pub fn pos(&self) -> Pos {
         match self {
             TypeExpr::Named(d) => d.pos,
-            TypeExpr::Array { pos, .. } | TypeExpr::Record { pos, .. } => *pos,
+            TypeExpr::Array { pos, .. }
+            | TypeExpr::Record { pos, .. }
+            | TypeExpr::Pointer { pos, .. } => *pos,
         }
     }
 }
@@ -123,10 +129,11 @@ pub struct Designator {
 
 #[derive(Debug, Clone)]
 pub enum Selector {
-    Field(String, Pos), // TODO: Deref, TypeGuard
+    Field(String, Pos), // TODO: TypeGuard
     // selector = "[" ExpList "]". One source selector holds the whole comma
     // list, which Report 8.1 defines as one index selector per expression.
     Index(Vec<Expr>, Pos),
+    Deref(Pos),
 }
 
 impl Designator {
@@ -142,6 +149,7 @@ impl Designator {
                     s.push_str(f);
                 }
                 Selector::Index(..) => s.push_str("[...]"),
+                Selector::Deref(_) => s.push('^'),
             }
         }
         s
@@ -222,6 +230,9 @@ pub enum Expr {
         value: bool,
         pos: Pos,
     },
+    Nil {
+        pos: Pos,
+    },
     // Both of Report 3's string forms: the lexer has already turned 41X into
     // a one-byte string, so no character literal exists as a separate node.
     Str {
@@ -298,6 +309,7 @@ impl Expr {
             Expr::Int { pos, .. }
             | Expr::Real { pos, .. }
             | Expr::Bool { pos, .. }
+            | Expr::Nil { pos }
             | Expr::Str { pos, .. }
             | Expr::Set { pos, .. }
             | Expr::Call { pos, .. }

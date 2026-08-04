@@ -1,0 +1,7 @@
+tests/errors/PointerLenBad.Mod:9:17: cannot select 'missing': R has no such field
+tests/errors/PointerLenBad.Mod:9:42: array index must be INTEGER, found BOOLEAN
+tests/errors/PointerLenBad.Mod:9:61: index 2 is out of bounds: the array has length 2
+tests/errors/PointerLenBad.Mod:10:17: constant expression contains a procedure call
+tests/errors/PointerLenBad.Mod:10:38: constant expression contains a procedure call
+tests/errors/PointerLenBad.Mod:14:20: constant expression contains a procedure call
+Error: 6 error(s)

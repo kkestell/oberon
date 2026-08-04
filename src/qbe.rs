@@ -156,6 +156,17 @@ fn emit_inst(out: &mut String, inst: &ir::Inst) {
         ir::Inst::IntToReal { dst, arg } => {
             writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg)).unwrap();
         }
+        ir::Inst::CheckNil { pointer } => {
+            writeln!(out, "\tcall $oberon_check_nil(l {})", value(pointer)).unwrap();
+        }
+        ir::Inst::Alloc { dst, size, scanned } => {
+            let symbol = if *scanned {
+                "oberon_alloc"
+            } else {
+                "oberon_alloc_atomic"
+            };
+            writeln!(out, "\t{} =l call ${symbol}(l {size})", temp(*dst)).unwrap();
+        }
         // The check is a call, so it is textually and dynamically ahead of
         // every part of the address calculation: nothing scales or adds an
         // index the runtime has not accepted. The two intermediate temporaries
@@ -231,6 +242,7 @@ fn class(ty: ir::Ty) -> &'static str {
     match ty {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set | ir::Ty::Byte => "w",
         ir::Ty::Real => "s",
+        ir::Ty::Pointer => "l",
     }
 }
 
@@ -241,6 +253,7 @@ fn load_op(ty: ir::Ty) -> &'static str {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "loadw",
         ir::Ty::Real => "loads",
         ir::Ty::Byte => "loadub",
+        ir::Ty::Pointer => "loadl",
     }
 }
 
@@ -249,6 +262,7 @@ fn store_op(ty: ir::Ty) -> &'static str {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "storew",
         ir::Ty::Real => "stores",
         ir::Ty::Byte => "storeb",
+        ir::Ty::Pointer => "storel",
     }
 }
 
@@ -283,6 +297,7 @@ fn value(value: &ir::Value) -> String {
         // states directly.
         ir::Value::Real(v) => (v.to_bits() as i32).to_string(),
         ir::Value::Byte(v) => v.to_string(),
+        ir::Value::Pointer(v) => v.to_string(),
         ir::Value::Temp(id) => temp(*id),
     }
 }
@@ -301,6 +316,7 @@ fn address(addr: &ir::Addr) -> String {
 // The remaining operations are word-only and never see a REAL operand.
 fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
     let real = ty == ir::Ty::Real;
+    let pointer = ty == ir::Ty::Pointer;
     match op {
         ir::BinOp::Add => "add",
         ir::BinOp::Sub => "sub",
@@ -313,6 +329,8 @@ fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
         ir::BinOp::Le if real => "cles",
         ir::BinOp::Gt if real => "cgts",
         ir::BinOp::Ge if real => "cges",
+        ir::BinOp::Eq if pointer => "ceql",
+        ir::BinOp::Ne if pointer => "cnel",
         ir::BinOp::Eq => "ceqw",
         ir::BinOp::Ne => "cnew",
         ir::BinOp::Lt => "csltw",

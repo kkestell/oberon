@@ -192,10 +192,20 @@ impl Parser {
         match self.peek() {
             Tok::Array => self.array_type(),
             Tok::Record => self.record_type(),
-            Tok::Pointer => self.unsupported("POINTER types"),
+            Tok::Pointer => self.pointer_type(),
             Tok::Procedure => self.unsupported("PROCEDURE types"),
             _ => Ok(TypeExpr::Named(self.qualident("type name")?)),
         }
+    }
+
+    // PointerType = POINTER TO type. The base is parsed through the complete
+    // type production; sema is what restricts it to a record type.
+    fn pointer_type(&mut self) -> PResult<TypeExpr> {
+        let pos = self.pos();
+        self.expect(Tok::Pointer, "'POINTER'")?;
+        self.expect(Tok::To, "'TO'")?;
+        let base = Box::new(self.source_type()?);
+        Ok(TypeExpr::Pointer { base, pos })
     }
 
     // ArrayType = ARRAY length {"," length} OF type
@@ -626,7 +636,11 @@ impl Parser {
                     self.expect(Tok::RBrack, "']'")?;
                     selectors.push(Selector::Index(exprs, bracket));
                 }
-                Tok::Caret => return self.unsupported("dereference selectors"),
+                Tok::Caret => {
+                    let pos = self.pos();
+                    self.advance();
+                    selectors.push(Selector::Deref(pos));
+                }
                 _ => break,
             }
         }
@@ -787,7 +801,11 @@ impl Parser {
             }
             Tok::LBrace => self.set(),
             Tok::Str(_) => Ok(self.string()),
-            Tok::Nil => self.unsupported("other literal factors"),
+            Tok::Nil => {
+                let pos = self.pos();
+                self.advance();
+                Ok(Expr::Nil { pos })
+            }
             other => Err(self.error(format!("expected expression, found {other:?}"))),
         }
     }
@@ -876,6 +894,7 @@ mod tests {
                     format!("RECORD {} END", fields.join("; "))
                 }
             }
+            TypeExpr::Pointer { base, .. } => format!("POINTER TO {}", shape(base)),
         }
     }
 
@@ -933,10 +952,26 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 Selector::Index(exprs, _) => Some(exprs.len()),
-                Selector::Field(..) => None,
+                Selector::Field(..) | Selector::Deref(_) => None,
             })
             .collect();
         assert_eq!(counts, vec![1, 2, 1]);
+    }
+
+    #[test]
+    fn pointer_types_dereference_and_nil() {
+        let m = module(
+            "TYPE P = POINTER TO R; Q = POINTER TO M.R; I = POINTER TO RECORD next: P END;\n\
+             VAR p: P;\nBEGIN p^^.next := NIL",
+        );
+        assert_eq!(shape(&m.types[0].ty), "POINTER TO R");
+        assert_eq!(shape(&m.types[1].ty), "POINTER TO M.R");
+        assert_eq!(shape(&m.types[2].ty), "POINTER TO RECORD next: P END");
+        let Stmt::Assign { lhs, rhs, .. } = &m.body[0] else {
+            panic!("expected assignment")
+        };
+        assert_eq!(lhs.name(), "p^^.next");
+        assert!(matches!(rhs, Expr::Nil { .. }));
     }
 
     #[test]
@@ -1071,10 +1106,6 @@ mod tests {
         assert_eq!(
             error("TYPE R = RECORD (Base) n: INTEGER END;"),
             "not yet supported: record extension"
-        );
-        assert_eq!(
-            error("TYPE P = POINTER TO R;"),
-            "not yet supported: POINTER types"
         );
         assert_eq!(
             error("TYPE P = PROCEDURE (n: INTEGER);"),

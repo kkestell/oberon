@@ -88,6 +88,7 @@ pub fn scalar_size(ty: Ty) -> i64 {
     match ty {
         Ty::Int | Ty::Bool | Ty::Set | Ty::Real => 4,
         Ty::Byte => 1,
+        Ty::Pointer => 8,
     }
 }
 
@@ -117,6 +118,7 @@ pub enum Ty {
     Set,
     Real,
     Byte,
+    Pointer,
 }
 
 // A SET is a bit vector, so its immediate is unsigned: bit 31 is an ordinary
@@ -128,6 +130,7 @@ pub enum Value {
     Set(u32),
     Real(f32),
     Byte(u8),
+    Pointer(u64),
     Temp(usize),
 }
 
@@ -181,6 +184,14 @@ pub enum Inst {
     IntToReal {
         dst: usize,
         arg: Value,
+    },
+    CheckNil {
+        pointer: Value,
+    },
+    Alloc {
+        dst: usize,
+        size: i64,
+        scanned: bool,
     },
     // The address of one element: `dst = base + index * stride`, after
     // checking `0 <= index < len`. The applicable length travels with the

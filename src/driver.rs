@@ -232,8 +232,17 @@ fn report(source: &Path, diags: &[Diagnostic]) -> Result<()> {
 
 // Never returns Ok. The type parameter only lets a caller in the middle of
 // producing something else end the build with `return fail(...)`.
+//
+// Diagnostics arrive in the order the analyzer produced them, which is not
+// always source order: a pointer's forward base is diagnosed after the whole
+// TYPE section that named it, so its message would otherwise print after
+// messages from later lines. Sorting by position means the list always reads
+// down the file. The sort is stable, so two diagnostics at one position keep
+// the order they were reported in.
 fn fail<T>(source: &Path, diags: &[Diagnostic]) -> Result<T> {
-    for d in diags {
+    let mut ordered: Vec<&Diagnostic> = diags.iter().collect();
+    ordered.sort_by_key(|d| (d.pos.line, d.pos.col));
+    for d in ordered {
         eprintln!(
             "{}:{}:{}: {}",
             source.display(),

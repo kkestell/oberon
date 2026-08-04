@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -50,6 +51,11 @@ pub enum Type {
     // Report 6.3, under the same identity rule as Array: one RECORD
     // constructor in the source is one type.
     Record(Rc<RecordType>),
+    Pointer(Rc<PointerType>),
+    // NIL is a polymorphic constant, not a source type. It has a pointer-class
+    // value so it can be passed, returned, assigned, and compared where a
+    // pointer context accepts it, but it has no storage layout of its own.
+    Nil,
 }
 
 #[derive(Debug)]
@@ -61,7 +67,6 @@ pub struct ArrayType {
     size: i64,
 }
 
-#[derive(Debug)]
 pub struct RecordType {
     // In declaration order, each with the offset the layout rule gave it.
     fields: Vec<Field>,
@@ -79,6 +84,54 @@ pub struct RecordType {
     // travels, so an imported type, a re-exported alias, and an exported
     // variable of a private type all answer the same way.
     module: String,
+    contains_pointers: bool,
+}
+
+impl fmt::Debug for RecordType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordType")
+            .field("name", &self.name)
+            .field("size", &self.size)
+            .field("align", &self.align)
+            .field("field_count", &self.fields.len())
+            .field("contains_pointers", &self.contains_pointers)
+            .finish()
+    }
+}
+
+pub struct PointerType {
+    name: Option<String>,
+    base: RefCell<PointerBase>,
+}
+
+#[derive(Clone)]
+enum PointerBase {
+    Pending { name: String, pos: Pos },
+    Resolved(Rc<RecordType>),
+    Invalid,
+}
+
+impl fmt::Debug for PointerType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let base = match &*self.base.borrow() {
+            PointerBase::Pending { name, .. } => format!("pending {name}"),
+            PointerBase::Resolved(record) => record.name.clone().unwrap_or_else(|| "RECORD".into()),
+            PointerBase::Invalid => "invalid".into(),
+        };
+        f.debug_struct("PointerType")
+            .field("name", &self.name)
+            .field("base", &base)
+            .finish()
+    }
+}
+
+impl PointerType {
+    fn record(&self) -> Option<Rc<RecordType>> {
+        match &*self.base.borrow() {
+            PointerBase::Resolved(record) => Some(record.clone()),
+            PointerBase::Pending { .. } | PointerBase::Invalid => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -102,6 +155,7 @@ impl Type {
             Type::Boolean => Some(ir::Ty::Bool),
             Type::Set => Some(ir::Ty::Set),
             Type::Char | Type::Byte => Some(ir::Ty::Byte),
+            Type::Pointer(_) | Type::Nil => Some(ir::Ty::Pointer),
             Type::String(_) | Type::Array(_) | Type::Record(_) => None,
         }
     }
@@ -121,6 +175,13 @@ impl Type {
     fn record(&self) -> Option<&Rc<RecordType>> {
         match self {
             Type::Record(record) => Some(record),
+            _ => None,
+        }
+    }
+
+    fn pointer(&self) -> Option<&Rc<PointerType>> {
+        match self {
+            Type::Pointer(pointer) => Some(pointer),
             _ => None,
         }
     }
@@ -146,6 +207,7 @@ impl Type {
         match self {
             Type::Array(array) => array.size,
             Type::Record(record) => record.size,
+            Type::Nil => panic!("NIL has no storage size"),
             scalar => ir::scalar_size(scalar.ir()),
         }
     }
@@ -158,6 +220,7 @@ impl Type {
         match self {
             Type::Array(array) => array.elem.align(),
             Type::Record(record) => record.align,
+            Type::Nil => panic!("NIL has no storage alignment"),
             scalar => ir::scalar_size(scalar.ir()),
         }
     }
@@ -172,7 +235,17 @@ impl Type {
                 size: record.size,
                 align: record.align,
             },
+            Type::Nil => panic!("NIL cannot be stored"),
             scalar => ir::Storage::Scalar(scalar.ir()),
+        }
+    }
+
+    fn contains_pointers(&self) -> bool {
+        match self {
+            Type::Pointer(_) => true,
+            Type::Array(array) => array.len > 0 && array.elem.contains_pointers(),
+            Type::Record(record) => record.contains_pointers,
+            _ => false,
         }
     }
 }
@@ -210,6 +283,8 @@ impl PartialEq for Type {
             (Type::String(a), Type::String(b)) => a == b,
             (Type::Array(a), Type::Array(b)) => Rc::ptr_eq(a, b),
             (Type::Record(a), Type::Record(b)) => Rc::ptr_eq(a, b),
+            (Type::Pointer(a), Type::Pointer(b)) => Rc::ptr_eq(a, b),
+            (Type::Nil, Type::Nil) => true,
             _ => false,
         }
     }
@@ -236,6 +311,17 @@ impl fmt::Display for Type {
                 Some(name) => write!(f, "{name}"),
                 None => write!(f, "RECORD"),
             },
+            Type::Pointer(pointer) => match &pointer.name {
+                Some(name) => write!(f, "{name}"),
+                None => match pointer.record() {
+                    Some(record) => match &record.name {
+                        Some(name) => write!(f, "POINTER TO {name}"),
+                        None => write!(f, "POINTER TO RECORD"),
+                    },
+                    None => write!(f, "POINTER"),
+                },
+            },
+            Type::Nil => write!(f, "NIL"),
         }
     }
 }
@@ -259,6 +345,7 @@ pub enum ConstValue {
     // behave exactly like the literal it was declared from.
     Char(u8),
     Str(Rc<Vec<u8>>),
+    Nil,
 }
 
 impl ConstValue {
@@ -270,6 +357,7 @@ impl ConstValue {
             ConstValue::Set(_) => Type::Set,
             ConstValue::Char(_) => Type::Char,
             ConstValue::Str(bytes) => Type::String(bytes.len()),
+            ConstValue::Nil => Type::Nil,
         }
     }
 
@@ -281,6 +369,7 @@ impl ConstValue {
             ConstValue::Set(v) => ir::Value::Set(*v),
             ConstValue::Char(v) => ir::Value::Byte(*v),
             ConstValue::Str(_) => panic!("a string constant has no scalar value"),
+            ConstValue::Nil => ir::Value::Pointer(0),
         }
     }
 }
@@ -361,8 +450,8 @@ impl Member {
     }
 }
 
-// Report 10.2. Only the operations whose argument types exist are here; NEW
-// arrives with pointers.
+// Report 10.2. The predefined operations available to the implemented source
+// types, including pointer allocation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Builtin {
     Abs,
@@ -382,6 +471,7 @@ enum Builtin {
     Pack,
     Unpk,
     Assert,
+    New,
 }
 
 fn universe_scope() -> Scope {
@@ -410,6 +500,7 @@ fn universe_scope() -> Scope {
         ("PACK", Builtin::Pack),
         ("UNPK", Builtin::Unpk),
         ("ASSERT", Builtin::Assert),
+        ("NEW", Builtin::New),
     ] {
         scope.insert(name.into(), Symbol::Builtin(builtin));
     }
@@ -470,6 +561,8 @@ struct Analyzer {
     procs: Vec<ir::Proc>,
     interface: Interface,
     current: Option<ProcBuilder>,
+    pending_pointers: Vec<Rc<PointerType>>,
+    allow_pointer_forward: bool,
 }
 
 impl Analyzer {
@@ -488,6 +581,8 @@ impl Analyzer {
             procs: Vec::new(),
             interface: Interface::default(),
             current: None,
+            pending_pointers: Vec::new(),
+            allow_pointer_forward: false,
         }
     }
 
@@ -607,6 +702,8 @@ impl Analyzer {
     // therefore use an earlier type or constant but not itself or a later one;
     // the pointer-specific forward reference arrives with pointers.
     fn type_declarations(&mut self, declarations: &[ast::TypeDecl]) {
+        let pending_start = self.pending_pointers.len();
+        let previous = std::mem::replace(&mut self.allow_pointer_forward, true);
         for declaration in declarations {
             let Some(ty) = self.resolve_type_named(&declaration.ty, Some(&declaration.id.name))
             else {
@@ -618,6 +715,47 @@ impl Analyzer {
                 Symbol::TypeName(ty.clone()),
             ) {
                 self.export(&declaration.id, Member::Type(ty));
+            }
+        }
+        self.allow_pointer_forward = previous;
+        self.resolve_pending_pointers(pending_start);
+    }
+
+    fn resolve_pending_pointers(&mut self, start: usize) {
+        let pending: Vec<_> = self.pending_pointers.drain(start..).collect();
+        for pointer in pending {
+            let (name, pos) = match &*pointer.base.borrow() {
+                PointerBase::Pending { name, pos } => (name.clone(), *pos),
+                _ => continue,
+            };
+            let resolved = self
+                .scopes
+                .last()
+                .and_then(|scope| scope.get(&name))
+                .cloned();
+            match resolved {
+                Some(Symbol::TypeName(Type::Record(record))) => {
+                    *pointer.base.borrow_mut() = PointerBase::Resolved(record);
+                }
+                Some(Symbol::TypeName(ty)) => {
+                    self.diags.push(Diagnostic::new(
+                        pos,
+                        format!("pointer base must be a record type, found {ty}"),
+                    ));
+                    *pointer.base.borrow_mut() = PointerBase::Invalid;
+                }
+                Some(_) => {
+                    self.diags
+                        .push(Diagnostic::new(pos, format!("'{name}' is not a type")));
+                    *pointer.base.borrow_mut() = PointerBase::Invalid;
+                }
+                None => {
+                    self.diags.push(Diagnostic::new(
+                        pos,
+                        format!("undeclared identifier '{name}'"),
+                    ));
+                    *pointer.base.borrow_mut() = PointerBase::Invalid;
+                }
             }
         }
     }
@@ -1327,7 +1465,7 @@ impl Analyzer {
 
     // Report 9.5. The INTEGER and CHAR forms: labels reduce to ordinals, so
     // ranges, overlap, and the no-match trap are one mechanism for both. The
-    // record and pointer form of the statement arrives with pointers.
+    // record and pointer forms remain with dynamic type operations in Slice 15.
     fn lower_case(&mut self, expr: &ast::Expr, arms: &[ast::CaseArm]) {
         // "First the case expression is evaluated": once, into a temporary
         // that every arm's test then compares against.
@@ -1512,6 +1650,7 @@ impl Analyzer {
             },
             ast::Expr::Real { value, .. } => Some((ir::Value::Real(*value), Type::Real)),
             ast::Expr::Bool { value, .. } => Some((ir::Value::Bool(*value), Type::Boolean)),
+            ast::Expr::Nil { .. } => Some((ir::Value::Pointer(0), Type::Nil)),
             ast::Expr::Set { elements, .. } => self.lower_set(elements),
             // Report 8: an expression operates on values, and an array
             // designator has none. Whole-array assignment is the one place
@@ -2012,7 +2151,18 @@ impl Analyzer {
         };
         let operand_ty = match op {
             BinOp::Eq | BinOp::Ne => {
-                if lhs_ty != rhs_ty {
+                if lhs_ty == rhs_ty && lhs_ty.scalar().is_some() {
+                    lhs_ty
+                } else if pointer_value_compatible(&lhs_ty, &rhs_ty) {
+                    // NIL has no type of its own, so the comparison takes its
+                    // class from whichever side is a pointer. Two NILs keep
+                    // the pseudo-type, which answers with the same class.
+                    if lhs_ty.pointer().is_some() {
+                        lhs_ty
+                    } else {
+                        rhs_ty
+                    }
+                } else {
                     self.diags.push(Diagnostic::new(
                         pos,
                         format!(
@@ -2022,7 +2172,6 @@ impl Analyzer {
                     ));
                     return None;
                 }
-                lhs_ty
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 check_order_types(pos, op, lhs_ty, rhs_ty, &mut self.diags)?
@@ -2240,6 +2389,7 @@ impl Analyzer {
             Builtin::Pack => return self.lower_pack(actuals, pos),
             Builtin::Unpk => return self.lower_unpk(actuals, pos),
             Builtin::Assert => return self.lower_assert(actuals, pos),
+            Builtin::New => return self.lower_new(actuals, pos),
             _ => {}
         }
 
@@ -2327,7 +2477,8 @@ impl Analyzer {
             | Builtin::Excl
             | Builtin::Pack
             | Builtin::Unpk
-            | Builtin::Assert => unreachable!("handled above"),
+            | Builtin::Assert
+            | Builtin::New => unreachable!("handled above"),
         };
         Some((Some(value), Some(result.ty(args[0].1.clone()))))
     }
@@ -2419,6 +2570,40 @@ impl Analyzer {
                 symbol: "oberon_unpk".into(),
                 args: vec![ir::Arg::Ref(fraction), ir::Arg::Ref(exponent)],
             });
+        }
+        Some((None, None))
+    }
+
+    fn lower_new(
+        &mut self,
+        actuals: &[ast::Expr],
+        pos: Pos,
+    ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        if !self.builtin_arity(actuals, 1, pos) {
+            return None;
+        }
+        let target = self.var_actual(&actuals[0], 1);
+        match target {
+            Some((addr, Type::Pointer(pointer))) => {
+                if let Some(record) = pointer.record() {
+                    let dst = self.temp();
+                    self.emit(ir::Inst::Alloc {
+                        dst,
+                        size: record.size,
+                        scanned: record.contains_pointers,
+                    });
+                    self.emit(ir::Inst::Store {
+                        ty: ir::Ty::Pointer,
+                        val: ir::Value::Temp(dst),
+                        addr,
+                    });
+                }
+            }
+            Some((_, found)) => self.diags.push(Diagnostic::new(
+                actuals[0].pos(),
+                format!("argument 1 has type {found}, expected a pointer"),
+            )),
+            None => {}
         }
         Some((None, None))
     }
@@ -2859,6 +3044,9 @@ impl Analyzer {
                         place = self.index(place, expr, *pos)?;
                     }
                 }
+                ast::Selector::Deref(pos) => {
+                    place = self.dereference(place, *pos)?;
+                }
             }
         }
         Some(place)
@@ -2869,6 +3057,11 @@ impl Analyzer {
     // flag carries through: a field of an imported variable or of a structured
     // value parameter is as unwritable as the whole.
     fn field(&mut self, base: Place, name: &str, pos: Pos) -> Option<Place> {
+        let base = if base.ty.pointer().is_some() {
+            self.dereference(base, pos)?
+        } else {
+            base
+        };
         let Some(record) = base.ty.record().cloned() else {
             self.diags.push(Diagnostic::new(
                 pos,
@@ -2893,6 +3086,32 @@ impl Analyzer {
         Some(Place {
             addr: ir::Addr::Temp(dst),
             ty,
+            read_only: base.read_only,
+        })
+    }
+
+    fn dereference(&mut self, base: Place, pos: Pos) -> Option<Place> {
+        let Some(pointer) = base.ty.pointer().cloned() else {
+            self.diags.push(Diagnostic::new(
+                pos,
+                format!(
+                    "cannot dereference {}: only a pointer can be dereferenced",
+                    base.ty
+                ),
+            ));
+            return None;
+        };
+        let record = pointer.record()?;
+        let value = self.load(base.addr, ir::Ty::Pointer);
+        self.emit(ir::Inst::CheckNil {
+            pointer: value.clone(),
+        });
+        let ir::Value::Temp(temp) = value else {
+            unreachable!("a loaded pointer is a temporary")
+        };
+        Some(Place {
+            addr: ir::Addr::Temp(temp),
+            ty: Type::Record(record),
             read_only: base.read_only,
         })
     }
@@ -2974,6 +3193,7 @@ impl Analyzer {
             },
             ast::Expr::Real { .. } => Some(Type::Real),
             ast::Expr::Bool { .. } => Some(Type::Boolean),
+            ast::Expr::Nil { .. } => Some(Type::Nil),
             // A constant declaration keeps the string type of its right-hand
             // side, so a single-character string stays a string here and the
             // CHAR rule applies at each use site instead.
@@ -3063,7 +3283,10 @@ impl Analyzer {
                         &mut self.diags,
                     ),
                     BinOp::Eq | BinOp::Ne => {
-                        if (lhs == rhs && lhs.scalar().is_some()) || text_relation_ok(&lhs, &rhs) {
+                        if (lhs == rhs && lhs.scalar().is_some())
+                            || pointer_value_compatible(&lhs, &rhs)
+                            || text_relation_ok(&lhs, &rhs)
+                        {
                             Some(Type::Boolean)
                         } else {
                             let message = if lhs == rhs {
@@ -3255,7 +3478,7 @@ impl Analyzer {
             ));
             return None;
         };
-        let ty = self.check_const_designator_type(designator)?;
+        let ty = self.check_len_designator_type(designator)?;
         if ty.array().is_some() {
             Some(Type::Integer)
         } else {
@@ -3365,6 +3588,7 @@ impl Analyzer {
                 .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
             ast::Expr::Real { value, .. } => Ok(ConstValue::Real(*value)),
             ast::Expr::Bool { value, .. } => Ok(ConstValue::Bool(*value)),
+            ast::Expr::Nil { .. } => Ok(ConstValue::Nil),
             ast::Expr::Str { bytes, .. } => Ok(ConstValue::Str(Rc::new(bytes.clone()))),
             ast::Expr::Set { elements, .. } => {
                 let mut bits = 0;
@@ -3467,6 +3691,7 @@ impl Analyzer {
             ast::Expr::Int { .. }
             | ast::Expr::Real { .. }
             | ast::Expr::Bool { .. }
+            | ast::Expr::Nil { .. }
             | ast::Expr::Str { .. } => true,
             ast::Expr::Set { elements, .. } => elements.iter().all(|element| {
                 self.is_const_expr(&element.low)
@@ -3488,9 +3713,7 @@ impl Analyzer {
                 let [ast::Expr::Name(designator)] = args.as_slice() else {
                     return false;
                 };
-                // designator_type folds every selector, so it fails on a
-                // dynamic one and this is the whole test.
-                matches!(self.designator_type(designator), Ok(ty) if ty.array().is_some())
+                matches!(self.len_designator_type(designator), Ok(ty) if ty.array().is_some())
             }
             ast::Expr::Call { callee, args, .. } => {
                 matches!(
@@ -3573,49 +3796,133 @@ impl Analyzer {
                         ty = array.elem.clone();
                     }
                 }
+                ast::Selector::Deref(pos) => match self.const_dereference(&ty, *pos) {
+                    Ok(base) => ty = base,
+                    Err(diag) => {
+                        self.diags.push(diag);
+                        return None;
+                    }
+                },
             }
         }
         Some(ty)
     }
 
-    // The type a designator has, worked out without evaluating or emitting
-    // anything: every index selector must be a constant in range. This is the
-    // constant world's counterpart to Analyzer::place, and it is what lets LEN
-    // be folded. A required constant expression cannot contain a call or an
-    // assignment, so nothing observable is skipped by not lowering the
-    // selectors here.
-    fn designator_type(&self, designator: &ast::Designator) -> Result<Type, Diagnostic> {
+    // Fixed LEN in a required constant context needs only the selected
+    // array's declared type. Selectors are still type-checked, and a constant
+    // index is still checked against its bound, but a dynamic INTEGER index
+    // performs no work and does not prevent folding the length. A call in an
+    // index is the one dynamic form this path refuses; see const_index_call.
+    fn check_len_designator_type(&mut self, designator: &ast::Designator) -> Option<Type> {
+        let (symbol, rest) = match self.qualident(designator) {
+            Ok(found) => found,
+            Err(diag) => {
+                self.diags.push(diag);
+                return None;
+            }
+        };
+        let mut ty = match symbol {
+            Symbol::Var { ty, .. } => ty,
+            _ => {
+                self.diags.push(Diagnostic::new(
+                    designator.pos,
+                    "argument 1 must be an array variable",
+                ));
+                return None;
+            }
+        };
+        for selector in rest {
+            match selector {
+                ast::Selector::Field(name, pos) => match self.const_field(&ty, name, *pos) {
+                    Ok(field) => ty = field,
+                    Err(diag) => {
+                        self.diags.push(diag);
+                        return None;
+                    }
+                },
+                ast::Selector::Deref(pos) => match self.const_dereference(&ty, *pos) {
+                    Ok(base) => ty = base,
+                    Err(diag) => {
+                        self.diags.push(diag);
+                        return None;
+                    }
+                },
+                ast::Selector::Index(exprs, pos) => {
+                    for expr in exprs {
+                        let Some(array) = ty.array().cloned() else {
+                            self.diags.push(Diagnostic::new(
+                                *pos,
+                                format!("cannot index {ty}: only an array can be indexed"),
+                            ));
+                            return None;
+                        };
+                        if let Some(diag) = self.const_index_call(expr) {
+                            self.diags.push(diag);
+                            return None;
+                        }
+                        match self.check_const_expr(expr) {
+                            Some(Type::Integer) => {}
+                            Some(found) => {
+                                self.diags.push(Diagnostic::new(
+                                    expr.pos(),
+                                    format!("array index must be INTEGER, found {found}"),
+                                ));
+                                return None;
+                            }
+                            None => return None,
+                        }
+                        match self.try_eval_const(expr) {
+                            Ok(Some(ConstValue::Int(value)))
+                                if !(0..array.len).contains(&value) =>
+                            {
+                                self.diags
+                                    .push(index_range_error(expr.pos(), value, array.len));
+                                return None;
+                            }
+                            Ok(Some(ConstValue::Int(_))) | Ok(None) => {}
+                            Ok(Some(_)) => unreachable!("index was type-checked as INTEGER"),
+                            Err(diag) => {
+                                self.diags.push(diag);
+                                return None;
+                            }
+                        }
+                        ty = array.elem.clone();
+                    }
+                }
+            }
+        }
+        Some(ty)
+    }
+
+    // The same walk without diagnostics, for deciding whether a LEN call is
+    // constant and for folding it. It has to reach the same verdict as
+    // check_len_designator_type on every program, or a constant declaration
+    // would be checked under one rule and evaluated under another.
+    fn len_designator_type(&self, designator: &ast::Designator) -> Result<Type, Diagnostic> {
         let (symbol, rest) = self.qualident(designator)?;
         let mut ty = match symbol {
-            Symbol::Const(value) if rest.is_empty() => return Ok(value.ty()),
             Symbol::Var { ty, .. } => ty,
             _ => {
                 return Err(Diagnostic::new(
                     designator.pos,
-                    format!("'{}' cannot be used as a value", designator.name()),
+                    "argument 1 must be an array variable",
                 ));
             }
         };
         for selector in rest {
             match selector {
                 ast::Selector::Field(name, pos) => ty = self.const_field(&ty, name, *pos)?,
+                ast::Selector::Deref(pos) => ty = self.const_dereference(&ty, *pos)?,
                 ast::Selector::Index(exprs, pos) => {
                     for expr in exprs {
-                        let Some(array) = ty.array().cloned() else {
+                        let Some(array) = ty.array() else {
                             return Err(Diagnostic::new(
                                 *pos,
                                 format!("cannot index {ty}: only an array can be indexed"),
                             ));
                         };
-                        let value = self.eval_const(expr)?;
-                        let ConstValue::Int(value) = value else {
-                            return Err(Diagnostic::new(
-                                expr.pos(),
-                                format!("array index must be INTEGER, found {}", value.ty()),
-                            ));
-                        };
-                        if !(0..array.len).contains(&value) {
-                            return Err(index_range_error(expr.pos(), value, array.len));
+                        if let Some(diag) = self.const_index_call(expr) {
+                            return Err(diag);
                         }
                         ty = array.elem.clone();
                     }
@@ -3630,21 +3937,92 @@ impl Analyzer {
     // constant walks use it, so `LEN` of an array field folds exactly as `LEN`
     // of an array variable does.
     fn const_field(&self, ty: &Type, name: &str, pos: Pos) -> Result<Type, Diagnostic> {
-        let Some(record) = ty.record() else {
+        let base = if ty.pointer().is_some() {
+            self.const_dereference(ty, pos)?
+        } else {
+            ty.clone()
+        };
+        let Some(record) = base.record() else {
             return Err(Diagnostic::new(
                 pos,
-                format!("cannot select '{name}' from {ty}: only a record has fields"),
+                format!("cannot select '{name}' from {base}: only a record has fields"),
             ));
         };
         find_field(record, name, &self.module)
             .map(|field| field.ty.clone())
-            .ok_or_else(|| no_such_field(pos, name, ty))
+            .ok_or_else(|| no_such_field(pos, name, &base))
+    }
+
+    // Report 8: a constant expression is one a mere textual scan can evaluate
+    // without executing the program. The required-constant LEN walk answers
+    // from the declared array type and never evaluates an index, so a call
+    // written in one would be discarded rather than performed. It is rejected
+    // instead, with the same message a call anywhere else in a constant
+    // expression already gets. A variable index stays legal: skipping a read
+    // is unobservable, and skipping a call is not.
+    fn const_index_call(&self, expr: &ast::Expr) -> Option<Diagnostic> {
+        match expr {
+            ast::Expr::Int { .. }
+            | ast::Expr::Real { .. }
+            | ast::Expr::Bool { .. }
+            | ast::Expr::Nil { .. }
+            | ast::Expr::Str { .. } => None,
+            ast::Expr::Set { elements, .. } => elements.iter().find_map(|element| {
+                self.const_index_call(&element.low).or_else(|| {
+                    element
+                        .high
+                        .as_ref()
+                        .and_then(|high| self.const_index_call(high))
+                })
+            }),
+            // A designator carries index selectors of its own, and LEN of one
+            // array can be the index into another.
+            ast::Expr::Name(designator) => self.const_selector_call(designator),
+            ast::Expr::Call { callee, args, pos } => {
+                if !matches!(self.resolve(callee), Ok(Symbol::Builtin(_))) {
+                    return Some(Diagnostic::new(
+                        *pos,
+                        "constant expression contains a procedure call",
+                    ));
+                }
+                args.iter().find_map(|arg| self.const_index_call(arg))
+            }
+            ast::Expr::Unary { expr, .. } => self.const_index_call(expr),
+            ast::Expr::Binary { lhs, rhs, .. } => self
+                .const_index_call(lhs)
+                .or_else(|| self.const_index_call(rhs)),
+        }
+    }
+
+    fn const_selector_call(&self, designator: &ast::Designator) -> Option<Diagnostic> {
+        designator
+            .selectors
+            .iter()
+            .find_map(|selector| match selector {
+                ast::Selector::Index(exprs, _) => {
+                    exprs.iter().find_map(|expr| self.const_index_call(expr))
+                }
+                ast::Selector::Field(..) | ast::Selector::Deref(_) => None,
+            })
+    }
+
+    fn const_dereference(&self, ty: &Type, pos: Pos) -> Result<Type, Diagnostic> {
+        let Some(pointer) = ty.pointer() else {
+            return Err(Diagnostic::new(
+                pos,
+                format!("cannot dereference {ty}: only a pointer can be dereferenced"),
+            ));
+        };
+        pointer
+            .record()
+            .map(Type::Record)
+            .ok_or_else(|| Diagnostic::new(pos, "pointer has an invalid base type"))
     }
 
     // The array a folded LEN is about. The variable itself need not be a
     // constant: a fixed length is a property of its type.
     fn const_array_type(&self, designator: &ast::Designator) -> Result<Rc<ArrayType>, Diagnostic> {
-        let ty = self.designator_type(designator)?;
+        let ty = self.len_designator_type(designator)?;
         ty.array().cloned().ok_or_else(|| {
             Diagnostic::new(
                 designator.pos,
@@ -3710,7 +4088,82 @@ impl Analyzer {
                 }
                 Some(ty)
             }
+            ast::TypeExpr::Pointer { base, pos } => self.pointer_type(base, name, *pos),
         }
+    }
+
+    fn pointer_type(
+        &mut self,
+        source: &ast::TypeExpr,
+        name: Option<&str>,
+        _pos: Pos,
+    ) -> Option<Type> {
+        if let ast::TypeExpr::Named(designator) = source
+            && designator.selectors.is_empty()
+        {
+            match self.resolve(designator) {
+                Ok(Symbol::TypeName(Type::Record(record))) => {
+                    return Some(Type::Pointer(Rc::new(PointerType {
+                        name: name.map(str::to_string),
+                        base: RefCell::new(PointerBase::Resolved(record)),
+                    })));
+                }
+                Ok(Symbol::TypeName(ty)) => {
+                    self.diags.push(Diagnostic::new(
+                        source.pos(),
+                        format!("pointer base must be a record type, found {ty}"),
+                    ));
+                    return Some(Type::Pointer(Rc::new(PointerType {
+                        name: name.map(str::to_string),
+                        base: RefCell::new(PointerBase::Invalid),
+                    })));
+                }
+                Ok(_) => {
+                    self.diags.push(Diagnostic::new(
+                        source.pos(),
+                        format!("'{}' is not a type", designator.name()),
+                    ));
+                    return Some(Type::Pointer(Rc::new(PointerType {
+                        name: name.map(str::to_string),
+                        base: RefCell::new(PointerBase::Invalid),
+                    })));
+                }
+                Err(_) if self.allow_pointer_forward => {
+                    let pointer = Rc::new(PointerType {
+                        name: name.map(str::to_string),
+                        base: RefCell::new(PointerBase::Pending {
+                            name: designator.ident.clone(),
+                            pos: designator.pos,
+                        }),
+                    });
+                    self.pending_pointers.push(pointer.clone());
+                    return Some(Type::Pointer(pointer));
+                }
+                Err(diag) => {
+                    self.diags.push(diag);
+                    return Some(Type::Pointer(Rc::new(PointerType {
+                        name: name.map(str::to_string),
+                        base: RefCell::new(PointerBase::Invalid),
+                    })));
+                }
+            }
+        }
+
+        let state = match self.resolve_type(source) {
+            Some(Type::Record(record)) => PointerBase::Resolved(record),
+            Some(found) => {
+                self.diags.push(Diagnostic::new(
+                    source.pos(),
+                    format!("pointer base must be a record type, found {found}"),
+                ));
+                PointerBase::Invalid
+            }
+            None => PointerBase::Invalid,
+        };
+        Some(Type::Pointer(Rc::new(PointerType {
+            name: name.map(str::to_string),
+            base: RefCell::new(state),
+        })))
     }
 
     // Report 6.2: a length is a constant expression, and Report 5 leaves it an
@@ -3835,12 +4288,14 @@ impl Analyzer {
             ));
             return None;
         }
+        let contains_pointers = fields.iter().any(|field| field.ty.contains_pointers());
         Some(Type::Record(Rc::new(RecordType {
             fields,
             size,
             align,
             name: name.map(str::to_string),
             module: self.module.clone(),
+            contains_pointers,
         })))
     }
 
@@ -4239,12 +4694,26 @@ fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
         });
     }
     match (target, found) {
+        (Type::Pointer(_), _) if pointer_value_compatible(target, found) => Some(AssignKind::Store),
         (Type::Byte, Type::Integer) => Some(AssignKind::ByteRange),
         (Type::Char, Type::String(1)) => Some(AssignKind::CharFromString),
         (Type::Array(_), Type::String(_)) if target.char_array().is_some() => {
             Some(AssignKind::StringCopy)
         }
         _ => None,
+    }
+}
+
+fn pointer_value_compatible(lhs: &Type, rhs: &Type) -> bool {
+    match (lhs, rhs) {
+        (Type::Nil, Type::Nil) | (Type::Pointer(_), Type::Nil) | (Type::Nil, Type::Pointer(_)) => {
+            true
+        }
+        (Type::Pointer(a), Type::Pointer(b)) => match (a.record(), b.record()) {
+            (Some(a), Some(b)) => Rc::ptr_eq(&a, &b),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -4493,7 +4962,8 @@ fn builtin_signature(builtin: Builtin) -> Option<(&'static [&'static [Type]], Bu
         | Builtin::Excl
         | Builtin::Pack
         | Builtin::Unpk
-        | Builtin::Assert => None,
+        | Builtin::Assert
+        | Builtin::New => None,
     }
 }
 
@@ -4522,6 +4992,10 @@ fn selector_error(designator: &ast::Designator, selector: &ast::Selector) -> Dia
         ast::Selector::Index(_, pos) => Diagnostic::new(
             *pos,
             format!("'{}' cannot be indexed here", designator.ident),
+        ),
+        ast::Selector::Deref(pos) => Diagnostic::new(
+            *pos,
+            format!("'{}' cannot be dereferenced here", designator.ident),
         ),
     }
 }
@@ -4571,6 +5045,9 @@ fn distinct_types_hint(target: &Type, found: &Type) -> &'static str {
         }
         Type::Array(_) => {
             ": these are different array types, and each ARRAY in the source declares its own"
+        }
+        Type::Pointer(_) => {
+            ": these are different pointer types, and each POINTER in the source declares its own"
         }
         _ => "",
     }

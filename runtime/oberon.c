@@ -7,9 +7,33 @@
 
 #include <gc.h>
 
-void oberon_init(void)              { GC_INIT(); }
+/* Generated code can hold an address that points into the middle of a heap
+   object while nothing points at its first byte. Resolving the target of NEW is
+   the ordinary case: `p.next := F()` computes the address of one field, then
+   calls F, which may allocate and therefore may collect, and which may also
+   have been what cleared p. Recognizing arbitrary interior pointers is what
+   keeps the containing object alive across that call. The setting only takes
+   effect before the collector initializes, so the two calls cannot be swapped.
+   It is requested here rather than assumed, because whether it is on by default
+   is a property of how the collector was built. */
+void oberon_init(void)
+{
+    GC_set_all_interior_pointers(1);
+    GC_INIT();
+}
 void *oberon_alloc(size_t n)        { return GC_MALLOC(n); }
 void *oberon_alloc_atomic(size_t n) { return GC_MALLOC_ATOMIC(n); }
+
+/* Report 8.1: p^ and the implicit dereference in p.f both require p to point
+   at a record, so a null pointer has no storage to select from. The check runs
+   before the loaded value is used as an address. */
+void oberon_check_nil(const void *pointer)
+{
+    if (pointer == NULL) {
+        fputs("nil pointer dereference\n", stderr);
+        exit(1);
+    }
+}
 
 /* Report 8.1: an index must lie between zero and the length less one. The
    check runs before the element address is formed, so a zero-length array

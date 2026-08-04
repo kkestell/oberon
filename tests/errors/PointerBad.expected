@@ -1,0 +1,14 @@
+tests/errors/PointerBad.Mod:7:23: pointer base must be a record type, found INTEGER
+tests/errors/PointerBad.Mod:8:25: pointer base must be a record type, found ARRAY 2 OF INTEGER
+tests/errors/PointerBad.Mod:9:27: pointer base must be a record type, found P
+tests/errors/PointerBad.Mod:12:9: cannot dereference INTEGER: only a pointer can be dereferenced
+tests/errors/PointerBad.Mod:13:10: cannot select 'missing': R has no such field
+tests/errors/PointerBad.Mod:14:10: operator '+' requires two INTEGER, two REAL, or two SET operands, found P and P
+tests/errors/PointerBad.Mod:15:10: operator '<' requires two INTEGER, two REAL, or two CHAR operands, found P and P
+tests/errors/PointerBad.Mod:16:6: condition must be BOOLEAN, found P
+tests/errors/PointerBad.Mod:17:8: CASE expression must be INTEGER or CHAR, found P
+tests/errors/PointerBad.Mod:18:8: cannot assign Q to P
+tests/errors/PointerBad.Mod:19:10: operator '=' requires operands of the same type, found P and Q
+tests/errors/PointerBad.Mod:20:8: cannot assign NIL to INTEGER
+tests/errors/PointerBad.Mod:21:12: operator '+' requires two INTEGER, two REAL, or two SET operands, found NIL and NIL
+Error: 13 error(s)

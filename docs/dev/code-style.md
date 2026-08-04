@@ -29,6 +29,8 @@ Two kinds of failure, handled differently:
 
 **Diagnostics** — the user's Oberon program is wrong. This is the compiler's real output when it isn't emitting code, so it gets one small owned struct (position + message), collected in a `Vec` so several can be reported from one run. That is not an error taxonomy: no enum variant per rule, no error codes, no `thiserror`. The message is a `String`, written for a human reading their source.
 
+The driver sorts them by position before printing, so the list always reads down the file no matter what order analysis produced them in. An analysis pass is therefore free to defer a check — resolving a pointer's forward base after the whole `TYPE` section, for one — without the message landing somewhere confusing. The sort is stable, so two diagnostics at the same position keep the order they were reported in, and a pass that wants a particular order among them still gets it.
+
 **Everything else** — driver plumbing: reading the source file, spawning QBE, invoking the assembler and linker.
 
 - Use `anyhow::Result<T>` and `?` for the driver and any I/O. Add `.context("...")` where it aids debugging (`.context("running qbe")`).

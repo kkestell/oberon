@@ -1,0 +1,6 @@
+tests/errors/modules/pointer-import-write/PointerImportWrite.Mod:8:3: cannot assign to 'PointerSource.p': it is read-only
+tests/errors/modules/pointer-import-write/PointerImportWrite.Mod:9:10: argument 1 is read-only
+tests/errors/modules/pointer-import-write/PointerImportWrite.Mod:10:7: argument 1 is read-only
+tests/errors/modules/pointer-import-write/PointerImportWrite.Mod:11:3: cannot assign to 'PointerSource.p.n': it is read-only
+tests/errors/modules/pointer-import-write/PointerImportWrite.Mod:12:3: cannot assign to 'PointerSource.holder.p.n': it is read-only
+Error: 5 error(s)
