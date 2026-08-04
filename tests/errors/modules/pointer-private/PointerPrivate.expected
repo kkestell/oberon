@@ -1,0 +1,2 @@
+tests/errors/modules/pointer-private/PointerPrivate.Mod:5:31: cannot select 'private': R has no such field
+Error: 1 error(s)

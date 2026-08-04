@@ -184,6 +184,7 @@ impl Analyzer {
             },
             ast::Expr::Real { .. } => Some(Type::Real),
             ast::Expr::Bool { .. } => Some(Type::Boolean),
+            ast::Expr::Nil { .. } => Some(Type::Nil),
             // A constant declaration keeps the string type of its right-hand
             // side, so a single-character string stays a string here and the
             // CHAR rule applies at each use site instead.
@@ -273,7 +274,10 @@ impl Analyzer {
                         &mut self.diags,
                     ),
                     BinOp::Eq | BinOp::Ne => {
-                        if (lhs == rhs && lhs.scalar().is_some()) || text_relation_ok(&lhs, &rhs) {
+                        if (lhs == rhs && lhs.scalar().is_some())
+                            || pointer_value_compatible(&lhs, &rhs)
+                            || text_relation_ok(&lhs, &rhs)
+                        {
                             Some(Type::Boolean)
                         } else {
                             let message = if lhs == rhs {
@@ -591,6 +595,7 @@ impl Analyzer {
                 .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
             ast::Expr::Real { value, .. } => Ok(ConstValue::Real(*value)),
             ast::Expr::Bool { value, .. } => Ok(ConstValue::Bool(*value)),
+            ast::Expr::Nil { .. } => Ok(ConstValue::Nil),
             ast::Expr::Str { bytes, .. } => Ok(ConstValue::Str(Rc::new(bytes.clone()))),
             ast::Expr::Set { elements, .. } => {
                 let mut bits = 0;
@@ -698,6 +703,7 @@ impl Analyzer {
             ast::Expr::Int { .. }
             | ast::Expr::Real { .. }
             | ast::Expr::Bool { .. }
+            | ast::Expr::Nil { .. }
             | ast::Expr::Str { .. } => true,
             ast::Expr::Set { elements, .. } => elements.iter().all(|element| {
                 self.is_const_expr(&element.low)
@@ -804,6 +810,13 @@ impl Analyzer {
                         ty = elem;
                     }
                 }
+                ast::Selector::Deref(pos) => match self.const_dereference(&ty, *pos) {
+                    Ok(base) => ty = base,
+                    Err(diag) => {
+                        self.diags.push(diag);
+                        return None;
+                    }
+                },
             }
         }
         Some(ty)
@@ -836,6 +849,13 @@ impl Analyzer {
             match selector {
                 ast::Selector::Field(name, pos) => match self.const_field(&ty, name, *pos) {
                     Ok(field) => ty = field,
+                    Err(diag) => {
+                        self.diags.push(diag);
+                        return None;
+                    }
+                },
+                ast::Selector::Deref(pos) => match self.const_dereference(&ty, *pos) {
+                    Ok(base) => ty = base,
                     Err(diag) => {
                         self.diags.push(diag);
                         return None;
@@ -911,6 +931,7 @@ impl Analyzer {
         for selector in rest {
             match selector {
                 ast::Selector::Field(name, pos) => ty = self.const_field(&ty, name, *pos)?,
+                ast::Selector::Deref(pos) => ty = self.const_dereference(&ty, *pos)?,
                 ast::Selector::Index(exprs, pos) => {
                     for expr in exprs {
                         let Some(elem) = ty.array_elem() else {
@@ -935,15 +956,20 @@ impl Analyzer {
     // constant walks use it, so `LEN` of an array field folds exactly as `LEN`
     // of an array variable does.
     fn const_field(&self, ty: &Type, name: &str, pos: Pos) -> Result<Type, Diagnostic> {
-        let Some(record) = ty.record() else {
+        let base = if ty.pointer().is_some() {
+            self.const_dereference(ty, pos)?
+        } else {
+            ty.clone()
+        };
+        let Some(record) = base.record() else {
             return Err(Diagnostic::new(
                 pos,
-                format!("cannot select '{name}' from {ty}: only a record has fields"),
+                format!("cannot select '{name}' from {base}: only a record has fields"),
             ));
         };
         find_field(record, name, &self.module)
             .map(|field| field.ty.clone())
-            .ok_or_else(|| no_such_field(pos, name, ty))
+            .ok_or_else(|| no_such_field(pos, name, &base))
     }
 
     // Report 8: a constant expression is one a mere textual scan can evaluate
@@ -958,6 +984,7 @@ impl Analyzer {
             ast::Expr::Int { .. }
             | ast::Expr::Real { .. }
             | ast::Expr::Bool { .. }
+            | ast::Expr::Nil { .. }
             | ast::Expr::Str { .. } => None,
             ast::Expr::Set { elements, .. } => elements.iter().find_map(|element| {
                 self.const_index_call(&element.low).or_else(|| {
@@ -994,8 +1021,21 @@ impl Analyzer {
                 ast::Selector::Index(exprs, _) => {
                     exprs.iter().find_map(|expr| self.const_index_call(expr))
                 }
-                ast::Selector::Field(..) => None,
+                ast::Selector::Field(..) | ast::Selector::Deref(_) => None,
             })
+    }
+
+    fn const_dereference(&self, ty: &Type, pos: Pos) -> Result<Type, Diagnostic> {
+        let Some(pointer) = ty.pointer() else {
+            return Err(Diagnostic::new(
+                pos,
+                format!("cannot dereference {ty}: only a pointer can be dereferenced"),
+            ));
+        };
+        pointer
+            .record()
+            .map(Type::Record)
+            .ok_or_else(|| Diagnostic::new(pos, "pointer has an invalid base type"))
     }
 
     // The array a folded LEN is about. The variable itself need not be a

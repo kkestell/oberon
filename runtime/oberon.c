@@ -5,6 +5,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <gc.h>
+
+/* Generated code can hold an address that points into the middle of a heap
+   object while nothing points at its first byte. Resolving the target of NEW is
+   the ordinary case: `p.next := F()` computes the address of one field, then
+   calls F, which may allocate and therefore may collect, and which may also
+   have been what cleared p. Recognizing arbitrary interior pointers is what
+   keeps the containing object alive across that call. The setting only takes
+   effect before the collector initializes, so the two calls cannot be swapped.
+   It is requested here rather than assumed, because whether it is on by default
+   is a property of how the collector was built. */
+void oberon_init(void)
+{
+    GC_set_all_interior_pointers(1);
+    GC_INIT();
+}
+
 /* Every language failure ends here. Out writes through the buffered C stdout,
    so it is flushed before the message goes to the unbuffered stderr: on a
    shared terminal the failure then follows the output the program wrote
@@ -16,6 +33,41 @@ static void oberon_fail(const char *message, const char *module, int32_t line, i
     fflush(stdout);
     fprintf(stderr, "%s:%d:%d: %s\n", module, (int)line, (int)col, message);
     exit(1);
+}
+
+typedef struct OberonTypeDescriptor OberonTypeDescriptor;
+
+static void *oberon_alloc_with_header(size_t n, const OberonTypeDescriptor *type, int atomic)
+{
+    size_t payload = n == 0 ? 1 : n;
+    void *allocation = atomic
+        ? GC_MALLOC_ATOMIC(sizeof(type) + payload)
+        : GC_MALLOC(sizeof(type) + payload);
+    if (allocation == NULL) {
+        return NULL;
+    }
+    *(const OberonTypeDescriptor **)allocation = type;
+    return (char *)allocation + sizeof(type);
+}
+
+void *oberon_alloc(size_t n, const OberonTypeDescriptor *type)
+{
+    return oberon_alloc_with_header(n, type, 0);
+}
+
+void *oberon_alloc_atomic(size_t n, const OberonTypeDescriptor *type)
+{
+    return oberon_alloc_with_header(n, type, 1);
+}
+
+/* Report 8.1: p^ and the implicit dereference in p.f both require p to point
+   at a record, so a null pointer has no storage to select from. The check runs
+   before the loaded value is used as an address. */
+void oberon_check_nil(const void *pointer, const char *module, int32_t line, int32_t col)
+{
+    if (pointer == NULL) {
+        oberon_fail("nil pointer dereference", module, line, col);
+    }
 }
 
 /* Report 8.1: an index must lie between zero and the length less one. The

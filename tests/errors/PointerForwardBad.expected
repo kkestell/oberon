@@ -1,0 +1,7 @@
+tests/errors/PointerForwardBad.Mod:4:31: undeclared identifier 'Missing'
+tests/errors/PointerForwardBad.Mod:5:29: pointer base must be a record type, found ARRAY 2 OF INTEGER
+tests/errors/PointerForwardBad.Mod:6:31: pointer base must be a record type, found LaterPointer
+tests/errors/PointerForwardBad.Mod:7:30: 'Missing' is not declared in module 'Out'
+tests/errors/PointerForwardBad.Mod:8:24: undeclared identifier 'LaterRecord'
+tests/errors/PointerForwardBad.Mod:12:28: undeclared identifier 'ProcedureRecord'
+Error: 6 error(s)

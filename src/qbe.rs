@@ -10,6 +10,14 @@ pub fn emit(program: &ir::Program) -> String {
     let mut out = String::new();
     let names = Names::new(program);
     for module in &program.modules {
+        for descriptor in &module.descriptors {
+            writeln!(
+                out,
+                "data ${} = align 8 {{ l 0 }}",
+                names.symbol(&descriptor.symbol)
+            )
+            .unwrap();
+        }
         for global in &module.globals {
             // A zero-length array reserves nothing; QBE accepts `z 0` and the
             // assembler emits an empty, still-addressable object.
@@ -38,7 +46,10 @@ pub fn emit(program: &ir::Program) -> String {
             }
             writeln!(out, " 0 }}").unwrap();
         }
-        if !module.globals.is_empty() || !module.literals.is_empty() {
+        if !module.descriptors.is_empty()
+            || !module.globals.is_empty()
+            || !module.literals.is_empty()
+        {
             writeln!(out).unwrap();
         }
 
@@ -50,6 +61,7 @@ pub fn emit(program: &ir::Program) -> String {
 
     writeln!(out, "export function w $main() {{").unwrap();
     writeln!(out, "@start").unwrap();
+    writeln!(out, "\tcall $oberon_init()").unwrap();
     // Report 11: a module body runs when the module is loaded. The list is
     // already dependency-first, so each body runs after the bodies of every
     // module it imports, and exactly once.
@@ -194,6 +206,34 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         }
         ir::Inst::IntToReal { dst, arg } => {
             writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg, names)).unwrap();
+        }
+        ir::Inst::CheckNil { pointer, site } => {
+            writeln!(
+                out,
+                "\tcall $oberon_check_nil(l {}, {})",
+                value(pointer, names),
+                args(&site.args(), names, slots)
+            )
+            .unwrap();
+        }
+        ir::Inst::Alloc {
+            dst,
+            size,
+            scanned,
+            descriptor,
+        } => {
+            let symbol = if *scanned {
+                "oberon_alloc"
+            } else {
+                "oberon_alloc_atomic"
+            };
+            writeln!(
+                out,
+                "\t{} =l call ${symbol}(l {size}, l ${})",
+                temp(*dst),
+                names.symbol(descriptor)
+            )
+            .unwrap();
         }
         // The check is a call, so it is textually and dynamically ahead of
         // every part of the address calculation: nothing scales or adds an
@@ -359,6 +399,7 @@ fn value(value: &ir::Value, names: &Names) -> String {
         // states directly.
         ir::Value::Real(v) => (v.to_bits() as i32).to_string(),
         ir::Value::Byte(v) => v.to_string(),
+        ir::Value::Pointer(v) => v.to_string(),
         ir::Value::Symbol(symbol) => format!("${}", names.symbol(symbol)),
         ir::Value::Temp(id) => temp(*id),
     }
@@ -385,9 +426,10 @@ impl Names {
         let mut symbols = HashMap::new();
         for module in &program.modules {
             for symbol in module
-                .globals
+                .descriptors
                 .iter()
                 .map(|item| &item.symbol)
+                .chain(module.globals.iter().map(|item| &item.symbol))
                 .chain(module.literals.iter().map(|item| &item.symbol))
                 .chain(module.procs.iter().map(|item| &item.symbol))
             {
@@ -409,6 +451,7 @@ impl Names {
 // The remaining operations are word-only and never see a REAL operand.
 fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
     let real = ty == ir::Ty::Real;
+    let long = matches!(ty, ir::Ty::Pointer);
     match op {
         ir::BinOp::Add => "add",
         ir::BinOp::Sub => "sub",
@@ -421,6 +464,8 @@ fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
         ir::BinOp::Le if real => "cles",
         ir::BinOp::Gt if real => "cgts",
         ir::BinOp::Ge if real => "cges",
+        ir::BinOp::Eq if long => "ceql",
+        ir::BinOp::Ne if long => "cnel",
         ir::BinOp::Eq => "ceqw",
         ir::BinOp::Ne => "cnew",
         ir::BinOp::Lt => "csltw",

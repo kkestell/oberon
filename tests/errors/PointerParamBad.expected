@@ -1,0 +1,10 @@
+tests/errors/PointerParamBad.Mod:20:8: RETURN expression has type Q, expected P
+tests/errors/PointerParamBad.Mod:25:8: RETURN expression has type INTEGER, expected P
+tests/errors/PointerParamBad.Mod:29:3: wrong number of arguments: expected 1, found 0
+tests/errors/PointerParamBad.Mod:30:3: wrong number of arguments: expected 1, found 2
+tests/errors/PointerParamBad.Mod:31:7: argument 1 must be a variable
+tests/errors/PointerParamBad.Mod:32:7: argument 1 has type INTEGER, expected a pointer
+tests/errors/PointerParamBad.Mod:33:10: argument 1 must be a variable
+tests/errors/PointerParamBad.Mod:34:10: argument 1 has type P2, expected P
+tests/errors/PointerParamBad.Mod:35:8: argument 1 has type Q, expected P
+Error: 9 error(s)

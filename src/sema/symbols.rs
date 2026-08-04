@@ -26,6 +26,7 @@ pub enum ConstValue {
     // behave exactly like the literal it was declared from.
     Char(u8),
     Str(Rc<Vec<u8>>),
+    Nil,
 }
 
 impl ConstValue {
@@ -37,6 +38,7 @@ impl ConstValue {
             ConstValue::Set(_) => Type::Set,
             ConstValue::Char(_) => Type::Char,
             ConstValue::Str(bytes) => Type::String(bytes.len()),
+            ConstValue::Nil => Type::Nil,
         }
     }
 
@@ -48,6 +50,7 @@ impl ConstValue {
             ConstValue::Set(v) => ir::Value::Set(*v),
             ConstValue::Char(v) => ir::Value::Byte(*v),
             ConstValue::Str(_) => panic!("a string constant has no scalar value"),
+            ConstValue::Nil => ir::Value::Pointer(0),
         }
     }
 }
@@ -118,7 +121,7 @@ impl Member {
 }
 
 // Report 10.2. The predefined operations available to the implemented source
-// types.
+// types, including pointer allocation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Builtin {
     Abs,
@@ -138,6 +141,7 @@ pub(super) enum Builtin {
     Pack,
     Unpk,
     Assert,
+    New,
 }
 
 pub(super) fn universe_scope() -> Scope {
@@ -166,6 +170,7 @@ pub(super) fn universe_scope() -> Scope {
         ("PACK", Builtin::Pack),
         ("UNPK", Builtin::Unpk),
         ("ASSERT", Builtin::Assert),
+        ("NEW", Builtin::New),
     ] {
         scope.insert(name.into(), Symbol::Builtin(builtin));
     }
@@ -260,7 +265,8 @@ pub(super) fn builtin_signature(
         | Builtin::Excl
         | Builtin::Pack
         | Builtin::Unpk
-        | Builtin::Assert => None,
+        | Builtin::Assert
+        | Builtin::New => None,
     }
 }
 

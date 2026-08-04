@@ -69,6 +69,8 @@ fn assemble(support: &Path, temp: &Path, name: &str, il: &str, output: &Path) ->
             .arg(&ssa),
         QBE,
     )?;
+    // The archive holds the runtime and the collector, so the program needs
+    // no collector headers or libraries from the host.
     run(
         Command::new(CC)
             .arg(&asm)
@@ -226,6 +228,13 @@ impl Build {
 fn check_static_data(program: &ir::Program) -> Result<()> {
     let mut total: i64 = 0;
     for module in &program.modules {
+        if !module.descriptors.is_empty() {
+            total = (total + 7) / 8 * 8
+                + i64::try_from(module.descriptors.len()).expect("descriptor count fits") * 8;
+        }
+        if total > ir::MAX_OBJECT_SIZE {
+            bail!("program static data exceeds target object-size limit");
+        }
         for global in &module.globals {
             let align = global.ty.align();
             total = (total + align - 1) / align * align + global.ty.size();
@@ -283,8 +292,17 @@ fn report(source: &Path, diags: &[Diagnostic]) -> Result<()> {
 
 // Never returns Ok. The type parameter only lets a caller in the middle of
 // producing something else end the build with `return fail(...)`.
+//
+// Diagnostics arrive in the order the analyzer produced them, which is not
+// always source order: a pointer's forward base is diagnosed after the whole
+// TYPE section that named it, so its message would otherwise print after
+// messages from later lines. Sorting by position means the list always reads
+// down the file. The sort is stable, so two diagnostics at one position keep
+// the order they were reported in.
 fn fail<T>(source: &Path, diags: &[Diagnostic]) -> Result<T> {
-    for d in diags {
+    let mut ordered: Vec<&Diagnostic> = diags.iter().collect();
+    ordered.sort_by_key(|d| (d.pos.line, d.pos.col));
+    for d in ordered {
         eprintln!(
             "{}:{}:{}: {}",
             source.display(),

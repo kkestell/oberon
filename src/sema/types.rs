@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
@@ -56,10 +57,27 @@ pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
         });
     }
     match (target, found) {
+        (Type::Pointer(_), Type::Nil) => Some(AssignKind::Store),
+        (Type::Pointer(_), Type::Pointer(_)) if pointer_extends(found, target) => {
+            Some(AssignKind::Store)
+        }
         (Type::Byte, Type::Integer) => Some(AssignKind::ByteRange),
         (Type::Char, Type::String(1)) => Some(AssignKind::CharFromString),
         (Type::Array(_), Type::String(_)) if target.char_array() => Some(AssignKind::StringCopy),
         _ => None,
+    }
+}
+
+pub(super) fn pointer_value_compatible(lhs: &Type, rhs: &Type) -> bool {
+    match (lhs, rhs) {
+        (Type::Nil, Type::Nil) | (Type::Pointer(_), Type::Nil) | (Type::Nil, Type::Pointer(_)) => {
+            true
+        }
+        (Type::Pointer(a), Type::Pointer(b)) => match (a.record(), b.record()) {
+            (Some(a), Some(b)) => record_extends(&a, &b) || record_extends(&b, &a),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -219,9 +237,14 @@ pub enum Type {
     // Report 6.3, under the same identity rule as Array: one RECORD
     // constructor in the source is one type.
     Record(Rc<RecordType>),
+    Pointer(Rc<PointerType>),
     // A declared procedure's signature. No source names it, so it has no
     // value and no storage.
     Procedure(Rc<ProcedureType>),
+    // NIL is a polymorphic constant, not a source type. Its zero machine value
+    // can be passed, returned, assigned, and compared where a pointer context
+    // accepts it, but it has no storage layout of its own.
+    Nil,
 }
 
 #[derive(Debug)]
@@ -250,6 +273,8 @@ pub struct RecordType {
     // travels, so an imported type, a re-exported alias, and an exported
     // variable of a private type all answer the same way.
     pub(super) module: String,
+    pub(super) descriptor: String,
+    pub(super) contains_pointers: bool,
 }
 
 impl fmt::Debug for RecordType {
@@ -259,8 +284,15 @@ impl fmt::Debug for RecordType {
             .field("size", &self.size)
             .field("align", &self.align)
             .field("field_count", &self.fields.len())
+            .field("descriptor", &self.descriptor)
+            .field("contains_pointers", &self.contains_pointers)
             .finish()
     }
+}
+
+pub struct PointerType {
+    pub(super) name: Option<String>,
+    pub(super) base: RefCell<PointerBase>,
 }
 
 #[derive(Debug)]
@@ -273,6 +305,36 @@ pub struct ProcedureType {
 pub(super) struct ProcedureParam {
     pub(super) var: bool,
     pub(super) ty: Type,
+}
+
+#[derive(Clone)]
+pub(super) enum PointerBase {
+    Pending { name: String, pos: Pos },
+    Resolved(Rc<RecordType>),
+    Invalid,
+}
+
+impl fmt::Debug for PointerType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let base = match &*self.base.borrow() {
+            PointerBase::Pending { name, .. } => format!("pending {name}"),
+            PointerBase::Resolved(record) => record.name.clone().unwrap_or_else(|| "RECORD".into()),
+            PointerBase::Invalid => "invalid".into(),
+        };
+        f.debug_struct("PointerType")
+            .field("name", &self.name)
+            .field("base", &base)
+            .finish()
+    }
+}
+
+impl PointerType {
+    pub(super) fn record(&self) -> Option<Rc<RecordType>> {
+        match &*self.base.borrow() {
+            PointerBase::Resolved(record) => Some(record.clone()),
+            PointerBase::Pending { .. } | PointerBase::Invalid => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -296,6 +358,7 @@ impl Type {
             Type::Boolean => Some(ir::Ty::Bool),
             Type::Set => Some(ir::Ty::Set),
             Type::Char | Type::Byte => Some(ir::Ty::Byte),
+            Type::Pointer(_) | Type::Nil => Some(ir::Ty::Pointer),
             Type::String(_) | Type::Array(_) | Type::Record(_) | Type::Procedure(_) => None,
         }
     }
@@ -330,6 +393,13 @@ impl Type {
         }
     }
 
+    pub(super) fn pointer(&self) -> Option<&Rc<PointerType>> {
+        match self {
+            Type::Pointer(pointer) => Some(pointer),
+            _ => None,
+        }
+    }
+
     pub(super) fn procedure(&self) -> Option<&Rc<ProcedureType>> {
         match self {
             Type::Procedure(procedure) => Some(procedure),
@@ -354,6 +424,7 @@ impl Type {
         match self {
             Type::Array(array) => array.size,
             Type::Record(record) => record.size,
+            Type::Nil => panic!("NIL has no storage size"),
             scalar => ir::scalar_size(scalar.ir()),
         }
     }
@@ -366,6 +437,7 @@ impl Type {
         match self {
             Type::Array(array) => array.elem.align(),
             Type::Record(record) => record.align,
+            Type::Nil => panic!("NIL has no storage alignment"),
             scalar => ir::scalar_size(scalar.ir()),
         }
     }
@@ -380,7 +452,17 @@ impl Type {
                 size: record.size,
                 align: record.align,
             },
+            Type::Nil => panic!("NIL cannot be stored"),
             scalar => ir::Storage::Scalar(scalar.ir()),
+        }
+    }
+
+    pub(super) fn contains_pointers(&self) -> bool {
+        match self {
+            Type::Pointer(_) => true,
+            Type::Array(array) => array.len > 0 && array.elem.contains_pointers(),
+            Type::Record(record) => record.contains_pointers,
+            _ => false,
         }
     }
 }
@@ -403,6 +485,20 @@ pub(super) fn find_field<'a>(
         .find(|field| field.name == name && (field.export || record.module == module))
 }
 
+pub(super) fn record_extends(derived: &RecordType, base: &RecordType) -> bool {
+    std::ptr::eq(derived, base)
+}
+
+pub(super) fn pointer_extends(derived: &Type, base: &Type) -> bool {
+    match (derived, base) {
+        (Type::Pointer(derived), Type::Pointer(base)) => match (derived.record(), base.record()) {
+            (Some(derived), Some(base)) => record_extends(&derived, &base),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 // Report 6.2 and 9.1 ask whether two types are *the same type*, not whether
 // they have the same shape. Two separately written ARRAY constructors of equal
 // length and element type are different types, and only sharing a descriptor
@@ -422,7 +518,9 @@ impl PartialEq for Type {
             (Type::String(a), Type::String(b)) => a == b,
             (Type::Array(a), Type::Array(b)) => Rc::ptr_eq(a, b),
             (Type::Record(a), Type::Record(b)) => Rc::ptr_eq(a, b),
+            (Type::Pointer(a), Type::Pointer(b)) => Rc::ptr_eq(a, b),
             (Type::Procedure(a), Type::Procedure(b)) => Rc::ptr_eq(a, b),
+            (Type::Nil, Type::Nil) => true,
             _ => false,
         }
     }
@@ -449,6 +547,16 @@ impl fmt::Display for Type {
                 Some(name) => write!(f, "{name}"),
                 None => write!(f, "RECORD"),
             },
+            Type::Pointer(pointer) => match &pointer.name {
+                Some(name) => write!(f, "{name}"),
+                None => match pointer.record() {
+                    Some(record) => match &record.name {
+                        Some(name) => write!(f, "POINTER TO {name}"),
+                        None => write!(f, "POINTER TO RECORD"),
+                    },
+                    None => write!(f, "POINTER"),
+                },
+            },
             Type::Procedure(procedure) => {
                 write!(f, "PROCEDURE")?;
                 if !procedure.params.is_empty() || procedure.ret.is_some() {
@@ -469,6 +577,7 @@ impl fmt::Display for Type {
                 }
                 Ok(())
             }
+            Type::Nil => write!(f, "NIL"),
         }
     }
 }

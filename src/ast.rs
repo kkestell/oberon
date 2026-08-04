@@ -67,6 +67,10 @@ pub enum TypeExpr {
         fields: Vec<FieldList>,
         pos: Pos,
     },
+    Pointer {
+        base: Box<TypeExpr>,
+        pos: Pos,
+    },
 }
 
 // FieldList = IdentList ":" type. The names are identdefs, so a field may
@@ -81,7 +85,9 @@ impl TypeExpr {
     pub fn pos(&self) -> Pos {
         match self {
             TypeExpr::Named(d) => d.pos,
-            TypeExpr::Array { pos, .. } | TypeExpr::Record { pos, .. } => *pos,
+            TypeExpr::Array { pos, .. }
+            | TypeExpr::Record { pos, .. }
+            | TypeExpr::Pointer { pos, .. } => *pos,
         }
     }
 }
@@ -121,6 +127,7 @@ pub enum Selector {
     // selector = "[" ExpList "]". One source selector holds the whole comma
     // list, which Report 8.1 defines as one index selector per expression.
     Index(Vec<Expr>, Pos),
+    Deref(Pos),
 }
 
 impl Designator {
@@ -136,6 +143,7 @@ impl Designator {
                     s.push_str(f);
                 }
                 Selector::Index(..) => s.push_str("[...]"),
+                Selector::Deref(_) => s.push('^'),
             }
         }
         s
@@ -214,6 +222,9 @@ pub enum Expr {
         value: bool,
         pos: Pos,
     },
+    Nil {
+        pos: Pos,
+    },
     // Both of Report 3's string forms: the lexer has already turned 41X into
     // a one-byte string, so no character literal exists as a separate node.
     Str {
@@ -290,6 +301,7 @@ impl Expr {
             Expr::Int { pos, .. }
             | Expr::Real { pos, .. }
             | Expr::Bool { pos, .. }
+            | Expr::Nil { pos }
             | Expr::Str { pos, .. }
             | Expr::Set { pos, .. }
             | Expr::Apply { pos, .. }
