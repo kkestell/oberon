@@ -35,7 +35,7 @@ The root directory comes first so an application can supply a module that shadow
 
 Bundled source may import the compiler-private `OberonRuntime` interface. Source lookup records whether a file came from the root or bundled directory and passes that origin through dependency compilation. Only an actual bundled importer receives the synthesized native interface. The private interface is selected before ordinary dependency lookup, returned directly to that importer, and never stored in the completed-module map. A root shadow remains user source, and a user-defined `OberonRuntime.Mod` remains an ordinary module without capturing or receiving the private interface.
 
-Every source module must live in a file named after it. There are no search paths, packages, or serialized interfaces, and nothing is cached between invocations: each build rereads and reanalyzes every source it needs.
+Every source module must live in a file named after it. Lookup compares the name against the directory's own entries rather than asking the filesystem to open the joined path, because a case-insensitive filesystem would otherwise let `IMPORT out` reach `Out.Mod` on one host and fail on another. There are no search paths, packages, or serialized interfaces, and nothing is cached between invocations: each build rereads and reanalyzes every source it needs.
 
 ### Initialization
 

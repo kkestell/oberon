@@ -1,0 +1,55 @@
+# Review: Portable standard modules
+
+Written against commit `4531515` (add portable standard library modules), which implements [the portable-standard-modules plan](../plans/2026-08-04-018-portable-standard-modules.md). The three fixes described below were made as part of the review and are in the tree next to this document.
+
+## Gate
+
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `git diff --check` pass clean.
+
+`cargo test` runs 43 unit tests and the two integration tests. At commit `4531515` on a macOS arm64 host, three cases failed. Two of them were defects in the slice and are fixed below. The third is `tests/failures/ArrayIndexLow.Mod`, which fails to link on this host at the previous commit too and is not this slice's doing: `a[i]` with `i` folded to `-1` produces a negative addend on an arm64 page relocation, `adrp x1, _ArrayIndexLow.a@page+-4`, which the Mach-O linker rejects. The address computation is dead, because the bounds check that the program exists to exercise traps first, but it is still emitted. That belongs to the backend and its target, not to the library.
+
+Two things about this environment are worth recording, because they change what could be checked.
+
+The vendored reference compilers are not present. `references/` is listed in `.gitignore`, so the plan's instruction to compare every public declaration against the OBNC `.def` files could not be carried out. The profile was read against the plan's own enumeration of it and against the published Oakwood and OBNC interfaces from memory, which is weaker. Nothing in the five modules looked wrong, but the export-by-export comparison the plan calls for still needs doing on a checkout that has the references.
+
+BDWGC lives under `/opt/homebrew` here, and the driver invokes `cc` with no include or library path of its own, so every compile in the suite fails with `'gc.h' file not found` until `CPATH` and `LIBRARY_PATH` name the Homebrew prefix. The project documents no prerequisites, so this is an environment fact rather than a finding.
+
+## What was checked
+
+Every file the commit touches was read in full: the five modules in `lib/`, `runtime/standard.c`, `src/driver.rs`, `src/sema/symbols.rs`, `tests/corpus.rs`, all fifteen new test programs, and both documentation changes.
+
+**The private runtime boundary.** `dependencies` in `src/driver.rs` answers an `OberonRuntime` import from `sema::runtime_interface` before it consults either the completed-module map or source lookup, and only when the importing file's origin is `Bundled`. The interface goes into that one client's resolved map and never into `done`. The three fixtures that matter all agree. `tests/corpus/modules/private-runtime-order/` compiles a user module named `OberonRuntime` first and then imports `Out`, and `Out` still gets the native interface rather than the user module's single exported constant. `tests/errors/modules/private-runtime-leak/` imports `Out` and then `OberonRuntime`, and the second import is diagnosed as a missing module, so compiling a bundled client first does not leave the private interface reachable. `tests/errors/modules/private-runtime-shadow/` gives a root `Out.Mod` an `OberonRuntime` import and gets the same missing-module diagnostic, which is what makes a root shadow user source rather than trusted source.
+
+**The private calling convention.** The generated IL was read rather than reasoned about. `build/LibraryFileEncoding.ssa` shows every shape the plan names: `call $oberon_lib_file_read_string(w %.t8, w %.t10, l %.t2, w %.t3, l %moved)` passes an open array as an address followed by its length, `call $oberon_lib_out_char(w %.t1)` puts a `CHAR` in a word slot, `call $oberon_lib_file_write_real(w %.t6, w %.t8, s %.t9, l %moved)` uses QBE's single class for `REAL`, and every scalar `VAR` argument is a long address. Each one matches the C declaration in `runtime/standard.c` argument for argument. No record and no descriptor crosses the boundary; `Files` passes only its integer handle.
+
+**`BOOLEAN` in memory.** `oberon_lib_file_read_bool` writes through an `int32_t *`, which is only correct if Oberon's `BOOLEAN` occupies four bytes. `ir::scalar_size` gives `Ty::Bool` four bytes, so it does. `CHAR` and `BYTE` are one byte in memory and use `unsigned char *`, which also matches.
+
+**Aliasing in `Strings`.** Value open-array parameters are not copied — `function $Out.String(l %.t0, w %.t1)` hands the caller's address straight to C — so the plan's claim that loop direction alone gives self-mutation an as-if-copy result had to be checked rather than assumed. It holds. `Insert` walks the destination downward and reads only lower indices, both from the shifted tail and from the source; `Replace` also walks downward, and its write index always exceeds the index it reads; `Extract` and `Delete` walk upward, where the write index never exceeds the read index. `Strings.Insert(s, 1, s)` on `"abc"` gives `"aabcbc"`, which is the answer a copy would have produced, and the corpus asserts exactly that.
+
+**Compact integers at both endpoints.** `oberon_lib_file_write_num` emits five bytes for `MIN(INTEGER)` and five for `MAX(INTEGER)`, which is the whole of its `bytes[5]` buffer and no more. `oberon_lib_file_read_num` rejects a sixth byte and rejects a terminating byte past shift 28, so no encoding can overflow the accumulator. `tests/corpus/LibraryFileEncoding.Mod` pins the actual bytes of both endpoints, and `tests/corpus/LibraryFileFailures.Mod` pins the overlong case.
+
+**Corpus isolation.** `run` in `tests/corpus.rs` builds a directory named from the process id, a monotonic counter, and the test stem, asserts that what it created is a directory and not a symbolic link, re-checks that before removing it, and removes only that path. A sibling `.stdin` file becomes the child's standard input. Programs that create files use `Files.New`, which opens an unnamed temporary, so the runtime-failure programs leave nothing behind even though they never reach `Register`.
+
+**Behavior at the corners.** A scratch program exercised cases the corpus does not: `Pos` over two unterminated arrays, `Insert` where nothing fits, `Insert` of an empty source, `Replace` running past capacity, `Extract` starting at the string length and requesting more than the destination holds, `Append` truncating to a full destination, a `WriteString` and `ReadString` round trip with the destination sized exactly, `ReadBytes` with a count of zero, and `Read`, `ReadNum`, and `ReadInt` at end of file. Every result matched what the plan and `docs/standard-library.md` describe, including `pos`, `eof`, and `res` after each failure. `Out.Int(2147483647, 0)` and `Out.Real(-inf, 0)` print `2147483647` and `-INF`.
+
+**Byte-identical output for programs that import nothing.** `tests/corpus/ExportMark.Mod` is the only corpus program with no import, and its `build/ExportMark.ssa` is byte for byte what commit `0fd3906` produced. Every other corpus program imports `Out`, so its IL gains the seven `Out` wrapper functions and nothing else.
+
+**No leftovers.** `NATIVE_OUT`, `out_interface`, `oberon_out_char`, `oberon_out_int`, and `oberon_out_ln` appear nowhere in `src/`, `runtime/`, `tests/`, or the current documentation. The only remaining mentions are in older plan documents, which describe the state of the world when they were written.
+
+## Issues found
+
+**Module lookup let the filesystem decide how an import may be spelled.** `lookup` asked whether `dir.join("OUT.Mod")` was a file. On a case-insensitive filesystem that question answers yes when the directory holds `Out.Mod`, so `IMPORT OUT` resolved to the bundled `Out` source and then failed on the file-name check with `lib/OUT.Mod:1:8: module 'Out' must be stored in a file named 'Out.Mod'` instead of `cannot find module 'OUT'`. The new `tests/errors/MissingUpperOut.Mod` failed on that, and so did the `spelling_is_exact` unit test, which had been failing since it was written in slice 7 without anyone noticing on a case-sensitive host. Oberon identifiers are case-sensitive, and an import naming a module that does not exist has to be diagnosed the same way everywhere. Lookup now reads the directory listing and compares the entry's own name, through a `holds` helper that treats an empty directory path as the working directory. Both tests pass, and the diagnostic is the one the fixture expects.
+
+**`LibraryOut` pinned the sign bit of a NaN.** The expected output was `INF|-NAN`. The minus sign comes from the NaN that `0.0 / 0.0` produces, which is not folded — the emitted initializer contains a real `div` — so the sign is whatever the target's invalid operation delivers. An x86-64 divide sets it and an arm64 divide clears it, which is why the program printed `INF|NAN` here. No Oberon operation reads or sets that bit, so nothing in the language makes the choice observable or controllable, and a corpus expectation that depends on it pins the host rather than the library. The program now prints `ABS(nan)`. `ABS` on a `REAL` calls `fabsf`, which clears the sign bit for every input including a NaN, so the spelling is `NAN` on any IEEE target while the plan's requirement to pin how a NaN formats is kept. `docs/standard-library.md` now says the sign follows the value's sign bit and that a program wanting one spelling should print `ABS(x)`.
+
+**Three coverage items the plan asked for were missing.** The plan requires `LibraryOut` to pin both `INTEGER` endpoints and more than one eight-digit hexadecimal pattern; it pinned only `MIN(INTEGER)` and only `Out.Hex(-1)`, whose eight digits are all the same. It requires `LibraryIn` to read a negative signed real; the recorded input had a positive signed real and an unsigned one. `LibraryOut` now also writes `Out.Int(2147483647, 0)`, `Out.Hex(12345678H)`, and `Out.Real(-inf, 0)`, and `LibraryIn` reads `-3.5` from its recorded input.
+
+## Declined
+
+**A write through a read-only handle.** The plan lists this among the focused `Files` failure cases. `Old` opens a file read-only only when opening it for update fails, which needs a file whose permissions deny writing, and Oberon source in this profile has no way to produce one — there is no `SYSTEM` module, no process facility, and no permission operation in `Files`. Writing the test would mean adding a native permission helper for the sake of the test, which is exactly the kind of growth of the private runtime surface the plan warns against. The gap is real and the case stays uncovered until something else in the library needs file modes.
+
+**The arm64 relocation failure.** Fixing `tests/failures/ArrayIndexLow.Mod` on this host means changing how a folded negative element offset reaches the backend. That predates the slice, belongs to code generation rather than the library, and the project supports one target.
+
+## Still open
+
+The declaration-by-declaration comparison against the vendored OBNC definitions, which is step 3 of the plan's verification list, has not been done. It needs a checkout with `references/` populated.

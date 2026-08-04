@@ -18,6 +18,8 @@ The normative language definition is Niklaus Wirth's *The Programming Language O
 
 [docs/about-oberon-07.md](docs/about-oberon-07.md) introduces the language itself, for a reader who has not written Oberon before. It explains rather than defines, and defers to the Report throughout.
 
+The Report defines no standard library. [docs/standard-library.md](docs/standard-library.md) is the reference for the bundled modules in [lib/](lib/): every exported declaration, the formatting and scanner rules, and the file encodings.
+
 ### The test
 
 Reread your draft as someone who skimmed the visible messages and took no notes. Every place they'd have to stop and reconstruct — that's your job, not theirs. Unpack it.

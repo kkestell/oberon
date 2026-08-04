@@ -15,6 +15,7 @@ BEGIN
   In.Real(x); ASSERT(In.Done & (x = 125.0));
   x := 7.0; In.Real(x); ASSERT(~In.Done & (x = 7.0));
   In.Real(x); ASSERT(In.Done & (x = 2.5));
+  In.Real(x); ASSERT(In.Done & (x = -3.5));
   In.String(s); ASSERT(In.Done & (s = ""));
   In.String(s); ASSERT(In.Done & (s = "abc"));
   In.String(s); ASSERT(In.Done & (s = "A"));

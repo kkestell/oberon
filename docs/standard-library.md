@@ -18,7 +18,7 @@ PROCEDURE Ln;
 
 `Int` writes decimal without a leading plus and pads on the left with spaces to the positive minimum width `n`; zero and negative widths add no padding. Every 32-bit `INTEGER`, including `MIN(INTEGER)`, is supported. `Hex` writes one space and eight uppercase hexadecimal digits containing the integer's 32-bit pattern.
 
-`Real` writes a binary32 value in uppercase exponential notation with six fractional digits and a signed exponent of at least two digits. The mantissa has no leading plus. A positive `n` is a minimum width padded on the left with spaces; zero and negative widths add no padding. On the supported C target, infinities and NaNs use the target's uppercase `INF` and `NAN` spellings and negative zero retains its sign.
+`Real` writes a binary32 value in uppercase exponential notation with six fractional digits and a signed exponent of at least two digits. The mantissa has no leading plus. A positive `n` is a minimum width padded on the left with spaces; zero and negative widths add no padding. On the supported C target, infinities and NaNs use the target's uppercase `INF` and `NAN` spellings and negative zero retains its sign. A NaN is written with a leading minus when its sign bit is set. Which NaN an invalid operation such as `0.0 / 0.0` produces is a property of the target, and no Oberon operation other than `ABS` fixes that sign bit, so a program that needs one spelling should print `ABS(x)`.
 
 ## `In`
 

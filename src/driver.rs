@@ -249,22 +249,36 @@ fn check_static_data(program: &ir::Program) -> Result<()> {
 // environment variable takes part.
 fn lookup(root_dir: &Path, lib_dir: &Path, name: &str) -> Option<Found> {
     let file = format!("{name}.Mod");
-    let root = root_dir.join(&file);
-    if root.is_file() {
-        let bundled = lib_dir.join(&file);
+    if holds(root_dir, &file) {
         return Some(Found {
-            path: root,
-            origin: if same_path(&root_dir.join(&file), &bundled) {
+            path: root_dir.join(&file),
+            origin: if same_path(&root_dir.join(&file), &lib_dir.join(&file)) {
                 Origin::Bundled
             } else {
                 Origin::User
             },
         });
     }
-    let bundled = lib_dir.join(file);
-    bundled.is_file().then_some(Found {
-        path: bundled,
+    holds(lib_dir, &file).then(|| Found {
+        path: lib_dir.join(&file),
         origin: Origin::Bundled,
+    })
+}
+
+// A case-insensitive filesystem opens `out.Mod` from a directory holding
+// `Out.Mod`, so asking whether the joined path is a file would let the host
+// decide how an import may be spelled. The directory's own entry is compared
+// instead. An empty directory path is the working directory.
+fn holds(dir: &Path, file: &str) -> bool {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    fs::read_dir(dir).is_ok_and(|mut entries| {
+        entries.any(|entry| {
+            entry.is_ok_and(|entry| entry.file_name() == *file && entry.path().is_file())
+        })
     })
 }
 

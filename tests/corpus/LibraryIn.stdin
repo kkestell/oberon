@@ -1,4 +1,4 @@
-A -2147483648 FFFFFFFFH bad 42 +1.25E+2 bad 2.5 "" "abc" 41X bad "" zz longname
+A -2147483648 FFFFFFFFH bad 42 +1.25E+2 bad 2.5 -3.5 "" "abc" 41X bad "" zz longname
 
 line too long
 last
