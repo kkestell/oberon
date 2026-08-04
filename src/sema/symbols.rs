@@ -77,6 +77,7 @@ pub(super) enum Symbol {
     Proc {
         symbol: String,
         ty: Type,
+        eligible: bool,
     },
     Module(HashMap<String, Symbol>),
     TypeName(Type),
@@ -126,6 +127,7 @@ impl Member {
             Member::Proc { symbol, ty } => Symbol::Proc {
                 symbol: symbol.clone(),
                 ty: ty.clone(),
+                eligible: true,
             },
         }
     }

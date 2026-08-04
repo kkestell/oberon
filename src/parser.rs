@@ -186,8 +186,26 @@ impl Parser {
             Tok::Array => self.array_type(),
             Tok::Record => self.record_type(),
             Tok::Pointer => self.pointer_type(),
+            Tok::Procedure => self.procedure_type(),
             _ => Ok(TypeExpr::Named(self.qualident("type name")?)),
         }
+    }
+
+    // ProcedureType = PROCEDURE [FormalParameters]. A result belongs to the
+    // complete FormalParameters production, so it is only accepted after ().
+    fn procedure_type(&mut self) -> PResult<TypeExpr> {
+        let pos = self.pos();
+        self.expect(Tok::Procedure, "'PROCEDURE'")?;
+        let (params, ret) = if *self.peek() == Tok::LParen {
+            self.formal_parameters()?
+        } else {
+            (Vec::new(), None)
+        };
+        Ok(TypeExpr::Procedure {
+            params,
+            ret: ret.map(Box::new),
+            pos,
+        })
     }
 
     // PointerType = POINTER TO type. The base is parsed through the complete
@@ -974,6 +992,33 @@ mod tests {
                 }
             }
             TypeExpr::Pointer { base, .. } => format!("POINTER TO {}", shape(base)),
+            TypeExpr::Procedure { params, ret, .. } => {
+                let params: Vec<String> = params
+                    .iter()
+                    .map(|section| {
+                        let names: Vec<&str> = section
+                            .names
+                            .iter()
+                            .map(|(name, _)| name.as_str())
+                            .collect();
+                        format!(
+                            "{}{}: {}",
+                            if section.var { "VAR " } else { "" },
+                            names.join(", "),
+                            formal_shape(section)
+                        )
+                    })
+                    .collect();
+                let result = ret
+                    .as_ref()
+                    .map(|ret| format!(": {}", shape(ret)))
+                    .unwrap_or_default();
+                if params.is_empty() && ret.is_none() {
+                    "PROCEDURE".into()
+                } else {
+                    format!("PROCEDURE({}){result}", params.join("; "))
+                }
+            }
         }
     }
 
@@ -1245,6 +1290,52 @@ mod tests {
         assert_eq!(
             error("TYPE R = RECORD n: INTEGER; END;"),
             "expected field name, found End"
+        );
+    }
+
+    #[test]
+    fn procedure_types() {
+        let m = module(
+            "TYPE P = PROCEDURE; Empty = PROCEDURE(); F = PROCEDURE(x: INTEGER; VAR y: ARRAY OF ARRAY OF M.T): M.R; A = ARRAY 2 OF PROCEDURE(ch: CHAR); R = RECORD p: PROCEDURE(): INTEGER END;",
+        );
+        let shapes: Vec<_> = m.types.iter().map(|ty| shape(&ty.ty)).collect();
+        assert_eq!(
+            shapes,
+            vec![
+                "PROCEDURE",
+                "PROCEDURE",
+                "PROCEDURE(x: INTEGER; VAR y: ARRAY OF ARRAY OF M.T): M.R",
+                "ARRAY 2 OF PROCEDURE(ch: CHAR)",
+                "RECORD p: PROCEDURE(): INTEGER END",
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_procedure_types_and_results() {
+        assert_eq!(
+            error("TYPE P = PROCEDURE(x);"),
+            "expected ':', found RParen"
+        );
+        assert_eq!(
+            error("TYPE P = PROCEDURE(x: INTEGER;"),
+            "expected parameter name, found End"
+        );
+        assert_eq!(
+            error("TYPE P = PROCEDURE():;"),
+            "expected result type name, found Semi"
+        );
+        assert_eq!(
+            error("TYPE P = PROCEDURE: INTEGER;"),
+            "expected ';', found Colon"
+        );
+        assert_eq!(
+            error("TYPE P = PROCEDURE(): ARRAY 2 OF INTEGER;"),
+            "expected result type name, found Array"
+        );
+        assert_eq!(
+            error("PROCEDURE F: INTEGER; END F;"),
+            "expected ';', found Colon"
         );
     }
 

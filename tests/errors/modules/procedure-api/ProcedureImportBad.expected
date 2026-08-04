@@ -1,0 +1,6 @@
+tests/errors/modules/procedure-api/ProcedureImportBad.Mod:3:28: 'HiddenAction' is not declared in module 'ProcedureSource'
+tests/errors/modules/procedure-api/ProcedureImportBad.Mod:11:29: 'Hidden' is not declared in module 'ProcedureSource'
+tests/errors/modules/procedure-api/ProcedureImportBad.Mod:12:3: cannot assign to 'ProcedureSource.Current': it is read-only
+tests/errors/modules/procedure-api/ProcedureImportBad.Mod:13:3: cannot assign to 'ProcedureSource.ExportedBox.action': it is read-only
+tests/errors/modules/procedure-api/ProcedureImportBad.Mod:14:11: argument 1 is read-only
+Error: 5 error(s)

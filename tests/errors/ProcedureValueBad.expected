@@ -1,0 +1,11 @@
+tests/errors/ProcedureValueBad.Mod:21:16: procedure 'Local' cannot be used as a value: only a globally declared procedure is eligible
+tests/errors/ProcedureValueBad.Mod:24:13: procedure 'Local' cannot be used as a value: only a globally declared procedure is eligible
+tests/errors/ProcedureValueBad.Mod:25:8: procedure 'Local' cannot be used as a value: only a globally declared procedure is eligible
+tests/errors/ProcedureValueBad.Mod:26:6: procedure 'Local' cannot be used as a value: only a globally declared procedure is eligible
+tests/errors/ProcedureValueBad.Mod:31:13: 'ABS' cannot be used as a value
+tests/errors/ProcedureValueBad.Mod:32:8: 'INC' cannot be used as a value
+tests/errors/ProcedureValueBad.Mod:33:6: 'LEN' cannot be used as a value
+tests/errors/ProcedureValueBad.Mod:34:11: argument 1 must be a variable
+tests/errors/ProcedureValueBad.Mod:35:11: argument 1 must be a variable
+tests/errors/ProcedureValueBad.Mod:36:11: argument 1 has type PROCEDURE, expected PROCEDURE: these are different procedure type constructors, and this context requires an identical type
+Error: 10 error(s)

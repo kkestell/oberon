@@ -97,6 +97,18 @@ void oberon_check_nil(const void *pointer, const char *module, int32_t line, int
     }
 }
 
+/* A procedure activation is not a data dereference, so it has its own stable
+   failure instead of borrowing the nil-pointer diagnostic. Actual parameters
+   have already been evaluated when generated code calls this check. */
+void oberon_check_procedure(
+    const void *procedure,
+    const char *module, int32_t line, int32_t col)
+{
+    if (procedure == NULL) {
+        oberon_fail("nil procedure call", module, line, col);
+    }
+}
+
 /* Report 8.1: an index must lie between zero and the length less one. The
    check runs before the element address is formed, so a zero-length array
    rejects every index and no invalid address is ever computed. */

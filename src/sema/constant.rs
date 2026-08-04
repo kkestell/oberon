@@ -282,6 +282,7 @@ impl Analyzer {
                     BinOp::Eq | BinOp::Ne => {
                         if (lhs == rhs && lhs.scalar().is_some())
                             || pointer_value_compatible(&lhs, &rhs)
+                            || procedure_value_compatible(&lhs, &rhs)
                             || text_relation_ok(&lhs, &rhs)
                         {
                             Some(Type::Boolean)
@@ -889,6 +890,21 @@ impl Analyzer {
         };
         let mut ty = match symbol {
             Symbol::Const(value) if rest.is_empty() => return Some(value.ty()),
+            Symbol::Proc {
+                ty, eligible: true, ..
+            } if rest.is_empty() => return Some(ty),
+            Symbol::Proc {
+                eligible: false, ..
+            } if rest.is_empty() => {
+                self.diags.push(Diagnostic::new(
+                    designator.pos,
+                    format!(
+                        "procedure '{}' cannot be used as a value: only a globally declared procedure is eligible",
+                        designator.name()
+                    ),
+                ));
+                return None;
+            }
             Symbol::Var { ty, .. } => ty,
             _ => {
                 self.diags.push(Diagnostic::new(

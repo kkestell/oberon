@@ -225,6 +225,15 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             )
             .unwrap();
         }
+        ir::Inst::CheckProcedure { procedure, site } => {
+            writeln!(
+                out,
+                "\tcall $oberon_check_procedure(l {}, {})",
+                value(procedure, names),
+                args(&site.args(), names, slots)
+            )
+            .unwrap();
+        }
         ir::Inst::Alloc {
             dst,
             size,
@@ -387,14 +396,21 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         }
         ir::Inst::Call {
             dst,
-            symbol,
+            target,
             args: call_args,
         } => {
             write!(out, "\t").unwrap();
             if let Some((dst, ty)) = dst {
                 write!(out, "{} ={} ", temp(*dst), class(*ty)).unwrap();
             }
-            write!(out, "call ${}(", names.symbol(symbol)).unwrap();
+            match target {
+                ir::CallTarget::Direct(symbol) => {
+                    write!(out, "call ${}(", names.symbol(symbol)).unwrap()
+                }
+                ir::CallTarget::Indirect(value_) => {
+                    write!(out, "call {}(", value(value_, names)).unwrap()
+                }
+            }
             writeln!(out, "{})", args(call_args, names, slots)).unwrap();
         }
         ir::Inst::Jmp(label) => writeln!(out, "\tjmp @{label}").unwrap(),
@@ -443,7 +459,7 @@ fn class(ty: ir::Ty) -> &'static str {
     match ty {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set | ir::Ty::Byte => "w",
         ir::Ty::Real => "s",
-        ir::Ty::Pointer => "l",
+        ir::Ty::Pointer | ir::Ty::Procedure => "l",
     }
 }
 
@@ -454,7 +470,7 @@ fn load_op(ty: ir::Ty) -> &'static str {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "loadw",
         ir::Ty::Real => "loads",
         ir::Ty::Byte => "loadub",
-        ir::Ty::Pointer => "loadl",
+        ir::Ty::Pointer | ir::Ty::Procedure => "loadl",
     }
 }
 
@@ -463,7 +479,7 @@ fn store_op(ty: ir::Ty) -> &'static str {
         ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "storew",
         ir::Ty::Real => "stores",
         ir::Ty::Byte => "storeb",
-        ir::Ty::Pointer => "storel",
+        ir::Ty::Pointer | ir::Ty::Procedure => "storel",
     }
 }
 
@@ -550,7 +566,7 @@ impl Names {
 // The remaining operations are word-only and never see a REAL operand.
 fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
     let real = ty == ir::Ty::Real;
-    let long = matches!(ty, ir::Ty::Pointer);
+    let long = matches!(ty, ir::Ty::Pointer | ir::Ty::Procedure);
     match op {
         ir::BinOp::Add => "add",
         ir::BinOp::Sub => "sub",

@@ -61,7 +61,7 @@ pub(super) fn open_actual_compatible(formal: &Type, actual: &Type) -> bool {
         Type::OpenArray(formal_elem) => actual
             .array_elem()
             .is_some_and(|actual_elem| open_actual_compatible(formal_elem, actual_elem)),
-        _ => formal == actual,
+        _ => signature_component_match(formal, actual),
     }
 }
 
@@ -88,6 +88,12 @@ pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
         (Type::Pointer(_), Type::Pointer(_)) if pointer_extends(found, target) => {
             Some(AssignKind::Store)
         }
+        (Type::Procedure(_), Type::Nil) => Some(AssignKind::Store),
+        (Type::Procedure(target), Type::Procedure(found))
+            if procedure_signatures_match(target, found) =>
+        {
+            Some(AssignKind::Store)
+        }
         (Type::Byte, Type::Integer) => Some(AssignKind::ByteRange),
         (Type::Char, Type::String(1)) => Some(AssignKind::CharFromString),
         (Type::Array(_), Type::String(_)) if target.char_array() => Some(AssignKind::StringCopy),
@@ -98,6 +104,16 @@ pub(super) fn assign_kind(target: &Type, found: &Type) -> Option<AssignKind> {
             Some(AssignKind::OpenPrefixCopy)
         }
         _ => None,
+    }
+}
+
+pub(super) fn procedure_value_compatible(lhs: &Type, rhs: &Type) -> bool {
+    match (lhs, rhs) {
+        (Type::Nil, Type::Nil)
+        | (Type::Procedure(_), Type::Nil)
+        | (Type::Nil, Type::Procedure(_)) => true,
+        (Type::Procedure(lhs), Type::Procedure(rhs)) => procedure_signatures_match(lhs, rhs),
+        _ => false,
     }
 }
 
@@ -309,12 +325,13 @@ pub enum Type {
     // constructor in the source is one type.
     Record(Rc<RecordType>),
     Pointer(Rc<PointerType>),
-    // A declared procedure's signature. No source names it, so it has no
-    // value and no storage.
+    // One source constructor owns one identity. Value compatibility asks the
+    // recursive signature matcher below; contexts requiring an identical
+    // type continue to use PartialEq and therefore constructor identity.
     Procedure(Rc<ProcedureType>),
     // NIL is a polymorphic constant, not a source type. Its zero machine value
-    // can be passed, returned, assigned, and compared where a pointer context
-    // accepts it, but it has no storage layout of its own.
+    // can be passed, returned, assigned, and compared where a pointer or
+    // procedure context accepts it, but it has no storage layout of its own.
     Nil,
 }
 
@@ -383,6 +400,23 @@ pub(super) struct ProcedureParam {
     pub(super) ty: Type,
 }
 
+pub(super) fn procedure_signatures_match(a: &ProcedureType, b: &ProcedureType) -> bool {
+    a.ret == b.ret
+        && a.params.len() == b.params.len()
+        && a.params
+            .iter()
+            .zip(&b.params)
+            .all(|(a, b)| a.var == b.var && signature_component_match(&a.ty, &b.ty))
+}
+
+fn signature_component_match(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::OpenArray(a), Type::OpenArray(b)) => signature_component_match(a, b),
+        (Type::Procedure(a), Type::Procedure(b)) => procedure_signatures_match(a, b),
+        _ => a == b,
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum PointerBase {
     Pending { name: String, pos: Pos },
@@ -435,11 +469,8 @@ impl Type {
             Type::Set => Some(ir::Ty::Set),
             Type::Char | Type::Byte => Some(ir::Ty::Byte),
             Type::Pointer(_) | Type::Nil => Some(ir::Ty::Pointer),
-            Type::String(_)
-            | Type::Array(_)
-            | Type::OpenArray(_)
-            | Type::Record(_)
-            | Type::Procedure(_) => None,
+            Type::Procedure(_) => Some(ir::Ty::Procedure),
+            Type::String(_) | Type::Array(_) | Type::OpenArray(_) | Type::Record(_) => None,
         }
     }
 

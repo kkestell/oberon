@@ -72,6 +72,11 @@ pub enum TypeExpr {
         base: Box<TypeExpr>,
         pos: Pos,
     },
+    Procedure {
+        params: Vec<FpSection>,
+        ret: Option<Box<TypeExpr>>,
+        pos: Pos,
+    },
 }
 
 // FieldList = IdentList ":" type. The names are identdefs, so a field may
@@ -88,7 +93,8 @@ impl TypeExpr {
             TypeExpr::Named(d) => d.pos,
             TypeExpr::Array { pos, .. }
             | TypeExpr::Record { pos, .. }
-            | TypeExpr::Pointer { pos, .. } => *pos,
+            | TypeExpr::Pointer { pos, .. }
+            | TypeExpr::Procedure { pos, .. } => *pos,
         }
     }
 }

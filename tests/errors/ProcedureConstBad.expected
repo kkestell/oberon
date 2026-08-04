@@ -1,0 +1,4 @@
+tests/errors/ProcedureConstBad.Mod:11:15: 'Global' is not a constant
+tests/errors/ProcedureConstBad.Mod:12:14: 'action' is not a constant
+tests/errors/ProcedureConstBad.Mod:13:16: constant expression contains a procedure call
+Error: 3 error(s)

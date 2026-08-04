@@ -367,12 +367,14 @@ impl Analyzer {
             self.resolve_procedure_signature(&declaration.params, declaration.ret.as_ref());
         let symbol = format!("{prefix}.{}", declaration.id.name);
         if let Some(proc_ty) = proc_ty {
+            let eligible = self.scopes.len() == MODULE_SCOPE + 1;
             if self.declare(
                 &declaration.id.name,
                 declaration.id.pos,
                 Symbol::Proc {
                     symbol: symbol.clone(),
                     ty: proc_ty.clone(),
+                    eligible,
                 },
             ) {
                 self.export(
@@ -793,6 +795,31 @@ impl Analyzer {
         match self.qualident(designator) {
             Ok((Symbol::Const(ConstValue::Str(bytes)), [])) => return Some(Source::Str(bytes)),
             Ok((Symbol::Const(value), [])) => return Some(Source::Value(value.ir(), value.ty())),
+            Ok((
+                Symbol::Proc {
+                    symbol,
+                    ty,
+                    eligible: true,
+                },
+                [],
+            )) => {
+                return Some(Source::Value(ir::Value::Symbol(symbol), ty));
+            }
+            Ok((
+                Symbol::Proc {
+                    eligible: false, ..
+                },
+                [],
+            )) => {
+                self.diags.push(Diagnostic::new(
+                    designator.pos,
+                    format!(
+                        "procedure '{}' cannot be used as a value: only a globally declared procedure is eligible",
+                        designator.name()
+                    ),
+                ));
+                return None;
+            }
             Ok(_) => {}
             Err(diag) => {
                 self.diags.push(diag);
@@ -1984,6 +2011,14 @@ impl Analyzer {
                     } else {
                         rhs_ty
                     }
+                } else if procedure_value_compatible(&lhs_ty, &rhs_ty) {
+                    if lhs_ty.procedure().is_some() {
+                        lhs_ty
+                    } else if rhs_ty.procedure().is_some() {
+                        rhs_ty
+                    } else {
+                        lhs_ty
+                    }
                 } else {
                     self.diags.push(Diagnostic::new(
                         pos,
@@ -2062,11 +2097,40 @@ impl Analyzer {
         actuals: &[ast::Expr],
         pos: Pos,
     ) -> Option<(Option<ir::Value>, Option<Type>)> {
+        // Resolve and, for an indirect call, load the target before lowering
+        // any actual. That captures selectors and the value exactly once.
         let callable = match self.qualident(callee) {
             Ok((Symbol::Builtin(builtin), [])) => {
                 return self.lower_builtin(builtin, actuals, pos);
             }
-            Ok((Symbol::Proc { symbol, ty }, [])) => Some((symbol, ty)),
+            Ok((Symbol::Proc { symbol, ty, .. }, [])) => {
+                Some((ir::CallTarget::Direct(symbol), ty, None))
+            }
+            Ok((Symbol::Var { .. }, _)) => {
+                let place = self.place(callee, format!("'{}' is not a procedure", callee.name()));
+                match place {
+                    Some(place) if place.ty.procedure().is_some() => {
+                        let value = self.load(place.addr, ir::Ty::Procedure);
+                        Some((
+                            ir::CallTarget::Indirect(value.clone()),
+                            place.ty,
+                            Some(value),
+                        ))
+                    }
+                    Some(place) => {
+                        self.diags.push(Diagnostic::new(
+                            pos,
+                            format!(
+                                "'{}' has type {} and is not a procedure",
+                                callee.name(),
+                                place.ty
+                            ),
+                        ));
+                        return None;
+                    }
+                    None => None,
+                }
+            }
             Ok(_) => {
                 self.diags.push(Diagnostic::new(
                     pos,
@@ -2080,7 +2144,7 @@ impl Analyzer {
             }
         };
 
-        let Some((symbol, ty)) = callable else {
+        let Some((target, ty, indirect)) = callable else {
             for actual in actuals {
                 let _ = self.lower_expr(actual);
             }
@@ -2218,8 +2282,12 @@ impl Analyzer {
         if !ok {
             return None;
         }
+        if let Some(procedure) = indirect {
+            let site = self.site(pos);
+            self.emit(ir::Inst::CheckProcedure { procedure, site });
+        }
         let dst = procedure.ret.as_ref().map(|ty| (self.temp(), ty.ir()));
-        self.emit(ir::Inst::Call { dst, symbol, args });
+        self.emit(ir::Inst::Call { dst, target, args });
         // Report 6.1 again: a function whose result type is BYTE produces an
         // INTEGER value when it is called.
         let ret = procedure
@@ -2395,7 +2463,7 @@ impl Analyzer {
         if let (Some(addr), Some(exponent)) = (target, exponent) {
             self.emit(ir::Inst::Call {
                 dst: None,
-                symbol: "oberon_pack".into(),
+                target: ir::CallTarget::Direct("oberon_pack".into()),
                 args: vec![ir::Arg::Ref(addr), ir::Arg::Val(ir::Ty::Int, exponent)],
             });
         }
@@ -2418,7 +2486,7 @@ impl Analyzer {
         if let (Some(fraction), Some(exponent)) = (fraction, exponent) {
             self.emit(ir::Inst::Call {
                 dst: None,
-                symbol: "oberon_unpk".into(),
+                target: ir::CallTarget::Direct("oberon_unpk".into()),
                 args: [ir::Arg::Ref(fraction), ir::Arg::Ref(exponent)]
                     .into_iter()
                     .chain(self.site(pos).args())
@@ -2492,7 +2560,7 @@ impl Analyzer {
         let dst = self.temp();
         self.emit(ir::Inst::Call {
             dst: Some((dst, ret)),
-            symbol: symbol.into(),
+            target: ir::CallTarget::Direct(symbol.into()),
             args,
         });
         ir::Value::Temp(dst)
@@ -2876,6 +2944,7 @@ impl Analyzer {
             return ApplicationKind::Call;
         }
         match self.designator_type(callee) {
+            Ok(Type::Procedure(_)) => ApplicationKind::Call,
             Ok(Type::Pointer(_) | Type::Record(_)) => ApplicationKind::Guard,
             Ok(_) | Err(_) => ApplicationKind::Invalid,
         }
@@ -3471,12 +3540,15 @@ impl Analyzer {
                 Some(ty)
             }
             ast::TypeExpr::Pointer { base, pos } => self.pointer_type(base, name, *pos),
+            ast::TypeExpr::Procedure { params, ret, .. } => {
+                self.resolve_procedure_signature(params, ret.as_deref()).0
+            }
         }
     }
 
-    // Procedure declarations use this source-signature builder. Formal names
-    // are checked here and discarded; the resulting type records only mode,
-    // type, order, and result.
+    // Procedure declarations and procedure type expressions use this one
+    // source-signature builder. Formal names are checked here and discarded;
+    // the resulting type records only mode, type, order, and result.
     fn resolve_procedure_signature(
         &mut self,
         sections: &[ast::FpSection],
@@ -4128,6 +4200,9 @@ fn distinct_types_hint(target: &Type, found: &Type) -> &'static str {
         }
         Type::Pointer(_) => {
             ": these are different pointer types, and each POINTER in the source declares its own"
+        }
+        Type::Procedure(_) => {
+            ": these are different procedure type constructors, and this context requires an identical type"
         }
         _ => "",
     }
