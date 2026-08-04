@@ -6,7 +6,8 @@ CFLAGS = -O2 -Ivendor/bdwgc/include
 SUPPORT = target/lib/oberon
 OBJ = target/obj
 
-STAGED = $(SUPPORT)/qbe $(SUPPORT)/liboberon.a
+MODULES = $(patsubst lib/%,$(SUPPORT)/%,$(wildcard lib/*.Mod))
+STAGED = $(SUPPORT)/qbe $(SUPPORT)/liboberon.a $(MODULES)
 GC_SOURCES = $(wildcard vendor/bdwgc/*.c vendor/bdwgc/extra/*.c vendor/bdwgc/include/*.h vendor/bdwgc/include/private/*.h)
 QBE_SOURCES = $(wildcard vendor/qbe/*.c vendor/qbe/*.h vendor/qbe/*/*.c vendor/qbe/*/*.h)
 
@@ -50,9 +51,13 @@ $(OBJ)/%.o: runtime/%.c
 	mkdir -p $(OBJ)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(SUPPORT)/liboberon.a: $(OBJ)/gc.o $(OBJ)/oberon.o
+$(SUPPORT)/liboberon.a: $(OBJ)/gc.o $(OBJ)/oberon.o $(OBJ)/standard.o
 	mkdir -p $(SUPPORT)
 	rm -f $@
 	ar rcs $@ $^
+
+$(SUPPORT)/%.Mod: lib/%.Mod
+	mkdir -p $(SUPPORT)
+	cp $< $@
 
 .PHONY: all compiler test install uninstall clean

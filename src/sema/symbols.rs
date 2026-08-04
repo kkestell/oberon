@@ -190,31 +190,200 @@ pub(super) fn universe_scope() -> Scope {
     scope
 }
 
-// The native Out: an interface with no Oberon source behind it, whose
-// procedures are the C runtime's. The driver installs it only when no source
-// module of that name is found.
-pub fn out_interface() -> Interface {
+// Typed native operations available only to bundled library source. The
+// driver origin-gates this interface and never caches it as a source module.
+pub fn runtime_interface() -> Interface {
     let mut members = HashMap::new();
+    let chars = || Type::OpenArray(Box::new(Type::Char));
+    let bytes = || Type::OpenArray(Box::new(Type::Byte));
     let value = |ty| (false, ty);
-    let mut add = |name: &str, symbol: &str, params: Vec<(bool, Type)>| {
+    let var = |ty| (true, ty);
+    let mut add = |name: &str, params: Vec<(bool, Type)>, ret: Option<Type>| {
         members.insert(
             name.into(),
             Member::Proc {
-                symbol: symbol.into(),
-                ty: procedure_type(params, None),
+                symbol: native_symbol(name),
+                ty: procedure_type(params, ret),
             },
         );
     };
 
-    add("Char", "oberon_out_char", vec![value(Type::Char)]);
+    add("OutChar", vec![value(Type::Char)], None);
+    add("OutString", vec![value(chars())], None);
     add(
-        "Int",
-        "oberon_out_int",
+        "OutInt",
         vec![value(Type::Integer), value(Type::Integer)],
+        None,
     );
-    add("Ln", "oberon_out_ln", Vec::new());
+    add("OutHex", vec![value(Type::Integer)], None);
+    add(
+        "OutReal",
+        vec![value(Type::Real), value(Type::Integer)],
+        None,
+    );
+    add("OutLn", Vec::new(), None);
+
+    add("InOpen", Vec::new(), Some(Type::Boolean));
+    add("InChar", vec![var(Type::Char)], Some(Type::Boolean));
+    add("InInt", vec![var(Type::Integer)], Some(Type::Boolean));
+    add("InReal", vec![var(Type::Real)], Some(Type::Boolean));
+    for name in ["InString", "InName", "InLine"] {
+        add(name, vec![var(chars())], Some(Type::Boolean));
+    }
+
+    for name in [
+        "MathSqrt",
+        "MathExp",
+        "MathLn",
+        "MathRound",
+        "MathSin",
+        "MathCos",
+        "MathTan",
+        "MathArcsin",
+        "MathArccos",
+        "MathArctan",
+        "MathSinh",
+        "MathCosh",
+        "MathTanh",
+        "MathArcsinh",
+        "MathArccosh",
+        "MathArctanh",
+    ] {
+        add(name, vec![value(Type::Real)], Some(Type::Real));
+    }
+    for name in ["MathPower", "MathLog", "MathArctan2"] {
+        add(
+            name,
+            vec![value(Type::Real), value(Type::Real)],
+            Some(Type::Real),
+        );
+    }
+
+    add("FileOld", vec![value(chars())], Some(Type::Integer));
+    add("FileNew", vec![value(chars())], Some(Type::Integer));
+    for name in ["FileRelease", "FileRegister", "FileClose", "FilePurge"] {
+        add(name, vec![value(Type::Integer)], None);
+    }
+    add("FileDelete", vec![value(chars())], Some(Type::Integer));
+    add(
+        "FileRename",
+        vec![value(chars()), value(chars())],
+        Some(Type::Integer),
+    );
+    add(
+        "FileLength",
+        vec![value(Type::Integer)],
+        Some(Type::Integer),
+    );
+    add(
+        "FileDate",
+        vec![value(Type::Integer), var(Type::Integer), var(Type::Integer)],
+        Some(Type::Boolean),
+    );
+
+    for (name, ty) in [
+        ("FileReadByte", Type::Byte),
+        ("FileReadInt", Type::Integer),
+        ("FileReadReal", Type::Real),
+        ("FileReadNum", Type::Integer),
+        ("FileReadSet", Type::Set),
+        ("FileReadBool", Type::Boolean),
+    ] {
+        add(
+            name,
+            vec![
+                value(Type::Integer),
+                value(Type::Integer),
+                var(ty),
+                var(Type::Integer),
+            ],
+            Some(Type::Integer),
+        );
+    }
+    add(
+        "FileReadString",
+        vec![
+            value(Type::Integer),
+            value(Type::Integer),
+            var(chars()),
+            var(Type::Integer),
+        ],
+        Some(Type::Integer),
+    );
+    add(
+        "FileReadBytes",
+        vec![
+            value(Type::Integer),
+            value(Type::Integer),
+            var(bytes()),
+            value(Type::Integer),
+            var(Type::Integer),
+        ],
+        Some(Type::Integer),
+    );
+
+    for (name, ty) in [
+        ("FileWriteByte", Type::Byte),
+        ("FileWriteInt", Type::Integer),
+        ("FileWriteReal", Type::Real),
+        ("FileWriteNum", Type::Integer),
+        ("FileWriteSet", Type::Set),
+        ("FileWriteBool", Type::Boolean),
+    ] {
+        add(
+            name,
+            vec![
+                value(Type::Integer),
+                value(Type::Integer),
+                value(ty),
+                var(Type::Integer),
+            ],
+            Some(Type::Integer),
+        );
+    }
+    add(
+        "FileWriteString",
+        vec![
+            value(Type::Integer),
+            value(Type::Integer),
+            value(chars()),
+            var(Type::Integer),
+        ],
+        Some(Type::Integer),
+    );
+    add(
+        "FileWriteBytes",
+        vec![
+            value(Type::Integer),
+            value(Type::Integer),
+            var(bytes()),
+            value(Type::Integer),
+            var(Type::Integer),
+        ],
+        Some(Type::Integer),
+    );
+    add("FileError", vec![var(chars())], None);
+
+    add("ProgramArgCount", Vec::new(), Some(Type::Integer));
+    add(
+        "ProgramArg",
+        vec![value(Type::Integer), var(chars())],
+        Some(Type::Integer),
+    );
+    add("ProgramExit", vec![value(Type::Integer)], None);
 
     Interface { members }
+}
+
+fn native_symbol(name: &str) -> String {
+    let mut symbol = String::from("oberon_lib_");
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() && i != 0 {
+            symbol.push('_');
+        }
+        symbol.push(ch.to_ascii_lowercase());
+    }
+    symbol
 }
 
 fn procedure_type(params: Vec<(bool, Type)>, ret: Option<Type>) -> Type {

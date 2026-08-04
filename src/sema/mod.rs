@@ -15,7 +15,7 @@ use symbols::{
     Builtin, ConstValue, Member, RecordDynamic, Scope, Symbol, builtin_signature, type_list,
     universe_scope,
 };
-pub use symbols::{Interface, out_interface};
+pub use symbols::{Interface, runtime_interface};
 use types::*;
 
 // The scope stack is always [universe, module, outermost proc, ..., current

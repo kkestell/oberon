@@ -14,8 +14,7 @@ const CC: &str = "cc";
 // install under a prefix and a Cargo build under target/ resolve alike.
 const SUPPORT_DIR: &str = "lib/oberon";
 const RUNTIME_ARCHIVE: &str = "liboberon.a";
-// The one module with no Oberon source. Its procedures are the runtime's.
-const NATIVE_OUT: &str = "Out";
+const PRIVATE_RUNTIME: &str = "OberonRuntime";
 
 pub fn build(source: &Path, output: &Path) -> Result<()> {
     let name = source
@@ -31,7 +30,12 @@ pub fn build(source: &Path, output: &Path) -> Result<()> {
         done: HashMap::new(),
         modules: Vec::new(),
     };
-    build.compile(&name, source)?;
+    let origin = if same_path(source, &support.join(format!("{name}.Mod"))) {
+        Origin::Bundled
+    } else {
+        Origin::User
+    };
+    build.compile(&name, source, origin)?;
 
     let program = ir::Program {
         modules: build.modules,
@@ -100,6 +104,17 @@ fn support_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Origin {
+    User,
+    Bundled,
+}
+
+struct Found {
+    path: PathBuf,
+    origin: Origin,
+}
+
 // One invocation's module graph. Nothing here survives the process: the next
 // build rereads and reanalyzes every source it needs, and no interface is
 // written to disk.
@@ -120,7 +135,7 @@ impl Build {
     // Compiles one source module and everything it imports. Diagnostics are
     // reported against the file that owns them and end the build, so a client
     // is never analyzed against a half-analyzed dependency.
-    fn compile(&mut self, name: &str, path: &Path) -> Result<()> {
+    fn compile(&mut self, name: &str, path: &Path, origin: Origin) -> Result<()> {
         let src =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
@@ -156,7 +171,7 @@ impl Build {
         }
 
         self.active.push(name.to_string());
-        let resolved = self.dependencies(&module, path)?;
+        let resolved = self.dependencies(&module, path, origin)?;
         let (lowered, interface) = match sema::analyze(&module, &resolved) {
             Ok(result) => result,
             Err(diags) => return fail(path, &diags),
@@ -174,9 +189,17 @@ impl Build {
         &mut self,
         module: &ast::Module,
         path: &Path,
+        origin: Origin,
     ) -> Result<HashMap<String, sema::Interface>> {
         let mut resolved = HashMap::new();
         for import in &module.imports {
+            // The private native interface belongs only to actual bundled
+            // source. It is returned directly and never enters `done`, so it
+            // cannot be captured by or leak into an ordinary module graph.
+            if origin == Origin::Bundled && import.name == PRIVATE_RUNTIME {
+                resolved.insert(import.name.clone(), sema::runtime_interface());
+                continue;
+            }
             if !self.done.contains_key(&import.name) {
                 if let Some(cycle) = self.cycle(&import.name) {
                     return fail(
@@ -188,12 +211,7 @@ impl Build {
                     );
                 }
                 match lookup(&self.root_dir, &self.lib_dir, &import.name) {
-                    Some(found) => self.compile(&import.name, &found)?,
-                    // Only when no source module of that name exists, so a
-                    // program can still supply its own Out.
-                    None if import.name == NATIVE_OUT => {
-                        self.done.insert(import.name.clone(), sema::out_interface());
-                    }
+                    Some(found) => self.compile(&import.name, &found.path, found.origin)?,
                     None => {
                         return fail(
                             path,
@@ -258,12 +276,22 @@ fn check_static_data(program: &ir::Program) -> Result<()> {
 // root first so an application can supply a module that shadows a bundled one.
 // Spelling is exact, and neither the importing file's own directory nor any
 // environment variable takes part.
-fn lookup(root_dir: &Path, lib_dir: &Path, name: &str) -> Option<PathBuf> {
+fn lookup(root_dir: &Path, lib_dir: &Path, name: &str) -> Option<Found> {
     let file = format!("{name}.Mod");
     if holds(root_dir, &file) {
-        return Some(root_dir.join(&file));
+        return Some(Found {
+            path: root_dir.join(&file),
+            origin: if same_path(&root_dir.join(&file), &lib_dir.join(&file)) {
+                Origin::Bundled
+            } else {
+                Origin::User
+            },
+        });
     }
-    holds(lib_dir, &file).then(|| lib_dir.join(&file))
+    holds(lib_dir, &file).then(|| Found {
+        path: lib_dir.join(&file),
+        origin: Origin::Bundled,
+    })
 }
 
 // A case-insensitive filesystem opens `out.Mod` from a directory holding
@@ -281,6 +309,16 @@ fn holds(dir: &Path, file: &str) -> bool {
             entry.is_ok_and(|entry| entry.file_name() == *file && entry.path().is_file())
         })
     })
+}
+
+// Canonical, because the support directory is reached through the
+// canonicalized executable while a source path may run through a symlink.
+// A path that does not exist names no bundled file.
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn report(source: &Path, diags: &[Diagnostic]) -> Result<()> {
@@ -338,14 +376,23 @@ mod tests {
     fn root_directory_wins() {
         let (root, lib) = dirs();
         let found = lookup(&root, &lib, "Both").expect("module exists");
-        assert_eq!(found, root.join("Both.Mod"));
+        assert_eq!(found.path, root.join("Both.Mod"));
+        assert_eq!(found.origin, Origin::User);
     }
 
     #[test]
     fn library_is_the_fallback() {
         let (root, lib) = dirs();
         let found = lookup(&root, &lib, "LibOnly").expect("module exists");
-        assert_eq!(found, lib.join("LibOnly.Mod"));
+        assert_eq!(found.path, lib.join("LibOnly.Mod"));
+        assert_eq!(found.origin, Origin::Bundled);
+    }
+
+    #[test]
+    fn configured_library_file_keeps_bundled_origin_when_it_is_also_root() {
+        let (_, lib) = dirs();
+        let found = lookup(&lib, &lib, "LibOnly").expect("module exists");
+        assert_eq!(found.origin, Origin::Bundled);
     }
 
     #[test]

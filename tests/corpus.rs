@@ -17,8 +17,8 @@ static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
 // dependencies that root imports.
 //
 // The compiler runs from the repository root, which keeps diagnostics stable,
-// and writes each program to build/. It finds its runtime in
-// target/lib/oberon, which `make test` stages. Each generated program runs
+// and writes each program to build/. It finds its runtime and bundled modules
+// in target/lib/oberon, which `make test` stages. Each generated program runs
 // in a fresh directory, so file operations cannot touch the checkout or
 // another corpus case.
 #[test]
@@ -136,6 +136,165 @@ fn deeply_nested_source_compiles_and_runs() {
             " END".repeat(ifs)
         ),
     );
+}
+
+// The installed case: no checkout around the source, no -o, and nothing but
+// the executable left beside it.
+#[test]
+fn compiles_outside_the_checkout() {
+    let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let directory =
+        std::env::temp_dir().join(format!("oberon-outside-{}-{sequence}", std::process::id()));
+    fs::create_dir(&directory).unwrap_or_else(|e| panic!("creating {}: {e}", directory.display()));
+    fs::write(
+        directory.join("Hello.Mod"),
+        "MODULE Hello; IMPORT Out; BEGIN Out.String(\"hello\"); Out.Ln END Hello.",
+    )
+    .expect("writing Hello.Mod");
+
+    let compile = Command::new(env!("CARGO_BIN_EXE_oberon"))
+        .arg("Hello.Mod")
+        .current_dir(&directory)
+        .output()
+        .expect("running compiler");
+    assert!(
+        compile.status.success() && compile.stderr.is_empty(),
+        "compile failed ({}):\n{}",
+        compile.status,
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let mut entries: Vec<String> = fs::read_dir(&directory)
+        .expect("reading directory")
+        .map(|entry| {
+            entry
+                .expect("reading dir entry")
+                .file_name()
+                .into_string()
+                .unwrap()
+        })
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["Hello", "Hello.Mod"]);
+
+    let run = Command::new(directory.join("Hello"))
+        .current_dir(&directory)
+        .output()
+        .expect("running Hello");
+    assert!(run.status.success() && run.stderr.is_empty());
+    assert_eq!(run.stdout, b"hello\n");
+
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|e| panic!("removing {}: {e}", directory.display()));
+}
+
+// The corpus cannot pass arguments or check an exit status, so Program gets
+// its own case.
+#[test]
+fn program_arguments_and_exit_status() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let name = "ProgramArguments";
+    let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let directory =
+        std::env::temp_dir().join(format!("oberon-program-{}-{sequence}", std::process::id()));
+    fs::create_dir(&directory).unwrap_or_else(|e| panic!("creating {}: {e}", directory.display()));
+    let source = directory.join(format!("{name}.Mod"));
+    fs::write(
+        &source,
+        r#"MODULE ProgramArguments;
+IMPORT Out, Program;
+VAR i, res: INTEGER; arg: ARRAY 32 OF CHAR; short: ARRAY 4 OF CHAR; none: ARRAY 0 OF CHAR;
+BEGIN
+  Out.Int(Program.count, 0); Out.Ln;
+  FOR i := 0 TO Program.count - 1 DO
+    Program.Arg(i, arg, res);
+    Out.Char("["); Out.String(arg); Out.Char("]"); Out.Int(res, 2); Out.Ln
+  END;
+  Program.Arg(2, short, res);
+  Out.Char("["); Out.String(short); Out.Char("]"); Out.Int(res, 3); Out.Ln;
+  Program.Arg(2, none, res);
+  Out.Int(res, 0); Out.Ln;
+  Out.String("before exit");
+  Program.Exit(3);
+  Out.String("unreached")
+END ProgramArguments."#,
+    )
+    .unwrap_or_else(|e| panic!("writing {}: {e}", source.display()));
+
+    let compile = compile(root, &source, name);
+    assert!(
+        compile.status.success() && compile.stderr.is_empty(),
+        "compile failed ({}):\n{}",
+        compile.status,
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(root.join("build").join(name))
+        .args(["one", "", "a longer argument"])
+        .current_dir(&directory)
+        .output()
+        .expect("running ProgramArguments");
+    assert_eq!(run.status.code(), Some(3));
+    assert!(
+        run.stderr.is_empty(),
+        "stderr {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "3\n[one] 0\n[] 0\n[a longer argument] 0\n[a l] 14\n17\nbefore exit"
+    );
+
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|e| panic!("removing {}: {e}", directory.display()));
+}
+
+// The corpus captures stdout and stderr apart, so it cannot see their order.
+// Here both share one pipe, where stdout is fully buffered.
+#[test]
+fn failure_follows_earlier_output() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let name = "OutputOrder";
+    let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let directory =
+        std::env::temp_dir().join(format!("oberon-order-{}-{sequence}", std::process::id()));
+    fs::create_dir(&directory).unwrap_or_else(|e| panic!("creating {}: {e}", directory.display()));
+    let source = directory.join(format!("{name}.Mod"));
+    fs::write(
+        &source,
+        r#"MODULE OutputOrder;
+IMPORT Out;
+VAR a: ARRAY 2 OF INTEGER; i: INTEGER;
+BEGIN
+  Out.String("before"); Out.Ln;
+  i := 2;
+  a[i] := 1
+END OutputOrder."#,
+    )
+    .unwrap_or_else(|e| panic!("writing {}: {e}", source.display()));
+
+    let compile = compile(root, &source, name);
+    assert!(
+        compile.status.success() && compile.stderr.is_empty(),
+        "compile failed ({}):\n{}",
+        compile.status,
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new("sh")
+        .args(["-c", r#"exec "$0" 2>&1"#])
+        .arg(root.join("build").join(name))
+        .current_dir(&directory)
+        .output()
+        .expect("running OutputOrder");
+    assert_eq!(run.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "before\nOutputOrder:7:5: array index out of bounds\n"
+    );
+
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|e| panic!("removing {}: {e}", directory.display()));
 }
 
 fn generated_module(name: &str, text: String) {

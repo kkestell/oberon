@@ -7,6 +7,11 @@
 
 #include <gc.h>
 
+/* The command line is kept for the bundled Program module, which reads it
+   through runtime/standard.c. */
+int oberon_argc;
+char **oberon_argv;
+
 /* Generated code can hold an address that points into the middle of a heap
    object while nothing points at its first byte. Resolving the target of NEW is
    the ordinary case: `p.next := F()` computes the address of one field, then
@@ -16,8 +21,10 @@
    effect before the collector initializes, so the two calls cannot be swapped.
    It is requested here rather than assumed, because whether it is on by default
    is a property of how the collector was built. */
-void oberon_init(void)
+void oberon_init(int argc, char **argv)
 {
+    oberon_argc = argc;
+    oberon_argv = argv;
     GC_set_all_interior_pointers(1);
     GC_INIT();
 }
@@ -143,14 +150,6 @@ void oberon_copy(void *destination, const void *source, size_t count)
 {
     memmove(destination, source, count);
 }
-
-/* Oakwood Out.Int(i, n): right-justified in a field of at least n spaces. */
-void oberon_out_int(int32_t v, int32_t n) { printf("%*d", (int)n, (int)v); }
-void oberon_out_ln(void)                  { putchar('\n'); }
-
-/* Out.Char writes the low byte and nothing else, so a program's output is
-   exactly the bytes it asked for. */
-void oberon_out_char(int32_t c) { putchar((unsigned char)c); }
 
 /* Report 8.2.4's relations on character arrays and strings. Each length
    bounds its operand: a character array's is its declared length and a
