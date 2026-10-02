@@ -52,8 +52,8 @@ pub fn build(source: &Path, output: &Path) -> Result<()> {
     let temp = std::env::temp_dir().join(format!("oberon-{}", std::process::id()));
     fs::create_dir_all(&temp).context("creating temporary directory")?;
     let result = assemble(&support, &temp, &name, &il, output);
-    fs::remove_dir_all(&temp).context("removing temporary directory")?;
-    result
+    let removed = fs::remove_dir_all(&temp).context("removing temporary directory");
+    result.and(removed)
 }
 
 fn assemble(support: &Path, temp: &Path, name: &str, il: &str, output: &Path) -> Result<()> {
