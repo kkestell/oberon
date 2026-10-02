@@ -1,6 +1,6 @@
 # Standard Library
 
-The bundled library contains `Out`, `In`, `Math`, `Strings`, and `Files`. An application may replace a bundled module by placing a module with the same exact file name in the root source directory. The character set is the compiler's byte character set: a `CHAR` is an ordinal from 0 through 255, quoted source text contributes its encoded bytes, and the library does not decode Unicode or apply a locale.
+The bundled library contains `Out`, `In`, `Math`, `Strings`, `Files`, and `Program`. An application may replace a bundled module by placing a module with the same exact file name in the root source directory. The character set is the compiler's byte character set: a `CHAR` is an ordinal from 0 through 255, quoted source text contributes its encoded bytes, and the library does not decode Unicode or apply a locale.
 
 ## `Out`
 
@@ -125,6 +125,20 @@ Each transfer begins at the rider's stored position and advances it by the bytes
 `GetDate` encodes `hour * 4096 + minute * 64 + second` in `t` and `year * 512 + month * 32 + day` in `d`, using local time. An operating-system failure leaves both destinations unchanged.
 
 Expected operating-system failures are results rather than runtime traps. `Old` and `New` return `NIL`; `Delete` and `Rename` return nonzero; failed positioning and transfers preserve scalar destinations and record their partial progress. The implementation retains a bounded message for the most recent failed or malformed file operation. Success does not clear it. `GetError` copies a terminated, possibly truncated message into a nonempty destination and leaves a zero-length destination untouched. File operations do not print diagnostics.
+
+## `Program`
+
+```oberon
+VAR count: INTEGER;
+PROCEDURE Arg(n: INTEGER; VAR arg: ARRAY OF CHAR; VAR res: INTEGER);
+PROCEDURE Exit(status: INTEGER);
+```
+
+Clients may read `count` but cannot assign it. It is the number of command-line arguments after the program name, so argument 0 is the first user argument and the program name is not available.
+
+`Arg` requires `0 <= n < count`. A nonempty destination receives a terminated prefix of at most `LEN(arg) - 1` bytes of argument `n`; a zero-length destination is untouched. `res` is the number of argument bytes not copied, so zero means the whole argument arrived.
+
+`Exit` requires `0 <= status <= 255`, the range a POSIX parent can observe. It flushes standard output and open files and ends the program with `status`; module bodies that have not yet run do not run. A program that never calls `Exit` ends with status 0, and a language runtime failure ends with status 1. A violated precondition of `Arg` or `Exit` is the language runtime failure `assertion failed`.
 
 ## Target dependence
 

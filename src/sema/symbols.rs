@@ -364,6 +364,14 @@ pub fn runtime_interface() -> Interface {
     );
     add("FileError", vec![var(chars())], None);
 
+    add("ProgramArgCount", Vec::new(), Some(Type::Integer));
+    add(
+        "ProgramArg",
+        vec![value(Type::Integer), var(chars())],
+        Some(Type::Integer),
+    );
+    add("ProgramExit", vec![value(Type::Integer)], None);
+
     Interface { members }
 }
 

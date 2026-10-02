@@ -35,8 +35,6 @@ a JIT, and advanced optimization remain non-goals unless project goals change.
 These gaps keep the compiler from building ordinary programs outside this
 repository. They follow conformance.
 
-- **Command line and exit status.** Programs cannot read their arguments or
-  choose an exit status. Add a bundled module for both.
 - **Runtime failure positions.** Runtime failures print a fixed message with no
   source position. Report the module, line, and column of the failing check.
 - **Output ordering.** A runtime failure writes to stderr before buffered

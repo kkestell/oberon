@@ -933,3 +933,33 @@ void oberon_lib_file_error(unsigned char *destination, int32_t capacity)
         destination[count] = 0;
     }
 }
+
+extern int oberon_argc;
+extern char **oberon_argv;
+
+/* Argument zero is the program name, which Program does not expose. A host
+   may start a program with no arguments at all, not even its name. */
+int32_t oberon_lib_program_arg_count(void)
+{
+    return oberon_argc > 0 ? (int32_t)(oberon_argc - 1) : 0;
+}
+
+/* Program.Arg has already checked n. The result is the number of argument
+   bytes that did not fit, so a zero-length destination is untouched and
+   reports the whole argument. */
+int32_t oberon_lib_program_arg(int32_t n, unsigned char *destination, int32_t capacity)
+{
+    const char *source = oberon_argv[n + 1];
+    size_t length = strlen(source);
+    size_t count = 0;
+    if (capacity > 0) {
+        count = length < (size_t)capacity ? length : (size_t)capacity - 1;
+        memcpy(destination, source, count);
+        destination[count] = 0;
+    }
+    return (int32_t)(length - count);
+}
+
+/* exit flushes standard output and every open stream, so output written
+   before Program.Exit is never lost. */
+void oberon_lib_program_exit(int32_t status) { exit((int)status); }

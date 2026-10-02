@@ -15,9 +15,15 @@
    keeps the containing object alive across that call. The setting only takes
    effect before the collector initializes, so the two calls cannot be swapped.
    It is requested here rather than assumed, because whether it is on by default
-   is a property of how the collector was built. */
-void oberon_init(void)
+   is a property of how the collector was built. The command line is kept for
+   the bundled Program module, which reads it through runtime/standard.c. */
+int oberon_argc;
+char **oberon_argv;
+
+void oberon_init(int argc, char **argv)
 {
+    oberon_argc = argc;
+    oberon_argv = argv;
     GC_set_all_interior_pointers(1);
     GC_INIT();
 }

@@ -188,6 +188,67 @@ fn compiles_outside_the_checkout() {
         .unwrap_or_else(|e| panic!("removing {}: {e}", directory.display()));
 }
 
+// The corpus cannot pass arguments or check an exit status, so Program gets
+// its own case.
+#[test]
+fn program_arguments_and_exit_status() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let name = "ProgramArguments";
+    let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let directory =
+        std::env::temp_dir().join(format!("oberon-program-{}-{sequence}", std::process::id()));
+    fs::create_dir(&directory).unwrap_or_else(|e| panic!("creating {}: {e}", directory.display()));
+    let source = directory.join(format!("{name}.Mod"));
+    fs::write(
+        &source,
+        r#"MODULE ProgramArguments;
+IMPORT Out, Program;
+VAR i, res: INTEGER; arg: ARRAY 32 OF CHAR; short: ARRAY 4 OF CHAR; none: ARRAY 0 OF CHAR;
+BEGIN
+  Out.Int(Program.count, 0); Out.Ln;
+  FOR i := 0 TO Program.count - 1 DO
+    Program.Arg(i, arg, res);
+    Out.Char("["); Out.String(arg); Out.Char("]"); Out.Int(res, 2); Out.Ln
+  END;
+  Program.Arg(2, short, res);
+  Out.Char("["); Out.String(short); Out.Char("]"); Out.Int(res, 3); Out.Ln;
+  Program.Arg(2, none, res);
+  Out.Int(res, 0); Out.Ln;
+  Out.String("before exit");
+  Program.Exit(3);
+  Out.String("unreached")
+END ProgramArguments."#,
+    )
+    .unwrap_or_else(|e| panic!("writing {}: {e}", source.display()));
+
+    let compile = compile(root, &source, name);
+    assert!(
+        compile.status.success() && compile.stderr.is_empty(),
+        "compile failed ({}):\n{}",
+        compile.status,
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new(root.join("build").join(name))
+        .args(["one", "", "a longer argument"])
+        .current_dir(&directory)
+        .output()
+        .expect("running ProgramArguments");
+    assert_eq!(run.status.code(), Some(3));
+    assert!(
+        run.stderr.is_empty(),
+        "stderr {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "3\n[one] 0\n[] 0\n[a longer argument] 0\n[a l] 14\n17\nbefore exit"
+    );
+
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|e| panic!("removing {}: {e}", directory.display()));
+}
+
 fn generated_module(name: &str, text: String) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);

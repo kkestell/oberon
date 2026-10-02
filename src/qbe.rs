@@ -68,9 +68,9 @@ pub fn emit(program: &ir::Program) -> String {
         }
     }
 
-    writeln!(out, "export function w $main() {{").unwrap();
+    writeln!(out, "export function w $main(w %argc, l %argv) {{").unwrap();
     writeln!(out, "@start").unwrap();
-    writeln!(out, "\tcall $oberon_init()").unwrap();
+    writeln!(out, "\tcall $oberon_init(w %argc, l %argv)").unwrap();
     // Report 11: a module body runs when the module is loaded. The list is
     // already dependency-first, so each body runs after the bodies of every
     // module it imports, and exactly once.
