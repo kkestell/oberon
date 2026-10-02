@@ -40,6 +40,11 @@ BEGIN
   x := 1.; PACK(x, -2000); Out.Int(ORD(x = 0.), 8);
   x := 1.; PACK(x, -1050); Out.Int(ORD(x > 0.), 8); Out.Ln;
 
+  (* An INTEGER exponent is wider than the int accepted by C ldexp. Values
+     past that boundary still overflow or underflow instead of wrapping. *)
+  x := 1.; PACK(x, 2147483648);  Out.Int(ORD(x > 1.0E308), 8);
+  x := 1.; PACK(x, -2147483649); Out.Int(ORD(x = 0.), 8); Out.Ln;
+
   (* UNPK on a positive, a negative, and a subnormal input. *)
   Split(12.); Out.Ln;
   Split(-12.); Out.Ln;

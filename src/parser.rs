@@ -741,7 +741,7 @@ impl Parser {
                 let pos = self.pos();
                 self.advance();
                 match self.term()? {
-                    // -2147483648 has no positive counterpart, so fold the sign
+                    // MIN(INTEGER) has no positive counterpart, so fold the sign
                     // into the literal before sema range-checks it. Only a bare
                     // literal folds: -a*b still means -(a*b).
                     Expr::Int { value, .. } => Expr::Int { value: -value, pos },

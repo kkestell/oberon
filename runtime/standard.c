@@ -20,16 +20,32 @@ void oberon_lib_out_string(const unsigned char *s, int64_t length)
     }
 }
 
+/* The width is an INTEGER, and printf takes its field width as an int, so
+   the padding is written here rather than narrowing the width. */
+static void out_padded(const char *text, int64_t width)
+{
+    int64_t length = (int64_t)strlen(text);
+    while (width > length) {
+        putchar(' ');
+        width--;
+    }
+    fputs(text, stdout);
+}
+
 void oberon_lib_out_int(int64_t value, int64_t width)
 {
-    printf("%*lld", width > 0 ? (int)width : 0, (long long)value);
+    char text[32];
+    snprintf(text, sizeof text, "%lld", (long long)value);
+    out_padded(text, width);
 }
 
 void oberon_lib_out_hex(int64_t value) { printf(" %016llX", (unsigned long long)value); }
 
 void oberon_lib_out_real(double value, int64_t width)
 {
-    printf("%*.15E", width > 0 ? (int)width : 0, value);
+    char text[32];
+    snprintf(text, sizeof text, "%.15E", value);
+    out_padded(text, width);
 }
 
 void oberon_lib_out_ln(void) { putchar('\n'); }

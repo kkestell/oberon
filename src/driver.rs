@@ -79,7 +79,7 @@ fn assemble(support: &Path, temp: &Path, name: &str, il: &str, output: &Path) ->
         Command::new(CC)
             .arg(&asm)
             .arg(support.join(RUNTIME_ARCHIVE))
-            // The REAL operations of Report 10.2 are the C float forms.
+            // The REAL operations of Report 10.2 are the C double forms.
             .arg("-lm")
             .arg("-o")
             .arg(output),

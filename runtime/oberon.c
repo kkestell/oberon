@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -181,7 +182,11 @@ int64_t oberon_floor(double x, const char *module, int64_t line, int64_t col)
     return (int64_t)floor(x);
 }
 
-void oberon_pack(double *x, int64_t n) { *x = ldexp(*x, (int)n); }
+void oberon_pack(double *x, int64_t n)
+{
+    int exponent = n < INT_MIN ? INT_MIN : n > INT_MAX ? INT_MAX : (int)n;
+    *x = ldexp(*x, exponent);
+}
 
 /* Report 10.2 normalizes the magnitude to [1, 2), while frexp normalizes it
    to [0.5, 1), so the fraction doubles and the exponent drops by one. Zero
