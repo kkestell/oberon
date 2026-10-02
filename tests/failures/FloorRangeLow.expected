@@ -1,1 +1,1 @@
-FLOOR result is outside INTEGER range
+FloorRangeLow:7:11: FLOOR result is outside INTEGER range

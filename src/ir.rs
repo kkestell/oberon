@@ -1,3 +1,5 @@
+use crate::diag::Pos;
+
 // Every source module of one build, in the order their initializers must run:
 // a module's dependencies precede it.
 #[derive(Debug)]
@@ -12,7 +14,8 @@ pub struct Module {
     pub globals: Vec<Global>,
     // The string literals whose bytes have to exist at run time: one data
     // object each, numbered within the module and never shared between two
-    // occurrences of the same text.
+    // occurrences of the same text. The module's own name is one of them, so
+    // a failing runtime check can report it.
     pub literals: Vec<Literal>,
     pub procs: Vec<Proc>,
 }
@@ -30,6 +33,31 @@ pub struct Descriptor {
 pub struct Literal {
     pub symbol: String,
     pub bytes: Vec<u8>,
+}
+
+// Where a runtime check came from: the data object holding the module name
+// and the 1-based position in that module's source. The runtime prints both
+// when the check fails.
+#[derive(Debug, Clone)]
+pub struct Site {
+    pub module: String,
+    pub pos: Pos,
+}
+
+impl Site {
+    // The three trailing operands every runtime check receives, in the order
+    // its C parameters declare them.
+    pub fn args(&self) -> [Arg; 3] {
+        [
+            Arg::Val(Ty::Pointer, Value::Symbol(self.module.clone())),
+            Arg::Val(Ty::Int, Value::Int(position(self.pos.line))),
+            Arg::Val(Ty::Int, Value::Int(position(self.pos.col))),
+        ]
+    }
+}
+
+fn position(n: u32) -> i32 {
+    i32::try_from(n).expect("a source position fits an INTEGER")
 }
 
 #[derive(Debug)]
@@ -198,9 +226,11 @@ pub enum Inst {
     },
     CheckNil {
         pointer: Value,
+        site: Site,
     },
     CheckProcedure {
         procedure: Value,
+        site: Site,
     },
     Alloc {
         dst: usize,
@@ -237,6 +267,7 @@ pub enum Inst {
         // length. Fixed inner dimensions are already folded into stride.
         stride: i64,
         dynamic_stride: Vec<Value>,
+        site: Site,
     },
     // The address of one field: `dst = base + offset`. The offset is the one
     // the record's layout assigned, so nothing downstream recomputes it, and
@@ -260,6 +291,7 @@ pub enum Inst {
     CheckArrayCopy {
         source_len: Value,
         destination_len: Value,
+        site: Site,
     },
     // Copy `count` elements whose complete immediate type occupies `stride`
     // bytes. The count is an INTEGER value and is widened before byte
@@ -283,7 +315,12 @@ pub enum Inst {
         els: String,
     },
     Ret(Option<Value>),
-    Halt,
+    // A call to a runtime routine that reports the failure and ends the
+    // process, so it terminates its block.
+    Trap {
+        symbol: String,
+        site: Site,
+    },
 }
 
 #[derive(Debug)]

@@ -172,7 +172,6 @@ pub enum Stmt {
     Assign {
         lhs: Designator,
         rhs: Expr,
-        #[allow(dead_code)]
         pos: Pos,
     },
     Call {

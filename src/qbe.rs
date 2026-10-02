@@ -135,7 +135,7 @@ fn emit_proc(out: &mut String, proc: &ir::Proc, names: &Names) {
         emit_inst(out, inst, names, &slots);
         terminated = matches!(
             inst,
-            ir::Inst::Jmp(_) | ir::Inst::Br { .. } | ir::Inst::Ret(_) | ir::Inst::Halt
+            ir::Inst::Jmp(_) | ir::Inst::Br { .. } | ir::Inst::Ret(_) | ir::Inst::Trap { .. }
         );
         if matches!(inst, ir::Inst::Label(_)) {
             terminated = false;
@@ -216,14 +216,21 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         ir::Inst::IntToReal { dst, arg } => {
             writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg, names)).unwrap();
         }
-        ir::Inst::CheckNil { pointer } => {
-            writeln!(out, "\tcall $oberon_check_nil(l {})", value(pointer, names)).unwrap();
-        }
-        ir::Inst::CheckProcedure { procedure } => {
+        ir::Inst::CheckNil { pointer, site } => {
             writeln!(
                 out,
-                "\tcall $oberon_check_procedure(l {})",
-                value(procedure, names)
+                "\tcall $oberon_check_nil(l {}, {})",
+                value(pointer, names),
+                args(&site.args(), names, slots)
+            )
+            .unwrap();
+        }
+        ir::Inst::CheckProcedure { procedure, site } => {
+            writeln!(
+                out,
+                "\tcall $oberon_check_procedure(l {}, {})",
+                value(procedure, names),
+                args(&site.args(), names, slots)
             )
             .unwrap();
         }
@@ -295,12 +302,14 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             len,
             stride,
             dynamic_stride,
+            site,
         } => {
             writeln!(
                 out,
-                "\t%.i{dst} =w call $oberon_check_index(w {}, w {})",
+                "\t%.i{dst} =w call $oberon_check_index(w {}, w {}, {})",
                 value(index, names),
-                value(len, names)
+                value(len, names),
+                args(&site.args(), names, slots)
             )
             .unwrap();
             writeln!(out, "\t%.x{dst} =l extsw %.i{dst}").unwrap();
@@ -357,12 +366,14 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         ir::Inst::CheckArrayCopy {
             source_len,
             destination_len,
+            site,
         } => {
             writeln!(
                 out,
-                "\tcall $oberon_check_array_copy(w {}, w {})",
+                "\tcall $oberon_check_array_copy(w {}, w {}, {})",
                 value(source_len, names),
-                value(destination_len, names)
+                value(destination_len, names),
+                args(&site.args(), names, slots)
             )
             .unwrap();
         }
@@ -383,7 +394,11 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             )
             .unwrap();
         }
-        ir::Inst::Call { dst, target, args } => {
+        ir::Inst::Call {
+            dst,
+            target,
+            args: call_args,
+        } => {
             write!(out, "\t").unwrap();
             if let Some((dst, ty)) = dst {
                 write!(out, "{} ={} ", temp(*dst), class(*ty)).unwrap();
@@ -396,18 +411,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
                     write!(out, "call {}(", value(value_, names)).unwrap()
                 }
             }
-            for (i, arg) in args.iter().enumerate() {
-                if i != 0 {
-                    write!(out, ", ").unwrap();
-                }
-                match arg {
-                    ir::Arg::Val(ty, val) => {
-                        write!(out, "{} {}", class(*ty), value(val, names)).unwrap()
-                    }
-                    ir::Arg::Ref(addr) => write!(out, "l {}", address(addr, names, slots)).unwrap(),
-                }
-            }
-            writeln!(out, ")").unwrap();
+            writeln!(out, "{})", args(call_args, names, slots)).unwrap();
         }
         ir::Inst::Jmp(label) => writeln!(out, "\tjmp @{label}").unwrap(),
         ir::Inst::Br { cond, then, els } => {
@@ -420,7 +424,31 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
                 writeln!(out, "\tret").unwrap();
             }
         }
-        ir::Inst::Halt => writeln!(out, "\thlt").unwrap(),
+        // The runtime routine never returns, but QBE still needs the block
+        // to end in a terminator.
+        ir::Inst::Trap { symbol, site } => {
+            writeln!(
+                out,
+                "\tcall ${symbol}({})",
+                args(&site.args(), names, slots)
+            )
+            .unwrap();
+            writeln!(out, "\thlt").unwrap();
+        }
+    }
+}
+
+fn args(args: &[ir::Arg], names: &Names, slots: &HashMap<&str, String>) -> String {
+    args.iter()
+        .map(|a| arg(a, names, slots))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn arg(arg: &ir::Arg, names: &Names, slots: &HashMap<&str, String>) -> String {
+    match arg {
+        ir::Arg::Val(ty, val) => format!("{} {}", class(*ty), value(val, names)),
+        ir::Arg::Ref(addr) => format!("l {}", address(addr, names, slots)),
     }
 }
 

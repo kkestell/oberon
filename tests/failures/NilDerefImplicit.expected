@@ -1,1 +1,1 @@
-nil pointer dereference
+NilDerefImplicit:6:10: nil pointer dereference

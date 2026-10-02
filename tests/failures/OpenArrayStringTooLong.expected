@@ -1,1 +1,1 @@
-array assignment exceeds destination length
+OpenArrayStringTooLong:4:12: array assignment exceeds destination length

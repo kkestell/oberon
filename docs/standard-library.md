@@ -1,6 +1,6 @@
 # Standard Library
 
-The bundled library contains `Out`, `In`, `Math`, `Strings`, `Files`, and `Program`. An application may replace a bundled module by placing a module with the same exact file name in the root source directory. The character set is the compiler's byte character set: a `CHAR` is an ordinal from 0 through 255, quoted source text contributes its encoded bytes, and the library does not decode Unicode or apply a locale.
+The bundled library contains `Out`, `In`, `Math`, `Strings`, `Files`, and `Program`. An application may replace a bundled module by placing a module with the same exact file name in the root source directory. The character set is the compiler's byte character set: a `CHAR` is an ordinal from 0 through 255, quoted source text contributes its encoded bytes, and the library does not decode Unicode or apply a locale. A language runtime failure flushes standard output, prints `Module:line:column: message` to standard error, and ends the program with status 1. A violated precondition of a bundled module is an `ASSERT` in that module, so it reports the position of that `ASSERT` inside the bundled source.
 
 ## `Out`
 

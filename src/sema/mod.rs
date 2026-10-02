@@ -103,6 +103,9 @@ struct Analyzer {
     // one that reports it.
     globals_size: i64,
     literals: Vec<ir::Literal>,
+    // The literal holding the module's name, which every runtime check
+    // reports alongside its position.
+    site_module: String,
     procs: Vec<ir::Proc>,
     interface: Interface,
     current: Option<ProcBuilder>,
@@ -124,6 +127,7 @@ impl Analyzer {
             descriptors: Vec::new(),
             globals_size: 0,
             literals: Vec::new(),
+            site_module: String::new(),
             procs: Vec::new(),
             interface: Interface::default(),
             current: None,
@@ -137,6 +141,11 @@ impl Analyzer {
         module: &ast::Module,
         resolved: &HashMap<String, Interface>,
     ) -> Result<(ir::Module, Interface), Vec<Diagnostic>> {
+        let name = self.module.clone().into_bytes();
+        let ir::Addr::Global(symbol) = self.literal(&name) else {
+            unreachable!("a literal is a global")
+        };
+        self.site_module = symbol;
         self.imports(&module.imports, resolved);
         self.const_declarations(&module.consts);
         self.type_declarations(&module.types);
@@ -530,7 +539,7 @@ impl Analyzer {
                     let value = match assign_kind(&expected, &found) {
                         Some(AssignKind::Store) => Some(value),
                         Some(AssignKind::ByteRange) => {
-                            self.check_byte_domain(Some(expr), value, ByteDomain::Store)
+                            self.check_byte_domain(Some(expr), value, ByteDomain::Store, expr.pos())
                         }
                         _ => {
                             self.diags.push(Diagnostic::new(
@@ -583,7 +592,7 @@ impl Analyzer {
 
     fn lower_stmt(&mut self, stmt: &ast::Stmt) {
         match stmt {
-            ast::Stmt::Assign { lhs, rhs, .. } => self.lower_assign(lhs, rhs),
+            ast::Stmt::Assign { lhs, rhs, pos } => self.lower_assign(lhs, rhs, *pos),
             ast::Stmt::Call { proc, args, pos } => {
                 if let Some((_, Some(_))) = self.lower_call(proc, args, *pos) {
                     self.diags.push(Diagnostic::new(
@@ -615,7 +624,7 @@ impl Analyzer {
     // copy the whole representation, and the exceptions connect strings with
     // CHAR and with character arrays. assign_kind names the outcomes, and the
     // value parameter and the RETURN expression ask the same function.
-    fn lower_assign(&mut self, lhs: &ast::Designator, rhs: &ast::Expr) {
+    fn lower_assign(&mut self, lhs: &ast::Designator, rhs: &ast::Expr, pos: Pos) {
         // The destination designator is resolved first and the source second,
         // each exactly once, so both sides' index expressions run in source
         // order and a selected row is copied from where it was when the
@@ -634,7 +643,9 @@ impl Analyzer {
                 });
             }
             (Some(AssignKind::ByteRange), Source::Value(value, _)) => {
-                if let Some(value) = self.check_byte_domain(Some(rhs), value, ByteDomain::Store) {
+                if let Some(value) =
+                    self.check_byte_domain(Some(rhs), value, ByteDomain::Store, rhs.pos())
+                {
                     self.emit(ir::Inst::Store {
                         ty: ir::Ty::Byte,
                         val: value,
@@ -671,9 +682,11 @@ impl Analyzer {
             (Some(AssignKind::OpenPrefixCopy), Source::Structured(source)) => {
                 let source_len = source.shape[0].clone();
                 let destination_len = target.shape[0].clone();
+                let site = self.site(pos);
                 self.emit(ir::Inst::CheckArrayCopy {
                     source_len: source_len.clone(),
                     destination_len,
+                    site,
                 });
                 let Type::Array(array) = &target.ty else {
                     unreachable!("an open prefix copies into a fixed array")
@@ -721,9 +734,11 @@ impl Analyzer {
                 return;
             }
         } else {
+            let site = self.site(pos);
             self.emit(ir::Inst::CheckArrayCopy {
                 source_len: ir::Value::Int(count),
                 destination_len: target.shape[0].clone(),
+                site,
             });
         }
         let src = self.literal(bytes);
@@ -1211,7 +1226,7 @@ impl Analyzer {
         // Oberon-07 has no ELSE in a case statement, so a selector matching
         // no label has to mean something. oberonc traps and OBNC raises; both
         // beat quietly doing nothing when a label has a typo in it.
-        self.trap("oberon_case_no_match");
+        self.trap("oberon_case_no_match", expr.pos());
         self.emit(ir::Inst::Label(end));
     }
 
@@ -1668,7 +1683,7 @@ impl Analyzer {
             els: ok.clone(),
         });
         self.emit(ir::Inst::Label(trap));
-        self.trap("oberon_set_element_range");
+        self.trap("oberon_set_element_range", expr.pos());
         self.emit(ir::Inst::Label(ok));
         Some(value)
     }
@@ -1684,6 +1699,7 @@ impl Analyzer {
         expr: Option<&ast::Expr>,
         value: ir::Value,
         domain: ByteDomain,
+        pos: Pos,
     ) -> Option<ir::Value> {
         if let Some(expr) = expr {
             match self.try_eval_const(expr) {
@@ -1725,7 +1741,7 @@ impl Analyzer {
             els: ok.clone(),
         });
         self.emit(ir::Inst::Label(trap));
-        self.trap(domain.trap());
+        self.trap(domain.trap(), pos);
         self.emit(ir::Inst::Label(ok));
         Some(value)
     }
@@ -1893,7 +1909,7 @@ impl Analyzer {
         let value = match op {
             BinOp::Div | BinOp::Mod => {
                 if !matches!(rhs, ast::Expr::Int { value, .. } if *value != 0) {
-                    self.div_zero_check(rhs_ir.clone());
+                    self.div_zero_check(rhs_ir.clone(), pos);
                 }
                 let (rem, adjust) = self.floor_adjust(lhs.clone(), rhs_ir.clone());
                 if op == BinOp::Mod {
@@ -2043,7 +2059,7 @@ impl Analyzer {
         }
     }
 
-    fn div_zero_check(&mut self, divisor: ir::Value) {
+    fn div_zero_check(&mut self, divisor: ir::Value, pos: Pos) {
         let zero = self.bin(ir::BinOp::Eq, ir::Ty::Int, divisor, ir::Value::Int(0));
         let trap = self.label("div.zero");
         let ok = self.label("div.ok");
@@ -2053,7 +2069,7 @@ impl Analyzer {
             els: ok.clone(),
         });
         self.emit(ir::Inst::Label(trap));
-        self.trap("oberon_div_by_zero");
+        self.trap("oberon_div_by_zero", pos);
         self.emit(ir::Inst::Label(ok));
     }
 
@@ -2240,7 +2256,12 @@ impl Analyzer {
                             args.push(ir::Arg::Val(expected.ir(), value));
                         }
                         Some(AssignKind::ByteRange) => {
-                            match self.check_byte_domain(Some(actual), value, ByteDomain::Store) {
+                            match self.check_byte_domain(
+                                Some(actual),
+                                value,
+                                ByteDomain::Store,
+                                actual.pos(),
+                            ) {
                                 Some(value) => args.push(ir::Arg::Val(ir::Ty::Byte, value)),
                                 None => ok = false,
                             }
@@ -2262,7 +2283,8 @@ impl Analyzer {
             return None;
         }
         if let Some(procedure) = indirect {
-            self.emit(ir::Inst::CheckProcedure { procedure });
+            let site = self.site(pos);
+            self.emit(ir::Inst::CheckProcedure { procedure, site });
         }
         let dst = procedure.ret.as_ref().map(|ty| (self.temp(), ty.ir()));
         self.emit(ir::Inst::Call { dst, target, args });
@@ -2312,7 +2334,7 @@ impl Analyzer {
 
         let value = match builtin {
             Builtin::Abs => match args[0].1 {
-                Type::Integer => self.lower_abs_int(args[0].0.clone()),
+                Type::Integer => self.lower_abs_int(args[0].0.clone(), pos),
                 Type::Real => self.call_runtime(
                     "oberon_abs_real",
                     vec![ir::Arg::Val(ir::Ty::Real, args[0].0.clone())],
@@ -2337,11 +2359,9 @@ impl Analyzer {
             // that is out of range, so the wrapper checks the domain itself.
             Builtin::Floor => {
                 self.check_floor_argument(&actuals[0])?;
-                self.call_runtime(
-                    "oberon_floor",
-                    vec![ir::Arg::Val(ir::Ty::Real, args[0].0.clone())],
-                    ir::Ty::Int,
-                )
+                let mut floor_args = vec![ir::Arg::Val(ir::Ty::Real, args[0].0.clone())];
+                floor_args.extend(self.site(pos).args());
+                self.call_runtime("oberon_floor", floor_args, ir::Ty::Int)
             }
             // The one conversion between machine classes. It rounds to the
             // nearest binary32 value, so an INTEGER near the top of the range
@@ -2364,7 +2384,7 @@ impl Analyzer {
             // 0 through 255 as BYTE, but the check and the message are its
             // own, matching how each dynamic check has its own line.
             Builtin::Chr => {
-                self.check_byte_domain(Some(&actuals[0]), args[0].0.clone(), ByteDomain::Chr)?
+                self.check_byte_domain(Some(&actuals[0]), args[0].0.clone(), ByteDomain::Chr, pos)?
             }
             Builtin::Lsl | Builtin::Asr | Builtin::Ror => {
                 self.lower_shift(builtin, args[0].0.clone(), args[1].0.clone(), &actuals[1])?
@@ -2467,7 +2487,10 @@ impl Analyzer {
             self.emit(ir::Inst::Call {
                 dst: None,
                 target: ir::CallTarget::Direct("oberon_unpk".into()),
-                args: vec![ir::Arg::Ref(fraction), ir::Arg::Ref(exponent)],
+                args: [ir::Arg::Ref(fraction), ir::Arg::Ref(exponent)]
+                    .into_iter()
+                    .chain(self.site(pos).args())
+                    .collect(),
             });
         }
         Some((None, None))
@@ -2568,7 +2591,7 @@ impl Analyzer {
     // MIN(INTEGER) has no absolute value. Folding rejects it, so the runtime
     // form must not quietly wrap the way unary minus still does. The REAL
     // form has no such hole and is an ordinary runtime call.
-    fn lower_abs_int(&mut self, arg: ir::Value) -> ir::Value {
+    fn lower_abs_int(&mut self, arg: ir::Value, pos: Pos) -> ir::Value {
         let overflows = self.bin(
             ir::BinOp::Eq,
             ir::Ty::Int,
@@ -2583,7 +2606,7 @@ impl Analyzer {
             els: ok.clone(),
         });
         self.emit(ir::Inst::Label(bad));
-        self.trap("oberon_abs_overflow");
+        self.trap("oberon_abs_overflow", pos);
         self.emit(ir::Inst::Label(ok));
 
         let negative = self.bin(ir::BinOp::Lt, ir::Ty::Int, arg.clone(), ir::Value::Int(0));
@@ -2656,7 +2679,7 @@ impl Analyzer {
                     els: ok.clone(),
                 });
                 self.emit(ir::Inst::Label(trap));
-                self.trap("oberon_shift_range");
+                self.trap("oberon_shift_range", count_expr.pos());
                 self.emit(ir::Inst::Label(ok));
             }
         }
@@ -2733,7 +2756,7 @@ impl Analyzer {
             };
             let next = self.bin(op, ir::Ty::Int, current, step);
             let next = if ty == Type::Byte {
-                self.check_byte_domain(None, next, ByteDomain::Store)
+                self.check_byte_domain(None, next, ByteDomain::Store, pos)
                     .expect("a computed value only takes the dynamic check")
             } else {
                 next
@@ -2806,7 +2829,7 @@ impl Analyzer {
                 els: bad.clone(),
             });
             self.emit(ir::Inst::Label(bad));
-            self.trap("oberon_assert_failed");
+            self.trap("oberon_assert_failed", pos);
             self.emit(ir::Inst::Label(ok));
         }
         Some((None, None))
@@ -3065,7 +3088,7 @@ impl Analyzer {
                     pointer,
                     target: target_record.descriptor.clone(),
                 });
-                self.emit_guard_check(ir::Value::Temp(test));
+                self.emit_guard_check(ir::Value::Temp(test), pos);
                 place.ty = target;
                 Some(place)
             }
@@ -3094,7 +3117,7 @@ impl Analyzer {
                     descriptor,
                     target: target_record.descriptor.clone(),
                 });
-                self.emit_guard_check(ir::Value::Temp(test));
+                self.emit_guard_check(ir::Value::Temp(test), pos);
                 place.ty = target;
                 Some(place)
             }
@@ -3134,7 +3157,7 @@ impl Analyzer {
         }
     }
 
-    fn emit_guard_check(&mut self, test: ir::Value) {
+    fn emit_guard_check(&mut self, test: ir::Value, pos: Pos) {
         let ok = self.label("typeguard.ok");
         let bad = self.label("typeguard.bad");
         self.emit(ir::Inst::Br {
@@ -3143,7 +3166,7 @@ impl Analyzer {
             els: bad.clone(),
         });
         self.emit(ir::Inst::Label(bad));
-        self.trap("oberon_type_guard_failed");
+        self.trap("oberon_type_guard_failed", pos);
         self.emit(ir::Inst::Label(ok));
     }
 
@@ -3362,8 +3385,10 @@ impl Analyzer {
         };
         let record = pointer.record()?;
         let value = self.load(base.addr, ir::Ty::Pointer);
+        let site = self.site(pos);
         self.emit(ir::Inst::CheckNil {
             pointer: value.clone(),
+            site,
         });
         let ir::Value::Temp(temp) = value else {
             unreachable!("a loaded pointer is a temporary")
@@ -3430,6 +3455,7 @@ impl Analyzer {
             len,
             stride: fixed_base.size(),
             dynamic_stride: remaining_shape[..dynamic_count].to_vec(),
+            site: self.site(expr.pos()),
         });
         Some(Place {
             addr: ir::Addr::Temp(dst),
@@ -3995,14 +4021,21 @@ impl Analyzer {
     }
 
     // A trap that ends the process: the check that guards it has already
-    // branched here, so nothing follows the halt.
-    fn trap(&mut self, symbol: &str) {
-        self.emit(ir::Inst::Call {
-            dst: None,
-            target: ir::CallTarget::Direct(symbol.into()),
-            args: Vec::new(),
+    // branched here, so nothing follows it.
+    fn trap(&mut self, symbol: &str, pos: Pos) {
+        let site = self.site(pos);
+        self.emit(ir::Inst::Trap {
+            symbol: symbol.into(),
+            site,
         });
-        self.emit(ir::Inst::Halt);
+    }
+
+    // What a runtime check reports when it fails: this module and `pos`.
+    fn site(&self, pos: Pos) -> ir::Site {
+        ir::Site {
+            module: self.site_module.clone(),
+            pos,
+        }
     }
 }
 

@@ -1,1 +1,1 @@
-type guard failed
+PointerTypeGuardFail:10:38: type guard failed

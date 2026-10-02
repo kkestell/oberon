@@ -249,6 +249,54 @@ END ProgramArguments."#,
         .unwrap_or_else(|e| panic!("removing {}: {e}", directory.display()));
 }
 
+// The corpus captures stdout and stderr apart, so it cannot see their order.
+// Here both share one pipe, where stdout is fully buffered.
+#[test]
+fn failure_follows_earlier_output() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let name = "OutputOrder";
+    let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let directory =
+        std::env::temp_dir().join(format!("oberon-order-{}-{sequence}", std::process::id()));
+    fs::create_dir(&directory).unwrap_or_else(|e| panic!("creating {}: {e}", directory.display()));
+    let source = directory.join(format!("{name}.Mod"));
+    fs::write(
+        &source,
+        r#"MODULE OutputOrder;
+IMPORT Out;
+VAR a: ARRAY 2 OF INTEGER; i: INTEGER;
+BEGIN
+  Out.String("before"); Out.Ln;
+  i := 2;
+  a[i] := 1
+END OutputOrder."#,
+    )
+    .unwrap_or_else(|e| panic!("writing {}: {e}", source.display()));
+
+    let compile = compile(root, &source, name);
+    assert!(
+        compile.status.success() && compile.stderr.is_empty(),
+        "compile failed ({}):\n{}",
+        compile.status,
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let run = Command::new("sh")
+        .args(["-c", r#"exec "$0" 2>&1"#])
+        .arg(root.join("build").join(name))
+        .current_dir(&directory)
+        .output()
+        .expect("running OutputOrder");
+    assert_eq!(run.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "before\nOutputOrder:7:5: array index out of bounds\n"
+    );
+
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|e| panic!("removing {}: {e}", directory.display()));
+}
+
 fn generated_module(name: &str, text: String) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);

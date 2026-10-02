@@ -1,1 +1,1 @@
-array assignment exceeds destination length
+OpenArrayCopyTooLong:6:7: array assignment exceeds destination length

@@ -1,1 +1,1 @@
-CHR argument is outside CHAR range
+ChrRangeLow:5:9: CHR argument is outside CHAR range

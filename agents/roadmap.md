@@ -35,11 +35,6 @@ a JIT, and advanced optimization remain non-goals unless project goals change.
 These gaps keep the compiler from building ordinary programs outside this
 repository. They follow conformance.
 
-- **Runtime failure positions.** Runtime failures print a fixed message with no
-  source position. Report the module, line, and column of the failing check.
-- **Output ordering.** A runtime failure writes to stderr before buffered
-  stdout is flushed, so the failure appears ahead of earlier output. Flush
-  stdout before writing a failure.
 - **Debug information.** QBE emits no line information, so a debugger cannot
   map generated code to source.
 - **Host access.** No `SYSTEM` module or binding mechanism exists, so programs

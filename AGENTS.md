@@ -53,7 +53,7 @@ An extended record contains its base as a prefix. Static descriptors link each r
 
 [runtime/oberon.c](runtime/oberon.c) supplies language checks, predefined operations, and allocation through the Boehm–Demers–Weiser collector. Interior pointers keep objects alive; pointer-free payloads are unscanned. The runtime and the collector are prebuilt into one static `liboberon.a`, which every program links.
 
-The [standard modules](lib/) are ordinary Oberon source. [runtime/standard.c](runtime/standard.c) provides I/O, formatting, libm, and operating-system access through a private interface visible only to bundled modules. Only scalars, bounded buffers, and opaque file handles cross it. Language failures terminate the program; fallible library operations return status.
+The [standard modules](lib/) are ordinary Oberon source. [runtime/standard.c](runtime/standard.c) provides I/O, formatting, libm, and operating-system access through a private interface visible only to bundled modules. Only scalars, bounded buffers, and opaque file handles cross it. Language failures report their source position and terminate the program; fallible library operations return status.
 
 Interpretation decisions are recorded in [agents/reviews/](agents/reviews/).
 
