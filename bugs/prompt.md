@@ -56,9 +56,9 @@ checkout — check first**. If it is there, read it and cite it. If it is not, y
 your own knowledge of the language, so hold yourself to a higher bar: only report a finding when
 you can state the rule you believe is being violated and would defend it.
 
-For the bundled library modules in `lib/` (`Out`, `In`, `Math`, `Strings`, `Files`), the reference
-is [docs/standard-library.md](docs/standard-library.md). That document, not your expectations from
-other Oberon systems, defines what those procedures do.
+For the bundled library modules in `lib/` (`Out`, `In`, `Math`, `Strings`, `Files`, `Program`),
+the reference is [docs/standard-library.md](docs/standard-library.md). That document, not your
+expectations from other Oberon systems, defines what those procedures do.
 
 Every finding needs a stated expected result and a reason that expectation is right. "This looks
 wrong" is not a finding. If you cannot pin down the correct answer, the case goes in

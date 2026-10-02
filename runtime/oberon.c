@@ -7,6 +7,11 @@
 
 #include <gc.h>
 
+/* The command line is kept for the bundled Program module, which reads it
+   through runtime/standard.c. */
+int oberon_argc;
+char **oberon_argv;
+
 /* Generated code can hold an address that points into the middle of a heap
    object while nothing points at its first byte. Resolving the target of NEW is
    the ordinary case: `p.next := F()` computes the address of one field, then
@@ -15,11 +20,7 @@
    keeps the containing object alive across that call. The setting only takes
    effect before the collector initializes, so the two calls cannot be swapped.
    It is requested here rather than assumed, because whether it is on by default
-   is a property of how the collector was built. The command line is kept for
-   the bundled Program module, which reads it through runtime/standard.c. */
-int oberon_argc;
-char **oberon_argv;
-
+   is a property of how the collector was built. */
 void oberon_init(int argc, char **argv)
 {
     oberon_argc = argc;

@@ -68,7 +68,8 @@ Before you trust any result, run three programs by hand and confirm the harness 
 
 `Out` is the only library module you may use. The Report defines no standard library, so you have no
 specification for the others and cannot tell a bug from a design choice in them. Leave `In`, `Math`,
-`Strings`, and `Files` alone entirely — a finding against an unspecified module is unfileable.
+`Strings`, `Files`, and `Program` alone entirely — a finding against an unspecified module is
+unfileable.
 
 `Out` has this interface:
 
