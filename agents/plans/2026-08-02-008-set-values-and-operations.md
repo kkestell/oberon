@@ -358,7 +358,7 @@ matches for SET.
 Add `oberon_set_element_range` in the same shape as the existing traps. It
 writes the stable error line and exits.
 
-### docs/dev/architecture.md
+### agents/architecture.md
 
 Add a short scalar-representation section. Document the SET domain, bit-vector
 layout, four-byte size, QBE word class, and `ORD` reinterpretation. Document

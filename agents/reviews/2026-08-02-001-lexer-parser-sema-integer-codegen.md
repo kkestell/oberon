@@ -26,7 +26,7 @@ correct. The number scanner consumes digits and `A`–`F` greedily and only then
 decides between `H`, `X`, and `.`, which is what `ORS.Mod`'s `Number` does — so
 `10DIV` failing to scan is Wirth's behaviour, not a bug. And `ScaleFactor`
 accepting only `E` matches
-[oberon07-grammar.ebnf](../../../references/oberon07-grammar.ebnf) line 10, even
+[oberon07-grammar.ebnf](../../references/oberon07-grammar.ebnf) line 10, even
 though Wirth's own scanner also accepts `D`.
 
 Operator precedence is right, including `-a*b` parsing as `-(a*b)` because unary

@@ -52,7 +52,7 @@ The extraction proceeds one module at a time. Each step must compile before the 
 - Add `src/sema/types.rs` for semantic types and compatibility.
 - Add `src/sema/symbols.rs` for scopes, symbols, interfaces, constant values, and predefined-operation metadata.
 - Add `src/sema/constant.rs` for constant-expression checking and evaluation.
-- Update `docs/dev/code-style.md` so its structural rule names pipeline modules and the cohesive semantic-analysis submodules accurately.
+- Update `agents/code-style.md` so its structural rule names pipeline modules and the cohesive semantic-analysis submodules accurately.
 - Keep `src/driver.rs`, `src/main.rs`, AST, IR, backend, runtime, corpus, and architecture documentation behaviorally unchanged.
 
 ## Verification

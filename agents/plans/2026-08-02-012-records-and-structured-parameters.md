@@ -147,7 +147,7 @@ Emit the field instruction as one pointer `add`. Emit record globals with their 
 
 Nothing. Record copies reuse `oberon_copy`, and no new runtime check exists in this slice.
 
-### docs/dev/architecture.md
+### agents/architecture.md
 
 Add a records section covering the layout rule with a padding example, record identity and the declared-name display, field export marks and the defining-module visibility rule, the structured parameter convention with the aliasing consequence, and record assignment. Note in the parameter discussion that a "value" parameter of structured type is an address with a read-only rule, and why.
 

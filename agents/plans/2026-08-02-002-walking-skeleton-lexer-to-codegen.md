@@ -2,7 +2,7 @@
 
 ## Context
 
-Slice 1 proved the back half: [driver.rs](src/driver.rs) writes a hardcoded QBE IL const to `build/out.ssa`, runs `qbe`, then one `cc` invocation assembles + compiles [runtime/oberon.c](runtime/oberon.c) + links `-lgc`. Slice 2 builds the front half (lexer → parser → sema → QBE emission) and connects it, so every later slice is "add a language feature" rather than "build a stage." Per explicit decision, **no typed IR this slice** — AST → QBE IL directly, with a `// TODO` citing the architecture doc; the IR arrives in slice 3/4 when there's real lowering (addresses, type descriptors, bounds checks) to justify it.
+Slice 1 proved the back half: [driver.rs](../../src/driver.rs) writes a hardcoded QBE IL const to `build/out.ssa`, runs `qbe`, then one `cc` invocation assembles + compiles [runtime/oberon.c](../../runtime/oberon.c) + links `-lgc`. Slice 2 builds the front half (lexer → parser → sema → QBE emission) and connects it, so every later slice is "add a language feature" rather than "build a stage." Per explicit decision, **no typed IR this slice** — AST → QBE IL directly, with a `// TODO` citing the architecture doc; the IR arrives in slice 3/4 when there's real lowering (addresses, type descriptors, bounds checks) to justify it.
 
 Target program `tests/corpus/Arith.Mod` (expected stdout `22\n`):
 
@@ -146,7 +146,7 @@ void oberon_out_int(int32_t v, int32_t n) { printf("%*d", (int)n, (int)v); }
 void oberon_out_ln(void)                  { putchar('\n'); }
 ```
 
-### Driver rewrite ([src/driver.rs](src/driver.rs), [src/main.rs](src/main.rs))
+### Driver rewrite ([src/driver.rs](../../src/driver.rs), [src/main.rs](../../src/main.rs))
 
 - `main.rs`: `mod diag; mod lexer; mod ast; mod parser; mod sema; mod qbe; mod driver;` (no lib.rs — bin crate stays); `std::env::args().nth(1)` for the source path; missing → `usage: oberon <file.Mod>` to stderr, exit 2. No clap, no flags; `--emit-il` stays a `// TODO`.
 - `driver::build(source: &Path)`: read (anyhow + context) → lex → parse (parse `Err` pushes its diagnostic) → stop if diags → `sema::analyze` → stop if diags → `qbe::emit` → write `build/<Module>.ssa` → existing `run()` helper for `qbe` and the single `cc … runtime/oberon.c -lgc` invocation (keep recompiling the 11-line runtime every build).

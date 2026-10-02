@@ -161,7 +161,7 @@ Emit pointer values in the long class, pointer memory traffic with `loadl` and `
 
 Add `oberon_check_nil(const void *pointer)`, which prints `nil pointer dereference` and exits for a null pointer. Change `oberon_init` to call `GC_set_all_interior_pointers(1)` before `GC_INIT`, so a selected address held across allocation keeps its containing object alive independently of the collector's build default. Keep `oberon_alloc` and `oberon_alloc_atomic` as the only allocation calls used by generated code; their signatures and behavior need no change.
 
-### docs/dev/architecture.md
+### agents/architecture.md
 
 Add pointer representation and compatibility, forward base resolution, `NIL`, explicit and implicit checked dereference, pointer parameter and result ABI, heap object layout, recursive pointer-containment classification, scanned and atomic allocation, conservative roots, and the explicit interior-pointer setting needed while a selected allocation target is live. State that no heap header or runtime type descriptor exists yet.
 

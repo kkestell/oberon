@@ -346,7 +346,7 @@ enough, so this needs no new crate.
 No change. The command-line interface remains `oberon <file.Mod>`, and the
 driver still owns the complete build.
 
-### docs/dev/architecture.md
+### agents/architecture.md
 
 Update the pipeline to show root-driven module discovery before aggregate IR
 emission. Document the two source directories, the temporary native fallback,

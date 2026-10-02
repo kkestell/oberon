@@ -33,9 +33,7 @@ Record these separately, at lower priority, in `bugs/questions/`:
 ## What does not count
 
 - Documented implementation choices. `INTEGER` is signed 32-bit, `SET` is a 32-bit bit vector,
-  `REAL` is IEEE binary32, `CHAR` and `BYTE` are one byte. See
-  [docs/dev/architecture.md](docs/dev/architecture.md). Read it before you start, so you do not
-  file a finding against a decision that was made on purpose.
+  `REAL` is IEEE binary32, `CHAR` and `BYTE` are one byte.
 - The `SYSTEM` module. It is deliberately not implemented.
 - Features from other Oberon dialects. Oberon-07 has no `WITH`, no `LOOP`/`EXIT`, no `LONGINT`, no
   `COPY`, no `MIN`/`MAX`, no `HALT`, and no variadic anything. If your test program uses one of

@@ -285,7 +285,7 @@ The Report is seventeen pages partly because it declines to answer questions it 
 
 So the size of an `INTEGER`, the precision of a `REAL`, the largest element a `SET` can hold, and the character set behind `CHAR` are all decisions the implementation makes. A few finer points are genuinely open too, including what happens when a `CASE` selector matches no label, and whether two separately written array types with the same shape count as the same type.
 
-This compiler's answers are recorded in [docs/dev/architecture.md](dev/architecture.md), and the reasoning behind the ones that required a judgement call is in the slice reviews under [docs/dev/reviews/](dev/reviews/).
+This compiler's choices are implemented in the [semantic types](../src/sema/types.rs) and [runtime](../runtime/oberon.c); the reasoning behind interpretation decisions is recorded in the [slice reviews](../agents/reviews/).
 
 ## What is not there
 
@@ -305,4 +305,4 @@ The grammar is extracted for convenient reference at [references/oberon07-gramma
 
 For worked Oberon, the compiler's test corpus in [tests/corpus/](../tests/corpus/) is a few dozen small modules, each exercising one part of the language with its expected output recorded next to it. The modules carry comments citing the Report section they pin down, so they double as annotated examples.
 
-This compiler does not implement all of Oberon-07 yet. Source using a part of the language it has not reached is rejected with a diagnostic saying so, rather than miscompiled, and [docs/dev/roadmap.md](dev/roadmap.md) tracks what is left.
+This compiler does not implement all of Oberon-07 yet. Source using a part of the language it has not reached is rejected with a diagnostic saying so, rather than miscompiled, and [agents/roadmap.md](../agents/roadmap.md) tracks what is left.

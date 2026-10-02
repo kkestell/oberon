@@ -427,7 +427,7 @@ these traps, consistently with the existing runtime failures.
 Link the generated executable with the platform math library after the object
 and runtime inputs. No other driver or module-graph change is needed.
 
-### docs/dev/architecture.md
+### agents/architecture.md
 
 Extend the scalar-representation section added by Slice 8. Document the
 binary32 representation, four-byte size, QBE `s` class, rounding precision,

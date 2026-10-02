@@ -49,7 +49,7 @@ A variable index still folds, which was the point of the rewrite. A probe declar
 
 `tests/errors/PointerLenBad.Mod` now pins the rule in all three contexts that reach the walk: a call through a pointer selector, a call inside arithmetic in a plain array index, and a call in an array-length position. It reports six diagnostics and no cascades.
 
-[docs/dev/architecture.md](../architecture.md) had asserted the opposite of what the code did. Its required-constant `LEN` paragraph ended "Nothing observable is skipped because this path asks only for the fixed array type and emits no executable expression." A dropped call is observable. The paragraph now says which two things the path declines to do and why each is unobservable — a variable read has no effect, and a call does, so a call is an error.
+[agents/architecture.md](../architecture.md) had asserted the opposite of what the code did. Its required-constant `LEN` paragraph ended "Nothing observable is skipped because this path asks only for the fixed array type and emits no executable expression." A dropped call is observable. The paragraph now says which two things the path declines to do and why each is unobservable — a variable read has no effect, and a call does, so a call is an error.
 
 ### Low: forward-base diagnostics print out of source order
 
@@ -59,7 +59,7 @@ This was the only `.expected` file in `tests/errors` whose line numbers were not
 
 Fixed at the class rather than the instance. `driver::fail` now sorts diagnostics by line and column before printing them. The sort is stable, so two diagnostics at one position keep the order the analyzer reported them in, and a pass that wants a particular order among them still gets it. Deferring a check is now free of presentation consequences, which is what makes resolving a pointer's forward base after its `TYPE` section a clean design rather than a visible one.
 
-Sorting changed exactly one expected file, `PointerForwardBad.expected`, which now runs 4, 5, 6, 7, 8, 12. Every other error expectation was already in order and is untouched. [docs/dev/code-style.md](../code-style.md) records the guarantee alongside the diagnostic struct it belongs to.
+Sorting changed exactly one expected file, `PointerForwardBad.expected`, which now runs 4, 5, 6, 7, 8, 12. Every other error expectation was already in order and is untouched. [agents/code-style.md](../code-style.md) records the guarantee alongside the diagnostic struct it belongs to.
 
 ### Low: behaviour the plan promised a test for, which worked but was untested
 
@@ -163,7 +163,7 @@ The review does not ask for `GC_set_all_interior_pointers(1)` to be removed on t
 
 `tests/corpus/Pointers.Mod` gained the pointer alias, whole-record assignment through a pointer, executable `LEN` through both selector forms, the folded `NIL` constant, and the allocation loop before the pointer array is read back. `tests/corpus/PointerGc.Mod` retains its list through heap fields alone across the churn and now checks the node values as well as the count. `tests/errors/PointerLenBad.Mod` gained the three call-in-index cases. `tests/errors/PointerForwardBad.expected` follows the new diagnostic order.
 
-[docs/dev/architecture.md](../architecture.md) records why the required-constant `LEN` path skips nothing observable. [docs/dev/code-style.md](../code-style.md) records the diagnostic ordering guarantee.
+[agents/architecture.md](../architecture.md) records why the required-constant `LEN` path skips nothing observable. [agents/code-style.md](../code-style.md) records the diagnostic ordering guarantee.
 
 ## Verification
 

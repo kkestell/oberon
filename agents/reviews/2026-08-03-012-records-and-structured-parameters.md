@@ -18,7 +18,7 @@ Fixed: the comment now says that a structured formal is written as a named type 
 
 The plan asked the architecture document to note that a value parameter of structured type is an address with a read-only rule, and why. The committed section states the convention and states that no callee-side copy is made. It does not say what licenses that reading of the Report, and it does not say that aliasing is therefore observable. Observable aliasing is the part a programmer notices, and `ParamAlias.Mod` exists to pin it, so the document should not be the one place that omits it.
 
-Fixed: [docs/dev/architecture.md](../architecture.md) now records why a structured value parameter is an address, namely that Report 10.1 confines the local-variable rule to basic types while Report 9.1 forbids assignment to a structured value parameter or its elements. It records the aliasing consequence in the same terms `ParamAlias.Mod` demonstrates. It also records that a string cannot be the actual for a fixed character-array formal, which is a permanent language rule the document did not mention at all.
+Fixed: [agents/architecture.md](../architecture.md) now records why a structured value parameter is an address, namely that Report 10.1 confines the local-variable rule to basic types while Report 9.1 forbids assignment to a structured value parameter or its elements. It records the aliasing consequence in the same terms `ParamAlias.Mod` demonstrates. It also records that a string cannot be the actual for a fixed character-array formal, which is a permanent language rule the document did not mention at all.
 
 ## Verified implementation
 

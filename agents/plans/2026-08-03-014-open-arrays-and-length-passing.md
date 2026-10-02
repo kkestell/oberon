@@ -163,7 +163,7 @@ Emit dynamic index lengths and row-major stride products, expanded address-and-l
 
 Add `oberon_check_array_copy(int32_t source_length, int32_t destination_length)`. It exits with `array assignment exceeds destination length` when the source is longer. Keep copying in `oberon_copy`; the checker does not combine policy with memory movement.
 
-### docs/dev/architecture.md
+### agents/architecture.md
 
 Add open formal representation, recursive compatibility, the address-plus-lengths ABI, source-to-machine parameter expansion, place shape metadata, dynamic row-major stride derivation, dynamic indexing and `LEN`, string actuals, open character-array comparison, value and `VAR` mutability, checked open-source assignment, and the constant-expression boundary. State that open arrays own no storage and that a selected heap address relies on Slice 13's interior-pointer collector setting.
 

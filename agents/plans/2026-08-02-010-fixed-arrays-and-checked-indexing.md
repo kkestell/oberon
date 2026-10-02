@@ -481,7 +481,7 @@ Include the C string facilities and add:
 Keep both behind runtime names rather than calling libc directly from generated
 code.
 
-### docs/dev/architecture.md
+### agents/architecture.md
 
 Add an aggregate-layout section. Document array identity, nested representation,
 size and alignment, zero-length storage, checked element address calculation,

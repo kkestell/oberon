@@ -231,7 +231,7 @@ Add:
 - `oberon_byte_range(void)`, which prints `BYTE value out of range` and exits.
 - `oberon_chr_range(void)`, which prints `CHR argument is outside CHAR range` and exits.
 
-### docs/dev/architecture.md
+### agents/architecture.md
 
 Add a section covering the character set, the one-byte representation of CHAR and BYTE, the word class those types use in calls, the string literal's data object, the terminator rule for a string assignment, the bounded comparison rule, the BYTE range check, and the `CHR` domain. Note in the existing scalar representation section that not every scalar is four bytes any more.
 
