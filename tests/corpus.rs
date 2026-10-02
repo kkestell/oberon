@@ -16,10 +16,11 @@ static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
 // sibling .expected file is a test root; the rest of the directory is the
 // dependencies that root imports.
 //
-// The compiler runs from the repository root, which pins its runtime and
-// build paths and keeps diagnostics stable. Each generated program runs in a
-// fresh directory, so file operations cannot touch the checkout or another
-// corpus case.
+// The compiler runs from the repository root, which keeps diagnostics stable,
+// and writes each program to build/. It finds its runtime and bundled modules
+// in target/lib/oberon, which `make test` stages. Each generated program runs
+// in a fresh directory, so file operations cannot touch the checkout or
+// another corpus case.
 #[test]
 fn corpus() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -27,7 +28,7 @@ fn corpus() {
 
     for source in modules(root, "tests/corpus") {
         let stem = stem(&source);
-        let compile = compile(root, &source);
+        let compile = compile(root, &source, &stem);
         if !compile.status.success() || !compile.stderr.is_empty() {
             failures.push(format!(
                 "{stem}: compile failed ({}):\n{}",
@@ -52,7 +53,7 @@ fn corpus() {
 
     for source in modules(root, "tests/errors") {
         let stem = stem(&source);
-        let compile = compile(root, &source);
+        let compile = compile(root, &source, &stem);
         if compile.status.success() {
             failures.push(format!(
                 "{stem}: expected compilation to fail, but it succeeded"
@@ -71,7 +72,7 @@ fn corpus() {
 
     for source in modules(root, "tests/failures") {
         let stem = stem(&source);
-        let compile = compile(root, &source);
+        let compile = compile(root, &source, &stem);
         if !compile.status.success() {
             failures.push(format!(
                 "{stem}: compile failed ({}):\n{}",
@@ -104,7 +105,7 @@ fn corpus() {
 fn root_filename_must_end_in_mod() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = Path::new("tests/errors/RootWrongExtension.txt");
-    let compile = compile(root, source);
+    let compile = compile(root, source, "RootWrongExtension");
 
     assert!(
         !compile.status.success(),
@@ -137,6 +138,56 @@ fn deeply_nested_source_compiles_and_runs() {
     );
 }
 
+// The installed case: no checkout around the source, no -o, and nothing but
+// the executable left beside it.
+#[test]
+fn compiles_outside_the_checkout() {
+    let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let directory =
+        std::env::temp_dir().join(format!("oberon-outside-{}-{sequence}", std::process::id()));
+    fs::create_dir(&directory).unwrap_or_else(|e| panic!("creating {}: {e}", directory.display()));
+    fs::write(
+        directory.join("Hello.Mod"),
+        "MODULE Hello; IMPORT Out; BEGIN Out.String(\"hello\"); Out.Ln END Hello.",
+    )
+    .expect("writing Hello.Mod");
+
+    let compile = Command::new(env!("CARGO_BIN_EXE_oberon"))
+        .arg("Hello.Mod")
+        .current_dir(&directory)
+        .output()
+        .expect("running compiler");
+    assert!(
+        compile.status.success() && compile.stderr.is_empty(),
+        "compile failed ({}):\n{}",
+        compile.status,
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let mut entries: Vec<String> = fs::read_dir(&directory)
+        .expect("reading directory")
+        .map(|entry| {
+            entry
+                .expect("reading dir entry")
+                .file_name()
+                .into_string()
+                .unwrap()
+        })
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["Hello", "Hello.Mod"]);
+
+    let run = Command::new(directory.join("Hello"))
+        .current_dir(&directory)
+        .output()
+        .expect("running Hello");
+    assert!(run.status.success() && run.stderr.is_empty());
+    assert_eq!(run.stdout, b"hello\n");
+
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|e| panic!("removing {}: {e}", directory.display()));
+}
+
 fn generated_module(name: &str, text: String) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
@@ -148,7 +199,7 @@ fn generated_module(name: &str, text: String) {
     let source = directory.join(format!("{name}.Mod"));
     fs::write(&source, text).unwrap_or_else(|e| panic!("writing {}: {e}", source.display()));
 
-    let compile = compile(root, &source);
+    let compile = compile(root, &source, name);
     assert!(
         compile.status.success() && compile.stderr.is_empty(),
         "{name}: compile failed ({}):\n{}",
@@ -201,8 +252,12 @@ fn stem(source: &Path) -> String {
     source.file_stem().unwrap().to_str().unwrap().to_string()
 }
 
-fn compile(root: &Path, source: &Path) -> std::process::Output {
+fn compile(root: &Path, source: &Path, stem: &str) -> std::process::Output {
+    let build = root.join("build");
+    fs::create_dir_all(&build).unwrap_or_else(|e| panic!("creating {}: {e}", build.display()));
     Command::new(env!("CARGO_BIN_EXE_oberon"))
+        .arg("-o")
+        .arg(build.join(stem))
         .arg(source)
         .current_dir(root)
         .output()

@@ -33,7 +33,7 @@ Source → Lexer → Parser → AST → Semantic analysis → Typed IR
        → QBE IL → QBE → System assembler and linker → Executable
 ```
 
-The compiler owns semantics, object layout, and runtime checks. QBE owns instruction selection, register allocation, and calling conventions. Apple ARM64 needs QBE 1.3 or later.
+The compiler owns semantics, object layout, and runtime checks. QBE owns instruction selection, register allocation, and calling conventions. QBE 1.3 and the collector are [vendored](vendor/README.md), so a C compiler is the only host requirement.
 
 The [driver](src/driver.rs) compiles one reachable module graph into one QBE unit. Dependencies finish before their clients, which yields both the interfaces for analysis and the order of initialization. Interfaces share type descriptors, so type identity survives imports. Nothing persists between builds.
 
@@ -51,11 +51,15 @@ An extended record contains its base as a prefix. Static descriptors link each r
 
 ### Runtime
 
-[runtime/oberon.c](runtime/oberon.c) supplies language checks, predefined operations, and allocation through the Boehm–Demers–Weiser collector. Interior pointers keep objects alive; pointer-free payloads are unscanned.
+[runtime/oberon.c](runtime/oberon.c) supplies language checks, predefined operations, and allocation through the Boehm–Demers–Weiser collector. Interior pointers keep objects alive; pointer-free payloads are unscanned. The runtime and the collector are prebuilt into one static `liboberon.a`, which every program links.
 
 The [standard modules](lib/) are ordinary Oberon source. [runtime/standard.c](runtime/standard.c) provides I/O, formatting, libm, and operating-system access through a private interface visible only to bundled modules. Only scalars, bounded buffers, and opaque file handles cross it. Language failures terminate the program; fallible library operations return status.
 
 Interpretation decisions are recorded in [agents/reviews/](agents/reviews/).
+
+### Building
+
+The compiler finds its support directory, holding `qbe`, `liboberon.a`, and the bundled modules, at `../lib/oberon` from its own executable. `make` builds the release compiler and stages that directory in `target/lib/oberon/`, which the debug and release compilers share. `make test` stages it and runs `cargo test`; a plain `cargo test` uses whatever `make` last staged, so runtime C and `lib/*.Mod` edits need `make` first. `make install [PREFIX=...]` installs `bin/oberon` and `lib/oberon/` under `PREFIX`, by default `~/.local`.
 
 ## Code Style
 

@@ -1,2 +1,6 @@
 /target
 /build
+/vendor/qbe/qbe
+/vendor/qbe/config.h
+/vendor/qbe/*.o
+/vendor/qbe/*/*.o

@@ -35,10 +35,6 @@ a JIT, and advanced optimization remain non-goals unless project goals change.
 These gaps keep the compiler from building ordinary programs outside this
 repository. They follow conformance.
 
-- **Installation.** The driver finds `runtime/` and `lib/` relative to the
-  working directory, writes into `build/`, and relies on the host to locate
-  BDWGC headers and libraries. Resolve the runtime and library relative to the
-  compiler binary, locate BDWGC, and accept an output path.
 - **Command line and exit status.** Programs cannot read their arguments or
   choose an exit status. Add a bundled module for both.
 - **Runtime failure positions.** Runtime failures print a fixed message with no

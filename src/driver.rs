@@ -10,30 +10,27 @@ use crate::{ast, ir, lexer, parser, qbe, sema};
 
 const QBE: &str = "qbe";
 const CC: &str = "cc";
-const HOMEBREW: &str = "/opt/homebrew";
-const RUNTIME_C: &str = "runtime/oberon.c";
-const STANDARD_C: &str = "runtime/standard.c";
-const BUILD_DIR: &str = "build";
-const LIB_DIR: &str = "lib";
+// Relative to the directory above the compiler's own executable, so an
+// install under a prefix and a Cargo build under target/ resolve alike.
+const SUPPORT_DIR: &str = "lib/oberon";
+const RUNTIME_ARCHIVE: &str = "liboberon.a";
 const PRIVATE_RUNTIME: &str = "OberonRuntime";
 
-pub fn build(source: &Path) -> Result<()> {
+pub fn build(source: &Path, output: &Path) -> Result<()> {
     let name = source
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or_default()
         .to_string();
+    let support = support_dir()?;
     let mut build = Build {
         root_dir: source.parent().unwrap_or(Path::new("")).to_path_buf(),
-        lib_dir: PathBuf::from(LIB_DIR),
+        lib_dir: support.clone(),
         active: Vec::new(),
         done: HashMap::new(),
         modules: Vec::new(),
     };
-    let root_source = std::path::absolute(source).context("resolving root source path")?;
-    let bundled_source = std::path::absolute(Path::new(LIB_DIR).join(format!("{name}.Mod")))
-        .context("resolving bundled source path")?;
-    let origin = if root_source == bundled_source {
+    let origin = if same_path(source, &support.join(format!("{name}.Mod"))) {
         Origin::Bundled
     } else {
         Origin::User
@@ -50,36 +47,58 @@ pub fn build(source: &Path) -> Result<()> {
     check_static_data(&program)?;
     let il = qbe::emit(&program);
 
-    let build_dir = Path::new(BUILD_DIR);
-    fs::create_dir_all(build_dir).context("creating build directory")?;
-    let ssa = build_dir.join(format!("{name}.ssa"));
-    let asm = build_dir.join(format!("{name}.s"));
-    let exe = build_dir.join(&name);
+    // The intermediates are not a product of the build, so they live only as
+    // long as it does and never land beside the source or the output.
+    let temp = std::env::temp_dir().join(format!("oberon-{}", std::process::id()));
+    fs::create_dir_all(&temp).context("creating temporary directory")?;
+    let result = assemble(&support, &temp, &name, &il, output);
+    fs::remove_dir_all(&temp).context("removing temporary directory")?;
+    result
+}
+
+fn assemble(support: &Path, temp: &Path, name: &str, il: &str, output: &Path) -> Result<()> {
+    let ssa = temp.join(format!("{name}.ssa"));
+    let asm = temp.join(format!("{name}.s"));
 
     // TODO: --emit-il should write this to stdout instead.
-    fs::write(&ssa, &il).context("writing QBE IL")?;
+    fs::write(&ssa, il).context("writing QBE IL")?;
 
-    run(Command::new(QBE).arg("-o").arg(&asm).arg(&ssa), QBE)?;
-    let mut cc = Command::new(CC);
-    // Apple's toolchain does not search the Apple Silicon Homebrew prefix,
-    // where bdw-gc installs gc.h and libgc.
-    if cfg!(target_os = "macos") {
-        cc.arg(format!("-I{HOMEBREW}/include"))
-            .arg(format!("-L{HOMEBREW}/lib"));
-    }
     run(
-        cc.arg(&asm)
-            .arg(RUNTIME_C)
-            .arg(STANDARD_C)
-            .arg("-lgc")
+        Command::new(support.join(QBE))
+            .arg("-o")
+            .arg(&asm)
+            .arg(&ssa),
+        QBE,
+    )?;
+    // The archive holds the runtime and the collector, so the program needs
+    // no collector headers or libraries from the host.
+    run(
+        Command::new(CC)
+            .arg(&asm)
+            .arg(support.join(RUNTIME_ARCHIVE))
             // The REAL operations of Report 10.2 are the C float forms.
             .arg("-lm")
             .arg("-o")
-            .arg(&exe),
+            .arg(output),
         CC,
-    )?;
+    )
+}
 
-    Ok(())
+// The executable is canonicalized first, so a symlink to an installed
+// compiler still finds the support directory of that install.
+fn support_dir() -> Result<PathBuf> {
+    let exe = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .context("locating the compiler executable")?;
+    let dir = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("executable path has a parent directory")
+        .join(SUPPORT_DIR);
+    if !dir.is_dir() {
+        bail!("cannot find the support directory {}", dir.display());
+    }
+    Ok(dir)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -289,8 +308,11 @@ fn holds(dir: &Path, file: &str) -> bool {
     })
 }
 
+// Canonical, because the support directory is reached through the
+// canonicalized executable while a source path may run through a symlink.
+// A path that does not exist names no bundled file.
 fn same_path(a: &Path, b: &Path) -> bool {
-    match (std::path::absolute(a), std::path::absolute(b)) {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
