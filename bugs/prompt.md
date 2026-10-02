@@ -1,12 +1,11 @@
 # Bug hunt: Oberon-07 compiler
 
-You are hunting for bugs in the Oberon-07 compiler at `/Users/kyle/src/oberon`. Your job is to
+You are hunting for bugs in the Oberon-07 compiler in this repository. Your job is to
 write small, valid Oberon-07 programs, predict what each one should do, run it, and record every
 case where the compiler disagrees with the language. You are not fixing anything. You are building
 a triage queue.
 
-Work from the repository root. That directory is `/Users/kyle/src/oberon` and every command below
-assumes it is your working directory.
+Work from the repository root. Every command below assumes it is your working directory.
 
 ## What counts as a finding
 

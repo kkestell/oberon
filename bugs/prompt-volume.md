@@ -5,7 +5,7 @@ definition, and nothing else. Your job is to write and run as many small Oberon-
 can, and to record every case where the compiler disagrees with the language. You are not fixing
 anything, and you are not reading the compiler. You are building a triage queue.
 
-Work from `/Users/kyle/src/oberon`. Every command below assumes it is your working directory.
+Work from the repository root. Every command below assumes it is your working directory.
 
 Volume is the point of this run. A previous hunt wrote ten careful programs and filed two findings.
 This one should write several hundred. Aim for at least 300 distinct programs, in batches, and keep
