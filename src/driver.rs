@@ -48,9 +48,12 @@ pub fn build(source: &Path, output: &Path) -> Result<()> {
     let il = qbe::emit(&program);
 
     // The intermediates are not a product of the build, so they live only as
-    // long as it does and never land beside the source or the output.
+    // long as it does and never land beside the source or the output. The
+    // name is predictable and /tmp is shared on Linux, so an existing path is
+    // refused: another user's directory or symlink could swap the assembly.
     let temp = std::env::temp_dir().join(format!("oberon-{}", std::process::id()));
-    fs::create_dir_all(&temp).context("creating temporary directory")?;
+    fs::create_dir(&temp)
+        .with_context(|| format!("creating temporary directory {}", temp.display()))?;
     let result = assemble(&support, &temp, &name, &il, output);
     let removed = fs::remove_dir_all(&temp).context("removing temporary directory");
     result.and(removed)

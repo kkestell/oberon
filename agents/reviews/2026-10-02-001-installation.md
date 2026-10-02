@@ -8,19 +8,13 @@ The vendored `vendor/bdwgc/` and `vendor/qbe/` trees were not compared against t
 
 ## Fixed
 
-- **Cleanup failure hides the build failure** (`src/driver.rs:56`): if QBE or `cc` failed and removing the temporary directory then also failed, `build` returned only the removal error, so the real build error was lost. `build` now returns the build error first and reports the cleanup error only when the build succeeded.
+- **Cleanup failure hides the build failure** (`src/driver.rs:59`): if QBE or `cc` failed and removing the temporary directory then also failed, `build` returned only the removal error, so the real build error was lost. `build` now returns the build error first and reports the cleanup error only when the build succeeded.
+- **Predictable shared temporary directory** (`src/driver.rs:55`): intermediates went in `temp_dir()/oberon-<pid>`, created with `create_dir_all`, which accepts an existing directory or a symlink to one. On Linux `temp_dir()` is the shared `/tmp`, so another local user could create that path ahead of time as a symlink to a directory they control and swap the `.s` between QBE and `cc`, injecting code into the output executable. Two builds in separate PID namespaces sharing `/tmp` could also delete each other's intermediates. A standalone check confirmed `create_dir_all` returns `Ok` on a pre-placed symlink and writes land in its target. The directory is now created with `fs::create_dir`, which refuses an existing path; the worst a squatter can do is fail one build, with an error naming the path.
+- **Bug-hunt prompts described the old build** (`bugs/prompt.md:68`, `bugs/prompt-volume.md:43`): both prompts said the compiler writes `build/<Module>` and must run from the repository root, told the reader to export Homebrew `CPATH`/`LIBRARY_PATH`, and built with `cargo build`. The compiler now writes `./<Module>` unless `-o` is given and needs `make` to stage `target/lib/oberon/`, so the batch runner would have scattered executables in the repository root and reported every program as `RUN ... status=127`. The prompts now build with `make test`, create `build/`, pass `-o build/<Module>` in every compile command, and drop the Homebrew export.
 
 ## Findings
 
-### medium
-
-#### security
-
-- **Predictable shared temporary directory** (`src/driver.rs:52`): intermediates go in `temp_dir()/oberon-<pid>`, created with `create_dir_all`, which accepts an existing directory or a symlink to one. On Linux `temp_dir()` is the shared `/tmp`. Another local user can create `/tmp/oberon-<pid>` ahead of time as a symlink to a directory they control, and the build writes its `.ssa` and `.s` there. Because QBE writes the `.s` before `cc` reads it, that user can swap the assembly and inject code into the output executable. The same reuse lets two builds in separate PID namespaces that share `/tmp` collide, and one deletes the other's intermediates mid-build. A standalone check confirmed that `create_dir_all` returns `Ok` on a pre-placed symlink and that writes then land in its target, while `create_dir` returns `AlreadyExists`. Suggested fix: create the directory with `fs::create_dir` under a name that is not guessable, or use the `tempfile` crate, so an existing path is never reused.
-
-#### documentation
-
-- **Bug-hunt prompts describe the old build** (`bugs/prompt.md:104`, `bugs/prompt-volume.md:152`): both prompts say the compiler writes `build/<Module>` and has to run from the repository root, and they tell the reader to export Homebrew `CPATH`/`LIBRARY_PATH` and build with `cargo build`. The compiler now writes `./<Module>` to the working directory unless `-o` is given. An agent following `prompt-volume.md`'s batch runner would scatter executables in the repository root and report every program as `RUN ... status=127` from the missing `./build/$m`. Neither prompt mentions `make`, so on a fresh checkout `target/lib/oberon` is missing and every compile fails with "cannot find the support directory". Suggested fix: run `make` (or `make test`) in place of `cargo build`/`cargo test`, pass `-o "build/$m"` in the runners and examples, drop the Homebrew export, and rewrite the "working directory must be the repository root" note.
+No open findings.
 
 ## Checks run
 
@@ -28,7 +22,9 @@ The vendored `vendor/bdwgc/` and `vendor/qbe/` trees were not compared against t
 - `make test` from a clean `git archive` of `db6d32e` in a `rust:1-bookworm` (aarch64 Linux) container, with crates vendored from the host: QBE, the collector, and `liboberon.a` build; 43 unit and 4 corpus tests pass, including `compiles_outside_the_checkout`.
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`: clean.
 - A standalone Rust check of `create_dir_all` and `create_dir` against a pre-placed symlink.
+- After the temporary-directory fix: a compile run through `exec` under a PID whose `oberon-<pid>` directory already existed failed with "creating temporary directory ...: File exists"; an ordinary compile and run still work, and `make test` passes.
+- The updated `bugs/prompt.md` baseline loop over `tests/corpus`: every case compiles into `build/`.
 
 ## Verdict
 
-The installation works as planned on macOS and on aarch64 Linux. One error-handling slip was fixed. The temporary-directory handling should stop reusing a predictable path before the compiler runs on shared Linux hosts, and the bug-hunt prompts need updating to the new build.
+The installation works as planned on macOS and on aarch64 Linux. All three findings were fixed; nothing is open.

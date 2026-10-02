@@ -67,29 +67,24 @@ wrong" is not a finding. If you cannot pin down the correct answer, the case goe
 
 ## Setup
 
-The compiler shells out to `qbe` and `cc`, and links against the Boehm garbage collector. On a
-Homebrew host, `cc` cannot find `gc.h` on its own. Every command that ends in a compile needs the
-Homebrew paths in the environment, and that includes `cargo test`, whose corpus harness compiles
-128 programs. Export them first, before anything else:
+The compiler shells out to a vendored QBE and the system `cc`, and links a prebuilt runtime
+archive that includes the Boehm garbage collector. `make` stages QBE, the archive, and the bundled
+modules in `target/lib/oberon/`, where the compiler looks for them; `cargo build` alone does not.
+Build everything and take a baseline:
 
 ```
-export CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib
+make test
+mkdir -p build
 ```
 
-Then build the compiler and take a baseline:
-
-```
-cargo build
-cargo test
-```
-
-`cargo test` panics on the first program that fails. It names that one program and tells you
+`make test` panics on the first program that fails. It names that one program and tells you
 nothing about the other 127, so a red result on its own does not say whether one thing is broken or
 everything is. Find out before you decide anything:
 
 ```
 for f in tests/corpus/*.Mod tests/failures/*.Mod; do
-  timeout 60 ./target/debug/oberon "$f" >/dev/null 2>&1 || echo "FAIL $(basename "$f" .Mod)"
+  m=$(basename "$f" .Mod)
+  timeout 60 ./target/debug/oberon -o "build/$m" "$f" >/dev/null 2>&1 || echo "FAIL $m"
 done
 ```
 
@@ -101,16 +96,17 @@ ambiguous.
 ## How to compile and run one program
 
 ```
-./target/debug/oberon path/to/Foo.Mod     # writes build/Foo (also build/Foo.ssa, build/Foo.s)
-./build/Foo                                # run it
+./target/debug/oberon -o build/Foo path/to/Foo.Mod   # writes build/Foo
+./build/Foo                                          # run it
 ```
 
 Four things matter:
 
-- **The working directory must be the repository root.** The compiler looks for `runtime/`, `lib/`,
-  and `build/` by relative path. Running it from anywhere else fails for uninteresting reasons.
+- **Always pass `-o build/<Module>`.** Without it, the compiler writes the executable to the working
+  directory, which here is the repository root. The commands in this prompt use paths relative to
+  that root.
 - **The source file itself can live anywhere.** Its own directory becomes the root for resolving
-  `IMPORT`, and `lib/` is searched second.
+  `IMPORT`, and the bundled modules are searched second.
 - **`build/` is a shared flat directory keyed by module name.** Two test programs named `Foo` in
   different directories overwrite each other's executable. Give every module a distinct name.
 - **Run the compiled program in a scratch directory**, not in the repository, if it touches files.
@@ -281,7 +277,7 @@ Confidence: high | medium | low
 
 ## Reproduce
 
-    ./target/debug/oberon bugs/001-neg-div-constant-fold/NegDivFold.Mod
+    ./target/debug/oberon -o build/NegDivFold bugs/001-neg-div-constant-fold/NegDivFold.Mod
     ./build/NegDivFold
 
 ## Expected

@@ -42,16 +42,13 @@ only prior art. Do not re-file what is already there.
 
 ## Setup
 
-The compiler is already built at `./target/debug/oberon`. Do not build it. Do not run its test
-suite. If the binary is missing, stop and report that.
+The compiler is already built at `./target/debug/oberon`, with its QBE, runtime, and bundled
+modules staged in `target/lib/oberon/`. Do not build it. Do not run its test suite. If either is
+missing, stop and report that.
 
-It shells out to `qbe` and `cc` and links against a garbage collector whose headers Homebrew
-installs outside the default search path. Export these before anything else, or every compile fails
-at the link step for an uninteresting reason:
-
-```
-export CPATH=/opt/homebrew/include LIBRARY_PATH=/opt/homebrew/lib
-```
+Without `-o`, the compiler writes the executable to the working directory, named after the module.
+Every command below passes `-o build/<Module>` so executables stay out of the repository root.
+Create `build/` first with `mkdir -p build`; the compiler does not create it.
 
 Leave `RUST_BACKTRACE` unset. The compiler reports ordinary source diagnostics through the same
 error path as internal failures, so backtraces bury the one useful line under twenty-five lines of
@@ -146,7 +143,7 @@ A batch runner along these lines:
 ```
 for f in bugs/work/*.Mod; do
   m=$(basename "$f" .Mod)
-  if ! timeout 60 ./target/debug/oberon "$f" >"bugs/work/$m.log" 2>&1; then
+  if ! timeout 60 ./target/debug/oberon -o "build/$m" "$f" >"bugs/work/$m.log" 2>&1; then
     echo "COMPILE $m"; continue
   fi
   timeout 60 "./build/$m" >"bugs/work/$m.out" 2>&1 || echo "RUN $m status=$?"
@@ -246,7 +243,7 @@ Confidence: high | medium | low
 
 ## Reproduce
 
-    ./target/debug/oberon bugs/003-<slug>/T0123.Mod
+    ./target/debug/oberon -o build/T0123 bugs/003-<slug>/T0123.Mod
     ./build/T0123
 
 ## Expected
