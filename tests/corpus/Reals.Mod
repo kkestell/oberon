@@ -5,9 +5,10 @@ MODULE Reals;
      Sets.Mod. A REAL reaches the output through FLOOR, which is the only
      conversion to INTEGER there is until the portable library arrives.
 
-     Every literal here is exact in binary32, so no row depends on rounding.
-     Small is 12.5 rather than an integer so the rows also show FLOOR
-     rounding toward negative infinity on both signs. *)
+     Every literal but the last row's is exact in binary64, so no other row
+     depends on rounding. Small is 12.5 rather than an integer so the rows
+     also show FLOOR rounding toward negative infinity on both signs. The
+     last row is a literal past the binary32 range, which binary64 holds. *)
   IMPORT Out;
   CONST
     Two = 2.;         (* no fraction digits *)
@@ -25,7 +26,8 @@ MODULE Reals;
     AtMost = Two <= Two;
     Greater = Small > Big;
     AtLeast = Two >= Big;
-  VAR two, big, small: REAL;
+    Wide = 3.5E38 > 3.4E38;
+  VAR two, big, small, wide: REAL;
 
 BEGIN
   two := 2.; big := 2.5E3; small := 125.E-1;
@@ -43,5 +45,7 @@ BEGIN
   Out.Int(ORD(Less), 10);    Out.Int(ORD(small < big), 10); Out.Ln;
   Out.Int(ORD(AtMost), 10);  Out.Int(ORD(two <= two), 10); Out.Ln;
   Out.Int(ORD(Greater), 10); Out.Int(ORD(small > big), 10); Out.Ln;
-  Out.Int(ORD(AtLeast), 10); Out.Int(ORD(two >= big), 10); Out.Ln
+  Out.Int(ORD(AtLeast), 10); Out.Int(ORD(two >= big), 10); Out.Ln;
+  wide := 3.5E38;
+  Out.Int(ORD(Wide), 10);    Out.Int(ORD(wide > 3.4E38), 10); Out.Ln
 END Reals.

@@ -35,10 +35,10 @@ void oberon_init(int argc, char **argv)
    before it. The position is Module:line:column, the module standing in for
    the source path the executable does not know, with the 1-based line and
    column compile diagnostics use. exit flushes every other stream. */
-static void oberon_fail(const char *message, const char *module, int32_t line, int32_t col)
+static void oberon_fail(const char *message, const char *module, int64_t line, int64_t col)
 {
     fflush(stdout);
-    fprintf(stderr, "%s:%d:%d: %s\n", module, (int)line, (int)col, message);
+    fprintf(stderr, "%s:%lld:%lld: %s\n", module, (long long)line, (long long)col, message);
     exit(1);
 }
 
@@ -75,7 +75,7 @@ const OberonTypeDescriptor *oberon_heap_descriptor(const void *pointer)
     return ((const OberonTypeDescriptor *const *)pointer)[-1];
 }
 
-int32_t oberon_type_test_descriptor(
+int64_t oberon_type_test_descriptor(
     const OberonTypeDescriptor *actual,
     const OberonTypeDescriptor *target)
 {
@@ -88,7 +88,7 @@ int32_t oberon_type_test_descriptor(
     return 0;
 }
 
-int32_t oberon_type_test_pointer(const void *pointer, const OberonTypeDescriptor *target)
+int64_t oberon_type_test_pointer(const void *pointer, const OberonTypeDescriptor *target)
 {
     return pointer != NULL
         && oberon_type_test_descriptor(oberon_heap_descriptor(pointer), target);
@@ -97,7 +97,7 @@ int32_t oberon_type_test_pointer(const void *pointer, const OberonTypeDescriptor
 /* Report 8.1: p^ and the implicit dereference in p.f both require p to point
    at a record, so a null pointer has no storage to select from. The check runs
    before the loaded value is used as an address. */
-void oberon_check_nil(const void *pointer, const char *module, int32_t line, int32_t col)
+void oberon_check_nil(const void *pointer, const char *module, int64_t line, int64_t col)
 {
     if (pointer == NULL) {
         oberon_fail("nil pointer dereference", module, line, col);
@@ -109,7 +109,7 @@ void oberon_check_nil(const void *pointer, const char *module, int32_t line, int
    have already been evaluated when generated code calls this check. */
 void oberon_check_procedure(
     const void *procedure,
-    const char *module, int32_t line, int32_t col)
+    const char *module, int64_t line, int64_t col)
 {
     if (procedure == NULL) {
         oberon_fail("nil procedure call", module, line, col);
@@ -119,10 +119,10 @@ void oberon_check_procedure(
 /* Report 8.1: an index must lie between zero and the length less one. The
    check runs before the element address is formed, so a zero-length array
    rejects every index and no invalid address is ever computed. */
-int32_t oberon_check_index(
-    int32_t index,
-    int32_t length,
-    const char *module, int32_t line, int32_t col)
+int64_t oberon_check_index(
+    int64_t index,
+    int64_t length,
+    const char *module, int64_t line, int64_t col)
 {
     if (index < 0 || index >= length) {
         oberon_fail("array index out of bounds", module, line, col);
@@ -134,9 +134,9 @@ int32_t oberon_check_index(
    source prefix fits. The check is separate from the move so failure cannot
    change even the first destination byte. */
 void oberon_check_array_copy(
-    int32_t source_length,
-    int32_t destination_length,
-    const char *module, int32_t line, int32_t col)
+    int64_t source_length,
+    int64_t destination_length,
+    const char *module, int64_t line, int64_t col)
 {
     if (source_length > destination_length) {
         oberon_fail("array assignment exceeds destination length", module, line, col);
@@ -158,95 +158,95 @@ void oberon_copy(void *destination, const void *source, size_t count)
    and never reads past the smaller bound, so a properly terminated value
    compares by its characters and an unterminated full array still gets an
    answer without reading past its end. */
-int32_t oberon_str_cmp(const void *a, int32_t alen, const void *b, int32_t blen)
+int64_t oberon_str_cmp(const void *a, int64_t alen, const void *b, int64_t blen)
 {
     size_t n = alen < blen ? (size_t)alen : (size_t)blen;
-    return (int32_t)strncmp((const char *)a, (const char *)b, n);
+    return (int64_t)strncmp((const char *)a, (const char *)b, n);
 }
 
-/* Report 10.2 REAL operations. REAL is IEEE 754 binary32, so every one of
-   these is the C float form of the same operation. */
+/* Report 10.2 REAL operations. REAL is IEEE 754 binary64, so every one of
+   these is the C double form of the same operation. */
 
-float oberon_abs_real(float x) { return fabsf(x); }
+double oberon_abs_real(double x) { return fabs(x); }
 
 /* FLOOR yields the largest INTEGER not greater than x, so a result must exist
-   in the signed 32-bit range. The domain is checked here rather than left to
+   in the signed 64-bit range. The domain is checked here rather than left to
    the float-to-integer conversion, which no target has to define. Both
-   endpoints are exact binary32 values. */
-int32_t oberon_floor(float x, const char *module, int32_t line, int32_t col)
+   endpoints are exact binary64 values. */
+int64_t oberon_floor(double x, const char *module, int64_t line, int64_t col)
 {
-    if (!isfinite(x) || x < -2147483648.0f || x >= 2147483648.0f) {
+    if (!isfinite(x) || x < -9223372036854775808.0 || x >= 9223372036854775808.0) {
         oberon_fail("FLOOR result is outside INTEGER range", module, line, col);
     }
-    return (int32_t)floorf(x);
+    return (int64_t)floor(x);
 }
 
-void oberon_pack(float *x, int32_t n) { *x = ldexpf(*x, (int)n); }
+void oberon_pack(double *x, int64_t n) { *x = ldexp(*x, (int)n); }
 
-/* Report 10.2 normalizes the magnitude to [1, 2), while frexpf normalizes it
+/* Report 10.2 normalizes the magnitude to [1, 2), while frexp normalizes it
    to [0.5, 1), so the fraction doubles and the exponent drops by one. Zero
    satisfies no normalization interval; storing positive zero and a zero
    exponent round-trips through PACK and needs no invented exponent. */
-void oberon_unpk(float *x, int32_t *n, const char *module, int32_t line, int32_t col)
+void oberon_unpk(double *x, int64_t *n, const char *module, int64_t line, int64_t col)
 {
     int exponent;
 
     if (!isfinite(*x)) {
         oberon_fail("UNPK argument is not finite", module, line, col);
     }
-    if (*x == 0.0f) {
-        *x = 0.0f;
+    if (*x == 0.0) {
+        *x = 0.0;
         *n = 0;
         return;
     }
-    *x = frexpf(*x, &exponent) * 2.0f;
-    *n = (int32_t)(exponent - 1);
+    *x = frexp(*x, &exponent) * 2.0;
+    *n = (int64_t)(exponent - 1);
 }
 
 /* Traps. Generated code has already branched on the failing condition, so
    each one only reports where it came from. */
 
-void oberon_div_by_zero(const char *module, int32_t line, int32_t col)
+void oberon_div_by_zero(const char *module, int64_t line, int64_t col)
 {
     oberon_fail("DIV or MOD by zero", module, line, col);
 }
 
-void oberon_assert_failed(const char *module, int32_t line, int32_t col)
+void oberon_assert_failed(const char *module, int64_t line, int64_t col)
 {
     oberon_fail("assertion failed", module, line, col);
 }
 
-void oberon_abs_overflow(const char *module, int32_t line, int32_t col)
+void oberon_abs_overflow(const char *module, int64_t line, int64_t col)
 {
     oberon_fail("ABS overflows INTEGER", module, line, col);
 }
 
-void oberon_case_no_match(const char *module, int32_t line, int32_t col)
+void oberon_case_no_match(const char *module, int64_t line, int64_t col)
 {
     oberon_fail("CASE without matching label", module, line, col);
 }
 
-void oberon_type_guard_failed(const char *module, int32_t line, int32_t col)
+void oberon_type_guard_failed(const char *module, int64_t line, int64_t col)
 {
     oberon_fail("type guard failed", module, line, col);
 }
 
-void oberon_shift_range(const char *module, int32_t line, int32_t col)
+void oberon_shift_range(const char *module, int64_t line, int64_t col)
 {
     oberon_fail("shift count out of range", module, line, col);
 }
 
-void oberon_set_element_range(const char *module, int32_t line, int32_t col)
+void oberon_set_element_range(const char *module, int64_t line, int64_t col)
 {
     oberon_fail("SET element out of range", module, line, col);
 }
 
-void oberon_byte_range(const char *module, int32_t line, int32_t col)
+void oberon_byte_range(const char *module, int64_t line, int64_t col)
 {
     oberon_fail("BYTE value out of range", module, line, col);
 }
 
-void oberon_chr_range(const char *module, int32_t line, int32_t col)
+void oberon_chr_range(const char *module, int64_t line, int64_t col)
 {
     oberon_fail("CHR argument is outside CHAR range", module, line, col);
 }

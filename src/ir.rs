@@ -56,8 +56,8 @@ impl Site {
     }
 }
 
-fn position(n: u32) -> i32 {
-    i32::try_from(n).expect("a source position fits an INTEGER")
+fn position(n: u32) -> i64 {
+    i64::from(n)
 }
 
 #[derive(Debug)]
@@ -90,7 +90,7 @@ pub const MAX_OBJECT_SIZE: i64 = 1 << 30;
 #[derive(Debug, Clone)]
 pub enum Storage {
     Scalar(Ty),
-    Array { len: i32, elem: Box<Storage> },
+    Array { len: i64, elem: Box<Storage> },
     // Where a record's fields sit is already baked into the field instructions
     // the front end emitted, so reserving storage only needs the two numbers
     // sema computed when it laid the record out.
@@ -101,7 +101,7 @@ impl Storage {
     pub fn size(&self) -> i64 {
         match self {
             Storage::Scalar(ty) => scalar_size(*ty),
-            Storage::Array { len, elem } => i64::from(*len)
+            Storage::Array { len, elem } => len
                 .checked_mul(elem.size())
                 .expect("sema checked this layout"),
             Storage::Record { size, .. } => *size,
@@ -121,7 +121,8 @@ impl Storage {
 
 pub fn scalar_size(ty: Ty) -> i64 {
     match ty {
-        Ty::Int | Ty::Bool | Ty::Set | Ty::Real => 4,
+        Ty::Int | Ty::Set | Ty::Real => 8,
+        Ty::Bool => 4,
         Ty::Byte => 1,
         Ty::Pointer | Ty::Procedure => 8,
     }
@@ -139,13 +140,15 @@ pub enum ParamPass {
     Ref,
 }
 
-// Int, Bool, and Set are four bytes and travel in a QBE word; Real is IEEE
-// 754 binary32 and travels in a QBE single, which is a distinct calling class
-// and a distinct set of arithmetic and comparison operations. Byte is one
-// unsigned byte in storage — CHAR and BYTE share it, because they differ only
-// in source rules — and still travels in a word: it loads zero-extended, so a
-// register value is always 0 through 255 and the signed word comparisons give
-// the correct unsigned ordering.
+// Int and Set are eight bytes and Bool is four; all three travel in a QBE
+// long, so every integer-like value shares one class and none needs an
+// extension instruction. Real is IEEE 754 binary64 and travels in a QBE
+// double, which is a distinct calling class and a distinct set of arithmetic
+// and comparison operations. Byte is one unsigned byte in storage — CHAR and
+// BYTE share it, because they differ only in source rules — and still
+// travels in a long: it loads zero-extended, so a register value is always 0
+// through 255 and the signed comparisons give the correct unsigned ordering.
+// An Int is wide enough to hold a host address.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ty {
     Int,
@@ -159,14 +162,14 @@ pub enum Ty {
     Procedure,
 }
 
-// A SET is a bit vector, so its immediate is unsigned: bit 31 is an ordinary
+// A SET is a bit vector, so its immediate is unsigned: bit 63 is an ordinary
 // element and not a sign.
 #[derive(Debug, Clone)]
 pub enum Value {
-    Int(i32),
+    Int(i64),
     Bool(bool),
-    Set(u32),
-    Real(f32),
+    Set(u64),
+    Real(f64),
     Byte(u8),
     Pointer(u64),
     Symbol(String),
@@ -199,8 +202,8 @@ pub enum Inst {
         src: Value,
     },
     // `ty` is the operand type, which is also the result type: negation of a
-    // REAL is a single-precision operation and negation of an INTEGER is a
-    // word one.
+    // REAL is a double-precision operation and negation of an INTEGER is a
+    // long one.
     Un {
         dst: usize,
         op: UnOp,
@@ -294,8 +297,7 @@ pub enum Inst {
         site: Site,
     },
     // Copy `count` elements whose complete immediate type occupies `stride`
-    // bytes. The count is an INTEGER value and is widened before byte
-    // multiplication in the backend.
+    // bytes. The count is an INTEGER value, already as wide as an address.
     CopyElements {
         temp: usize,
         dst: Addr,

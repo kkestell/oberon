@@ -4,8 +4,8 @@ use crate::diag::{Diagnostic, Pos};
 pub enum Tok {
     // Literals
     Ident(String),
-    Int(i64),  // i64 so an oversized decimal literal lexes; sema range-checks to i32
-    Real(f32), // REAL is IEEE 754 binary32, so the literal rounds once, here
+    Int(i128), // i128 so an oversized decimal literal lexes; sema range-checks to i64
+    Real(f64), // REAL is IEEE 754 binary64, so the literal rounds once, here
     // Report 3 gives strings two forms, and both are strings: a quoted literal
     // is the bytes of its source text exactly as they appear in the file, and
     // 41X is "a single-character string specified by the ordinal number of the
@@ -244,11 +244,12 @@ impl Lexer {
         match self.peek() {
             Some('H') => {
                 self.bump();
-                // A hex literal is a 32-bit pattern, not a magnitude: 0FFFFFFFFH
-                // is -1, not 4294967295. cf. ORS.Mod Number, which accumulates
-                // into a 32-bit LONGINT and marks the loop "(*no overflow check*)".
-                match u32::from_str_radix(&s, 16) {
-                    Ok(v) => Some(Tok::Int(v as i32 as i64)),
+                // A hex literal is a pattern of the INTEGER width, 64 bits, not a
+                // magnitude: 0FFFFFFFFFFFFFFFFH is -1, while 0FFFFFFFFH is
+                // 4294967295. cf. ORS.Mod Number, which accumulates into its
+                // INTEGER and marks the loop "(*no overflow check*)".
+                match u64::from_str_radix(&s, 16) {
+                    Ok(v) => Some(Tok::Int(i128::from(v as i64))),
                     Err(_) => {
                         diags.push(Diagnostic::new(
                             pos,
@@ -284,7 +285,7 @@ impl Lexer {
                     self.bump();
                     self.real(s, start, pos, diags)
                 } else {
-                    match s.parse::<i64>() {
+                    match s.parse::<i128>() {
                         Ok(v) => Some(Tok::Int(v)),
                         Err(_) => {
                             diags.push(Diagnostic::new(
@@ -300,7 +301,7 @@ impl Lexer {
     }
 
     // Fraction digits and scale factor are both optional; normalize into a
-    // form f32::from_str is guaranteed to accept.
+    // form f64::from_str is guaranteed to accept.
     fn real(
         &mut self,
         int_part: String,
@@ -334,14 +335,14 @@ impl Lexer {
                 return None;
             }
         }
-        // Straight to binary32, so the value the AST carries is the one the
-        // generated code uses: parsing to binary64 first would round twice.
+        // Straight to binary64, so the value the AST carries is the one the
+        // generated code uses and the literal rounds exactly once.
         // A magnitude too large to represent becomes an infinity, which the
         // source has no way to mean; one too small rounds to zero, which is
         // the ordinary IEEE result and not an error. cf. Project Oberon's
         // ORS.Mod, which rejects an exponent above its range and returns zero
         // for one below it.
-        let value: f32 = text.parse().expect("constructed a valid float literal");
+        let value: f64 = text.parse().expect("constructed a valid float literal");
         if !value.is_finite() {
             let raw: String = self.chars[start..self.i].iter().collect();
             diags.push(Diagnostic::new(
@@ -477,24 +478,24 @@ mod tests {
     }
 
     // The whole token rounds once, so the largest accepted literal is the one
-    // whose binary32 value is still finite.
+    // whose binary64 value is still finite.
     #[test]
     fn largest_real_is_accepted() {
-        assert_eq!(toks("3.4E38"), vec![Tok::Real(3.4e38), Tok::Eof]);
+        assert_eq!(toks("1.7E308"), vec![Tok::Real(1.7e308), Tok::Eof]);
     }
 
     #[test]
     fn overflowing_real_diagnoses() {
         let mut diags = Vec::new();
-        lex("3.5E38", &mut diags);
+        lex("1.8E308", &mut diags);
         assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].msg, "real literal '3.5E38' is too large");
+        assert_eq!(diags[0].msg, "real literal '1.8E308' is too large");
     }
 
     // Underflow is the ordinary IEEE result, not an error.
     #[test]
     fn underflowing_real_is_zero() {
-        assert_eq!(toks("1.0E-60"), vec![Tok::Real(0.0), Tok::Eof]);
+        assert_eq!(toks("1.0E-400"), vec![Tok::Real(0.0), Tok::Eof]);
     }
 
     #[test]
@@ -506,13 +507,14 @@ mod tests {
     }
 
     #[test]
-    fn hex_literals_are_32_bit_patterns() {
+    fn hex_literals_are_64_bit_patterns() {
         assert_eq!(
-            toks("0FFFFFFFFH 080000000H 07FFFFFFFH"),
+            toks("0FFFFFFFFFFFFFFFFH 08000000000000000H 07FFFFFFFFFFFFFFFH 0FFFFFFFFH"),
             vec![
                 Tok::Int(-1),
-                Tok::Int(-2147483648),
-                Tok::Int(2147483647),
+                Tok::Int(-9223372036854775808),
+                Tok::Int(9223372036854775807),
+                Tok::Int(4294967295),
                 Tok::Eof
             ]
         );

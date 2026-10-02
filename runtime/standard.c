@@ -9,27 +9,27 @@
 #include <time.h>
 #include <unistd.h>
 
-void oberon_lib_out_char(int32_t ch) { putchar((unsigned char)ch); }
+void oberon_lib_out_char(int64_t ch) { putchar((unsigned char)ch); }
 
-void oberon_lib_out_string(const unsigned char *s, int32_t length)
+void oberon_lib_out_string(const unsigned char *s, int64_t length)
 {
-    int32_t i = 0;
+    int64_t i = 0;
     while (i < length && s[i] != 0) {
         putchar(s[i]);
         i++;
     }
 }
 
-void oberon_lib_out_int(int32_t value, int32_t width)
+void oberon_lib_out_int(int64_t value, int64_t width)
 {
-    printf("%*d", width > 0 ? width : 0, value);
+    printf("%*lld", width > 0 ? (int)width : 0, (long long)value);
 }
 
-void oberon_lib_out_hex(int32_t value) { printf(" %08X", (uint32_t)value); }
+void oberon_lib_out_hex(int64_t value) { printf(" %016llX", (unsigned long long)value); }
 
-void oberon_lib_out_real(float value, int32_t width)
+void oberon_lib_out_real(double value, int64_t width)
 {
-    printf("%*.6E", width > 0 ? width : 0, (double)value);
+    printf("%*.15E", width > 0 ? (int)width : 0, value);
 }
 
 void oberon_lib_out_ln(void) { putchar('\n'); }
@@ -78,9 +78,9 @@ static size_t read_word(unsigned char *buffer, size_t capacity)
     return length;
 }
 
-int32_t oberon_lib_in_open(void) { return !input_consumed; }
+int64_t oberon_lib_in_open(void) { return !input_consumed; }
 
-int32_t oberon_lib_in_char(unsigned char *ch)
+int64_t oberon_lib_in_char(unsigned char *ch)
 {
     int value = read_byte();
     if (value == EOF) {
@@ -90,7 +90,7 @@ int32_t oberon_lib_in_char(unsigned char *ch)
     return 1;
 }
 
-int32_t oberon_lib_in_int(int32_t *result)
+int64_t oberon_lib_in_int(int64_t *result)
 {
     unsigned char token[128];
     size_t length = read_word(token, sizeof token);
@@ -111,7 +111,7 @@ int32_t oberon_lib_in_int(int32_t *result)
 
     if (!negative && token[length - 1] == 'H') {
         size_t digits = length - 1;
-        if (digits == 0 || digits > 8) {
+        if (digits == 0 || digits > 16) {
             return 0;
         }
         for (i = 0; i < digits; i++) {
@@ -126,31 +126,36 @@ int32_t oberon_lib_in_int(int32_t *result)
             }
             value = value * 16 + digit;
         }
-        *result = (int32_t)(uint32_t)value;
+        *result = (int64_t)value;
         return 1;
     }
 
+    /* The bound is checked before each step, so the accumulator never wraps:
+       the magnitude of MIN(INTEGER) is one more than MAX(INTEGER). */
+    uint64_t limit = negative ? UINT64_C(9223372036854775808) : INT64_MAX;
     for (; i < length; i++) {
+        unsigned digit;
         if (token[i] < '0' || token[i] > '9') {
             return 0;
         }
-        value = value * 10 + (token[i] - '0');
-        if ((!negative && value > INT32_MAX) || (negative && value > UINT64_C(2147483648))) {
+        digit = token[i] - '0';
+        if (value > (limit - digit) / 10) {
             return 0;
         }
+        value = value * 10 + digit;
     }
-    *result = negative ? (value == UINT64_C(2147483648) ? INT32_MIN : -(int32_t)value)
-                       : (int32_t)value;
+    *result = negative ? (value == UINT64_C(9223372036854775808) ? INT64_MIN : -(int64_t)value)
+                       : (int64_t)value;
     return 1;
 }
 
-int32_t oberon_lib_in_real(float *result)
+int64_t oberon_lib_in_real(double *result)
 {
     unsigned char token[256];
     size_t length = read_word(token, sizeof token - 1);
     size_t i = 0;
     char *end;
-    float value;
+    double value;
 
     if (length == 0 || length >= sizeof token) {
         return 0;
@@ -187,7 +192,7 @@ int32_t oberon_lib_in_real(float *result)
         return 0;
     }
     token[length] = 0;
-    value = strtof((const char *)token, &end);
+    value = strtod((const char *)token, &end);
     if (end != (char *)token + length || !isfinite(value)) {
         return 0;
     }
@@ -195,11 +200,11 @@ int32_t oberon_lib_in_real(float *result)
     return 1;
 }
 
-int32_t oberon_lib_in_string(unsigned char *destination, int32_t capacity)
+int64_t oberon_lib_in_string(unsigned char *destination, int64_t capacity)
 {
     int ch = first_token_byte();
-    int32_t stored = 0;
-    int32_t count = 0;
+    int64_t stored = 0;
+    int64_t count = 0;
     int valid = 1;
 
     if (capacity <= 0) {
@@ -256,7 +261,7 @@ int32_t oberon_lib_in_string(unsigned char *destination, int32_t capacity)
     } else {
         unsigned char token[128];
         size_t length = 0;
-        uint32_t ordinal = 0;
+        uint64_t ordinal = 0;
         while (ch != EOF && !ascii_space(ch)) {
             if (length < sizeof token) {
                 token[length] = (unsigned char)ch;
@@ -297,10 +302,10 @@ int32_t oberon_lib_in_string(unsigned char *destination, int32_t capacity)
     return 0;
 }
 
-int32_t oberon_lib_in_name(unsigned char *destination, int32_t capacity)
+int64_t oberon_lib_in_name(unsigned char *destination, int64_t capacity)
 {
     int ch = first_token_byte();
-    int32_t count = 0;
+    int64_t count = 0;
     int valid = ch != EOF;
     while (ch != EOF && !ascii_space(ch)) {
         if (!ascii_graph(ch)) {
@@ -323,10 +328,10 @@ int32_t oberon_lib_in_name(unsigned char *destination, int32_t capacity)
     return 0;
 }
 
-int32_t oberon_lib_in_line(unsigned char *destination, int32_t capacity)
+int64_t oberon_lib_in_line(unsigned char *destination, int64_t capacity)
 {
     int ch = read_byte();
-    int32_t count = 0;
+    int64_t count = 0;
     int available = 0;
     while (ch != EOF && ch != '\n') {
         available = 1;
@@ -346,25 +351,25 @@ int32_t oberon_lib_in_line(unsigned char *destination, int32_t capacity)
     return available && count < capacity;
 }
 
-float oberon_lib_math_sqrt(float x) { return sqrtf(x); }
-float oberon_lib_math_power(float x, float y) { return powf(x, y); }
-float oberon_lib_math_exp(float x) { return expf(x); }
-float oberon_lib_math_ln(float x) { return logf(x); }
-float oberon_lib_math_log(float x, float base) { return logf(x) / logf(base); }
-float oberon_lib_math_round(float x) { return floorf(x + 0.5f); }
-float oberon_lib_math_sin(float x) { return sinf(x); }
-float oberon_lib_math_cos(float x) { return cosf(x); }
-float oberon_lib_math_tan(float x) { return tanf(x); }
-float oberon_lib_math_arcsin(float x) { return asinf(x); }
-float oberon_lib_math_arccos(float x) { return acosf(x); }
-float oberon_lib_math_arctan(float x) { return atanf(x); }
-float oberon_lib_math_arctan2(float y, float x) { return atan2f(y, x); }
-float oberon_lib_math_sinh(float x) { return sinhf(x); }
-float oberon_lib_math_cosh(float x) { return coshf(x); }
-float oberon_lib_math_tanh(float x) { return tanhf(x); }
-float oberon_lib_math_arcsinh(float x) { return asinhf(x); }
-float oberon_lib_math_arccosh(float x) { return acoshf(x); }
-float oberon_lib_math_arctanh(float x) { return atanhf(x); }
+double oberon_lib_math_sqrt(double x) { return sqrt(x); }
+double oberon_lib_math_power(double x, double y) { return pow(x, y); }
+double oberon_lib_math_exp(double x) { return exp(x); }
+double oberon_lib_math_ln(double x) { return log(x); }
+double oberon_lib_math_log(double x, double base) { return log(x) / log(base); }
+double oberon_lib_math_round(double x) { return floor(x + 0.5); }
+double oberon_lib_math_sin(double x) { return sin(x); }
+double oberon_lib_math_cos(double x) { return cos(x); }
+double oberon_lib_math_tan(double x) { return tan(x); }
+double oberon_lib_math_arcsin(double x) { return asin(x); }
+double oberon_lib_math_arccos(double x) { return acos(x); }
+double oberon_lib_math_arctan(double x) { return atan(x); }
+double oberon_lib_math_arctan2(double y, double x) { return atan2(y, x); }
+double oberon_lib_math_sinh(double x) { return sinh(x); }
+double oberon_lib_math_cosh(double x) { return cosh(x); }
+double oberon_lib_math_tanh(double x) { return tanh(x); }
+double oberon_lib_math_arcsinh(double x) { return asinh(x); }
+double oberon_lib_math_arccosh(double x) { return acosh(x); }
+double oberon_lib_math_arctanh(double x) { return atanh(x); }
 
 #define FILE_LIMIT 1024
 #define ERROR_LIMIT 256
@@ -390,7 +395,7 @@ static void set_error(const char *format, ...)
     va_end(args);
 }
 
-static char *bounded_string(const unsigned char *source, int32_t length)
+static char *bounded_string(const unsigned char *source, int64_t length)
 {
     const unsigned char *end;
     char *copy;
@@ -410,9 +415,9 @@ static char *bounded_string(const unsigned char *source, int32_t length)
     return copy;
 }
 
-static int32_t store_file(FILE *stream, char *name, int registered)
+static int64_t store_file(FILE *stream, char *name, int registered)
 {
-    for (int32_t id = 1; id < FILE_LIMIT; id++) {
+    for (int64_t id = 1; id < FILE_LIMIT; id++) {
         if (files[id].stream == NULL) {
             files[id].stream = stream;
             files[id].name = name;
@@ -426,7 +431,7 @@ static int32_t store_file(FILE *stream, char *name, int registered)
     return 0;
 }
 
-static LibraryFile *get_file(int32_t id)
+static LibraryFile *get_file(int64_t id)
 {
     if (id <= 0 || id >= FILE_LIMIT || files[id].stream == NULL) {
         set_error("invalid file handle");
@@ -435,7 +440,7 @@ static LibraryFile *get_file(int32_t id)
     return &files[id];
 }
 
-int32_t oberon_lib_file_old(const unsigned char *source, int32_t length)
+int64_t oberon_lib_file_old(const unsigned char *source, int64_t length)
 {
     char *name = bounded_string(source, length);
     struct stat information;
@@ -460,7 +465,7 @@ int32_t oberon_lib_file_old(const unsigned char *source, int32_t length)
     return store_file(stream, name, 1);
 }
 
-int32_t oberon_lib_file_new(const unsigned char *source, int32_t length)
+int64_t oberon_lib_file_new(const unsigned char *source, int64_t length)
 {
     char *name = bounded_string(source, length);
     FILE *stream;
@@ -476,7 +481,7 @@ int32_t oberon_lib_file_new(const unsigned char *source, int32_t length)
     return store_file(stream, name, 0);
 }
 
-void oberon_lib_file_release(int32_t id)
+void oberon_lib_file_release(int64_t id)
 {
     LibraryFile *file = get_file(id);
     if (file != NULL) {
@@ -486,7 +491,7 @@ void oberon_lib_file_release(int32_t id)
     }
 }
 
-void oberon_lib_file_register(int32_t id)
+void oberon_lib_file_register(int64_t id)
 {
     LibraryFile *file = get_file(id);
     FILE *destination;
@@ -529,7 +534,7 @@ void oberon_lib_file_register(int32_t id)
     file->registered = 1;
 }
 
-void oberon_lib_file_close(int32_t id)
+void oberon_lib_file_close(int64_t id)
 {
     LibraryFile *file = get_file(id);
     if (file != NULL && fflush(file->stream) != 0) {
@@ -538,7 +543,7 @@ void oberon_lib_file_close(int32_t id)
     }
 }
 
-void oberon_lib_file_purge(int32_t id)
+void oberon_lib_file_purge(int64_t id)
 {
     LibraryFile *file = get_file(id);
     if (file != NULL && (fflush(file->stream) != 0 || ftruncate(fileno(file->stream), 0) != 0)) {
@@ -547,7 +552,7 @@ void oberon_lib_file_purge(int32_t id)
     }
 }
 
-int32_t oberon_lib_file_delete(const unsigned char *source, int32_t length)
+int64_t oberon_lib_file_delete(const unsigned char *source, int64_t length)
 {
     char *name = bounded_string(source, length);
     int result;
@@ -562,11 +567,11 @@ int32_t oberon_lib_file_delete(const unsigned char *source, int32_t length)
     return result;
 }
 
-int32_t oberon_lib_file_rename(
+int64_t oberon_lib_file_rename(
     const unsigned char *old_source,
-    int32_t old_length,
+    int64_t old_length,
     const unsigned char *new_source,
-    int32_t new_length)
+    int64_t new_length)
 {
     char *old_name = bounded_string(old_source, old_length);
     char *new_name = bounded_string(new_source, new_length);
@@ -595,28 +600,27 @@ int32_t oberon_lib_file_rename(
     return result;
 }
 
-int32_t oberon_lib_file_length(int32_t id)
+int64_t oberon_lib_file_length(int64_t id)
 {
     LibraryFile *file = get_file(id);
     long length;
-    if (file == NULL || fseek(file->stream, 0, SEEK_END) != 0 || (length = ftell(file->stream)) < 0
-        || length > INT32_MAX) {
+    if (file == NULL || fseek(file->stream, 0, SEEK_END) != 0 || (length = ftell(file->stream)) < 0) {
         if (file != NULL) {
             set_error("cannot get length of '%s': %s", file->name, strerror(errno));
             clearerr(file->stream);
         }
         return 0;
     }
-    return (int32_t)length;
+    return (int64_t)length;
 }
 
-int32_t oberon_lib_file_date(int32_t id, int32_t *time_value, int32_t *date_value)
+int64_t oberon_lib_file_date(int64_t id, int64_t *time_value, int64_t *date_value)
 {
     LibraryFile *file = get_file(id);
     struct stat information;
     struct tm local;
-    int32_t new_time;
-    int32_t new_date;
+    int64_t new_time;
+    int64_t new_date;
     if (file == NULL || fstat(fileno(file->stream), &information) != 0
         || localtime_r(&information.st_mtime, &local) == NULL) {
         if (file != NULL) {
@@ -631,7 +635,7 @@ int32_t oberon_lib_file_date(int32_t id, int32_t *time_value, int32_t *date_valu
     return 1;
 }
 
-static int position(LibraryFile *file, int32_t offset)
+static int position(LibraryFile *file, int64_t offset)
 {
     clearerr(file->stream);
     if (offset < 0 || fseek(file->stream, offset, SEEK_SET) != 0) {
@@ -642,17 +646,17 @@ static int position(LibraryFile *file, int32_t offset)
     return 1;
 }
 
-static int32_t read_data(int32_t id, int32_t offset, void *destination, int32_t count, int32_t *moved)
+static int64_t read_data(int64_t id, int64_t offset, void *destination, int64_t count, int64_t *moved)
 {
     LibraryFile *file = get_file(id);
     unsigned char staging[16];
     size_t actual;
     *moved = 0;
-    if (file == NULL || count < 0 || count > (int32_t)sizeof staging || !position(file, offset)) {
+    if (file == NULL || count < 0 || count > (int64_t)sizeof staging || !position(file, offset)) {
         return STATUS_ERROR;
     }
     actual = fread(staging, 1, (size_t)count, file->stream);
-    *moved = (int32_t)actual;
+    *moved = (int64_t)actual;
     if (actual == (size_t)count) {
         memcpy(destination, staging, (size_t)count);
         return STATUS_OK;
@@ -666,7 +670,7 @@ static int32_t read_data(int32_t id, int32_t offset, void *destination, int32_t 
     return STATUS_EOF;
 }
 
-static int32_t write_data(int32_t id, int32_t offset, const void *source, int32_t count, int32_t *moved)
+static int64_t write_data(int64_t id, int64_t offset, const void *source, int64_t count, int64_t *moved)
 {
     LibraryFile *file = get_file(id);
     size_t actual;
@@ -675,7 +679,7 @@ static int32_t write_data(int32_t id, int32_t offset, const void *source, int32_
         return STATUS_ERROR;
     }
     actual = fwrite(source, 1, (size_t)count, file->stream);
-    *moved = (int32_t)actual;
+    *moved = (int64_t)actual;
     if (actual == (size_t)count) {
         return STATUS_OK;
     }
@@ -684,27 +688,29 @@ static int32_t write_data(int32_t id, int32_t offset, const void *source, int32_
     return STATUS_ERROR;
 }
 
-int32_t oberon_lib_file_read_byte(int32_t id, int32_t pos, unsigned char *x, int32_t *moved)
+int64_t oberon_lib_file_read_byte(int64_t id, int64_t pos, unsigned char *x, int64_t *moved)
 {
     return read_data(id, pos, x, 1, moved);
 }
-int32_t oberon_lib_file_read_int(int32_t id, int32_t pos, int32_t *x, int32_t *moved)
+int64_t oberon_lib_file_read_int(int64_t id, int64_t pos, int64_t *x, int64_t *moved)
 {
-    return read_data(id, pos, x, 4, moved);
+    return read_data(id, pos, x, 8, moved);
 }
-int32_t oberon_lib_file_read_real(int32_t id, int32_t pos, float *x, int32_t *moved)
+int64_t oberon_lib_file_read_real(int64_t id, int64_t pos, double *x, int64_t *moved)
 {
-    return read_data(id, pos, x, 4, moved);
+    return read_data(id, pos, x, 8, moved);
 }
-int32_t oberon_lib_file_read_set(int32_t id, int32_t pos, uint32_t *x, int32_t *moved)
+int64_t oberon_lib_file_read_set(int64_t id, int64_t pos, uint64_t *x, int64_t *moved)
 {
-    return read_data(id, pos, x, 4, moved);
+    return read_data(id, pos, x, 8, moved);
 }
 
-int32_t oberon_lib_file_read_bool(int32_t id, int32_t pos, int32_t *x, int32_t *moved)
+/* A BOOLEAN variable is four bytes, so the destination is narrower than the
+   long its value travels in. */
+int64_t oberon_lib_file_read_bool(int64_t id, int64_t pos, int32_t *x, int64_t *moved)
 {
     unsigned char byte;
-    int32_t status = read_data(id, pos, &byte, 1, moved);
+    int64_t status = read_data(id, pos, &byte, 1, moved);
     if (status != STATUS_OK) {
         return status;
     }
@@ -716,7 +722,7 @@ int32_t oberon_lib_file_read_bool(int32_t id, int32_t pos, int32_t *x, int32_t *
     return STATUS_OK;
 }
 
-int32_t oberon_lib_file_read_num(int32_t id, int32_t pos, int32_t *x, int32_t *moved)
+int64_t oberon_lib_file_read_num(int64_t id, int64_t pos, int64_t *x, int64_t *moved)
 {
     LibraryFile *file = get_file(id);
     uint64_t low = 0;
@@ -737,8 +743,10 @@ int32_t oberon_lib_file_read_num(int32_t id, int32_t pos, int32_t *x, int32_t *m
             return STATUS_EOF;
         }
         (*moved)++;
+        /* Nine continuation bytes carry bits 0 through 62, so a tenth is
+           longer than any INTEGER encoding. */
         if (ch >= 128) {
-            if (shift >= 35 || (shift == 28 && (ch - 128) > 15)) {
+            if (shift >= 63) {
                 while (ch >= 128) {
                     ch = fgetc(file->stream);
                     if (ch == EOF) {
@@ -762,26 +770,29 @@ int32_t oberon_lib_file_read_num(int32_t id, int32_t pos, int32_t *x, int32_t *m
             if (ch >= 64) {
                 high -= 64;
             }
-            int64_t value = (int64_t)low + high * (INT64_C(1) << shift);
-            if (value < INT32_MIN || value > INT32_MAX || shift > 28) {
+            /* After nine continuation bytes the final byte stands for bit 63
+               alone, which only a sign of 0 or -1 can fill. Below that the
+               sum always fits, and unsigned arithmetic forms it without
+               overflow. */
+            if (shift == 63 && high != 0 && high != -1) {
                 set_error("invalid compact INTEGER encoding");
                 return STATUS_INVALID;
             }
-            *x = (int32_t)value;
+            *x = (int64_t)(low + ((uint64_t)high << shift));
             return STATUS_OK;
         }
     }
 }
 
-int32_t oberon_lib_file_read_string(
-    int32_t id,
-    int32_t pos,
+int64_t oberon_lib_file_read_string(
+    int64_t id,
+    int64_t pos,
     unsigned char *destination,
-    int32_t capacity,
-    int32_t *moved)
+    int64_t capacity,
+    int64_t *moved)
 {
     LibraryFile *file = get_file(id);
-    int32_t stored = 0;
+    int64_t stored = 0;
     int fits = 1;
     *moved = 0;
     if (file == NULL || capacity <= 0 || !position(file, pos)) {
@@ -817,23 +828,23 @@ int32_t oberon_lib_file_read_string(
     }
 }
 
-int32_t oberon_lib_file_read_bytes(
-    int32_t id,
-    int32_t pos,
+int64_t oberon_lib_file_read_bytes(
+    int64_t id,
+    int64_t pos,
     unsigned char *destination,
-    int32_t capacity,
-    int32_t requested,
-    int32_t *moved)
+    int64_t capacity,
+    int64_t requested,
+    int64_t *moved)
 {
     LibraryFile *file = get_file(id);
-    int32_t count = requested < capacity ? requested : capacity;
+    int64_t count = requested < capacity ? requested : capacity;
     size_t actual;
     *moved = 0;
     if (file == NULL || requested < 0 || capacity < 0 || !position(file, pos)) {
         return STATUS_ERROR;
     }
     actual = fread(destination, 1, (size_t)count, file->stream);
-    *moved = (int32_t)actual;
+    *moved = (int64_t)actual;
     if (actual == (size_t)count) {
         return STATUS_OK;
     }
@@ -846,43 +857,43 @@ int32_t oberon_lib_file_read_bytes(
     return STATUS_EOF;
 }
 
-int32_t oberon_lib_file_write_byte(int32_t id, int32_t pos, int32_t x, int32_t *moved)
+int64_t oberon_lib_file_write_byte(int64_t id, int64_t pos, int64_t x, int64_t *moved)
 {
     unsigned char byte = (unsigned char)x;
     return write_data(id, pos, &byte, 1, moved);
 }
-int32_t oberon_lib_file_write_int(int32_t id, int32_t pos, int32_t x, int32_t *moved)
+int64_t oberon_lib_file_write_int(int64_t id, int64_t pos, int64_t x, int64_t *moved)
 {
-    return write_data(id, pos, &x, 4, moved);
+    return write_data(id, pos, &x, 8, moved);
 }
-int32_t oberon_lib_file_write_real(int32_t id, int32_t pos, float x, int32_t *moved)
+int64_t oberon_lib_file_write_real(int64_t id, int64_t pos, double x, int64_t *moved)
 {
-    return write_data(id, pos, &x, 4, moved);
+    return write_data(id, pos, &x, 8, moved);
 }
-int32_t oberon_lib_file_write_set(int32_t id, int32_t pos, uint32_t x, int32_t *moved)
+int64_t oberon_lib_file_write_set(int64_t id, int64_t pos, uint64_t x, int64_t *moved)
 {
-    return write_data(id, pos, &x, 4, moved);
+    return write_data(id, pos, &x, 8, moved);
 }
-int32_t oberon_lib_file_write_bool(int32_t id, int32_t pos, int32_t x, int32_t *moved)
+int64_t oberon_lib_file_write_bool(int64_t id, int64_t pos, int64_t x, int64_t *moved)
 {
     unsigned char byte = x ? 1 : 0;
     return write_data(id, pos, &byte, 1, moved);
 }
 
-int32_t oberon_lib_file_write_num(int32_t id, int32_t pos, int32_t x, int32_t *moved)
+int64_t oberon_lib_file_write_num(int64_t id, int64_t pos, int64_t x, int64_t *moved)
 {
-    unsigned char bytes[5];
+    unsigned char bytes[10];
     int count = 0;
-    int32_t value = x;
+    int64_t value = x;
     while (value < -64 || value > 63) {
-        int32_t remainder = value % 128;
+        int64_t remainder = value % 128;
         if (remainder < 0) {
             remainder += 128;
         }
         bytes[count++] = (unsigned char)(remainder + 128);
         value = (value - remainder) / 128;
     }
-    int32_t remainder = value % 128;
+    int64_t remainder = value % 128;
     if (remainder < 0) {
         remainder += 128;
     }
@@ -890,12 +901,12 @@ int32_t oberon_lib_file_write_num(int32_t id, int32_t pos, int32_t x, int32_t *m
     return write_data(id, pos, bytes, count, moved);
 }
 
-int32_t oberon_lib_file_write_string(
-    int32_t id,
-    int32_t pos,
+int64_t oberon_lib_file_write_string(
+    int64_t id,
+    int64_t pos,
     const unsigned char *source,
-    int32_t length,
-    int32_t *moved)
+    int64_t length,
+    int64_t *moved)
 {
     const unsigned char *end = length < 0 ? NULL : memchr(source, 0, (size_t)length);
     if (end == NULL) {
@@ -903,16 +914,16 @@ int32_t oberon_lib_file_write_string(
         set_error("unterminated source string");
         return STATUS_INVALID;
     }
-    return write_data(id, pos, source, (int32_t)(end - source) + 1, moved);
+    return write_data(id, pos, source, (int64_t)(end - source) + 1, moved);
 }
 
-int32_t oberon_lib_file_write_bytes(
-    int32_t id,
-    int32_t pos,
+int64_t oberon_lib_file_write_bytes(
+    int64_t id,
+    int64_t pos,
     unsigned char *source,
-    int32_t capacity,
-    int32_t requested,
-    int32_t *moved)
+    int64_t capacity,
+    int64_t requested,
+    int64_t *moved)
 {
     if (requested < 0 || requested > capacity) {
         *moved = 0;
@@ -922,7 +933,7 @@ int32_t oberon_lib_file_write_bytes(
     return write_data(id, pos, source, requested, moved);
 }
 
-void oberon_lib_file_error(unsigned char *destination, int32_t capacity)
+void oberon_lib_file_error(unsigned char *destination, int64_t capacity)
 {
     if (capacity > 0) {
         size_t count = strlen(last_error);
@@ -939,15 +950,15 @@ extern char **oberon_argv;
 
 /* Argument zero is the program name, which Program does not expose. A host
    may start a program with no arguments at all, not even its name. */
-int32_t oberon_lib_program_arg_count(void)
+int64_t oberon_lib_program_arg_count(void)
 {
-    return oberon_argc > 0 ? (int32_t)(oberon_argc - 1) : 0;
+    return oberon_argc > 0 ? (int64_t)(oberon_argc - 1) : 0;
 }
 
 /* Program.Arg has already checked n. The result is the number of argument
    bytes that did not fit, so a zero-length destination is untouched and
    reports the whole argument. */
-int32_t oberon_lib_program_arg(int32_t n, unsigned char *destination, int32_t capacity)
+int64_t oberon_lib_program_arg(int64_t n, unsigned char *destination, int64_t capacity)
 {
     const char *source = oberon_argv[n + 1];
     size_t length = strlen(source);
@@ -957,9 +968,9 @@ int32_t oberon_lib_program_arg(int32_t n, unsigned char *destination, int32_t ca
         memcpy(destination, source, count);
         destination[count] = 0;
     }
-    return (int32_t)(length - count);
+    return (int64_t)(length - count);
 }
 
 /* exit flushes standard output and every open stream, so output written
    before Program.Exit is never lost. */
-void oberon_lib_program_exit(int32_t status) { exit((int)status); }
+void oberon_lib_program_exit(int64_t status) { exit((int)status); }

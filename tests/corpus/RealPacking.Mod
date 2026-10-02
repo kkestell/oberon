@@ -7,7 +7,7 @@ MODULE RealPacking;
      of either zero as positive zero with a zero exponent. Dividing into the
      result tells the two zeros apart, because 1.0 / +0.0 is a positive
      infinity. The overflow, subnormal, and underflow rows are ordinary
-     binary32 results and not traps. *)
+     binary64 results and not traps. *)
   IMPORT Out;
   VAR x: REAL; n, calls: INTEGER;
 
@@ -33,16 +33,17 @@ BEGIN
   x := 1.5; PACK(x, 4); Out.Int(FLOOR(x), 8); Out.Ln;
   x := 1.5; PACK(x, -2); Out.Int(FLOOR(x * 8.), 8); Out.Ln;
 
-  (* 2^200 overflows to an infinity, 2^-200 underflows to zero, and 2^-140
-     lands between the smallest subnormal and the smallest normal value. *)
-  x := 1.; PACK(x, 200);  Out.Int(ORD(x > 1.0E38), 8);
-  x := 1.; PACK(x, -200); Out.Int(ORD(x = 0.), 8);
-  x := 1.; PACK(x, -140); Out.Int(ORD(x > 0.), 8); Out.Ln;
+  (* 2^2000 overflows to an infinity, 2^-2000 underflows to zero, and
+     2^-1050 lands between the smallest subnormal and the smallest normal
+     value. *)
+  x := 1.; PACK(x, 2000);  Out.Int(ORD(x > 1.0E308), 8);
+  x := 1.; PACK(x, -2000); Out.Int(ORD(x = 0.), 8);
+  x := 1.; PACK(x, -1050); Out.Int(ORD(x > 0.), 8); Out.Ln;
 
   (* UNPK on a positive, a negative, and a subnormal input. *)
   Split(12.); Out.Ln;
   Split(-12.); Out.Ln;
-  x := 1.; PACK(x, -140); Split(x); Out.Ln;
+  x := 1.; PACK(x, -1050); Split(x); Out.Ln;
 
   (* Either zero normalizes to a positive zero and a zero exponent. *)
   x := 0.;  UNPK(x, n); Out.Int(ORD(1.0 / x > 0.), 8); Out.Int(n, 8); Out.Ln;

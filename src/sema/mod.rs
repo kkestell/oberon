@@ -24,17 +24,18 @@ use types::*;
 const MODULE_SCOPE: usize = 1;
 
 // Report 6.1 leaves the largest SET element implementation-defined. This
-// compiler picks 31, so a SET is exactly one 32-bit bit vector and bit n
-// records membership of element n. Project Oberon makes the same choice.
-const SET_MAX: i32 = 31;
-const SET_FULL: u32 = u32::MAX;
+// compiler picks 63, so a SET is exactly one 64-bit bit vector and bit n
+// records membership of element n, matching the INTEGER width as Project
+// Oberon's 31 matches its 32-bit word.
+const SET_MAX: i64 = 63;
+const SET_FULL: u64 = u64::MAX;
 
 // Report 10.2: FLOOR yields the largest INTEGER not greater than its
 // argument, so an argument only has a result while one exists. Both endpoints
-// are exact binary32 values, and the upper one is excluded because it is
+// are exact binary64 values, and the upper one is excluded because it is
 // MAX(INTEGER) + 1. The runtime check in oberon_floor uses the same pair.
-const FLOOR_MIN: f32 = -2147483648.0;
-const FLOOR_LIMIT: f32 = 2147483648.0;
+const FLOOR_MIN: f64 = -9223372036854775808.0;
+const FLOOR_LIMIT: f64 = 9223372036854775808.0;
 
 // Where a variable's storage is, what type it has there, and whether it may be
 // written. Report 8.1 builds this by applying selectors to a variable, and
@@ -720,7 +721,7 @@ impl Analyzer {
             target.ty.char_array(),
             "assign_kind chose a character array"
         );
-        let count = i32::try_from(bytes.len() + 1).expect("a string fits the source file");
+        let count = i64::try_from(bytes.len() + 1).expect("a string fits the source file");
         if let Type::Array(array) = &target.ty {
             if count > array.len {
                 self.diags.push(Diagnostic::new(
@@ -745,7 +746,7 @@ impl Analyzer {
         self.emit(ir::Inst::CopyBytes {
             dst: target.addr,
             src,
-            size: i64::from(count),
+            size: count,
         });
     }
 
@@ -1070,7 +1071,7 @@ impl Analyzer {
     // ORP reports "zero increment" and this compiler does the same rather
     // than emitting an infinite loop. One is the recovery value so the body
     // still gets lowered and diagnosed.
-    fn for_step(&mut self, step: Option<&ast::Expr>) -> i32 {
+    fn for_step(&mut self, step: Option<&ast::Expr>) -> i64 {
         let Some(expr) = step else { return 1 };
         if self.check_const_expr(expr).is_none() {
             return 1;
@@ -1133,7 +1134,7 @@ impl Analyzer {
 
         // One label table for the whole statement, as in oberonc: labels must
         // be distinct across alternatives, not just within one.
-        let mut covered: Vec<(i32, i32)> = Vec::new();
+        let mut covered: Vec<(i64, i64)> = Vec::new();
         let mut arm_ranges = Vec::new();
         for arm in arms {
             let mut ranges = Vec::new();
@@ -1409,12 +1410,12 @@ impl Analyzer {
     // Report 9.5: under an INTEGER selector every label is an integer, and
     // under a CHAR selector every label and range endpoint is a
     // single-character string or a CHAR constant. Both reduce to ordinals.
-    fn case_label(&mut self, expr: &ast::Expr, char_labels: bool) -> Option<i32> {
+    fn case_label(&mut self, expr: &ast::Expr, char_labels: bool) -> Option<i64> {
         match self.eval_const(expr) {
             Ok(value) => match (char_labels, value) {
                 (false, ConstValue::Int(value)) => Some(value),
-                (true, ConstValue::Char(c)) => Some(i32::from(c)),
-                (true, ConstValue::Str(bytes)) if bytes.len() == 1 => Some(i32::from(bytes[0])),
+                (true, ConstValue::Char(c)) => Some(i64::from(c)),
+                (true, ConstValue::Str(bytes)) if bytes.len() == 1 => Some(i64::from(bytes[0])),
                 (false, other) => {
                     self.diags.push(Diagnostic::new(
                         expr.pos(),
@@ -1465,7 +1466,7 @@ impl Analyzer {
 
     fn lower_expr(&mut self, expr: &ast::Expr) -> Option<(ir::Value, Type)> {
         match expr {
-            ast::Expr::Int { value, pos } => match i32::try_from(*value) {
+            ast::Expr::Int { value, pos } => match i64::try_from(*value) {
                 Ok(value) => Some((ir::Value::Int(value), Type::Integer)),
                 Err(_) => {
                     self.diags
@@ -1530,8 +1531,8 @@ impl Analyzer {
                     // Report 8.2.2: unary "+" is the identity on a numeric
                     // operand, so it needs no instruction of its own.
                     (ast::UnOp::Plus, Type::Integer | Type::Real) => Some((arg, found)),
-                    // REAL negation flips the binary32 sign; INTEGER negation
-                    // is the word operation, which still wraps at
+                    // REAL negation flips the binary64 sign; INTEGER negation
+                    // is the long operation, which still wraps at
                     // MIN(INTEGER) as it did before this slice.
                     (ast::UnOp::Neg, Type::Integer | Type::Real) => {
                         let dst = self.temp();
@@ -1544,7 +1545,7 @@ impl Analyzer {
                         Some((ir::Value::Temp(dst), found))
                     }
                     // Report 8.2.3: unary "-" on a SET is the complement.
-                    // Every one of the 32 bits belongs to the domain, so the
+                    // Every one of the 64 bits belongs to the domain, so the
                     // result cannot name an element outside it.
                     (ast::UnOp::Neg, Type::Set) => Some((
                         self.bin(
@@ -1622,8 +1623,8 @@ impl Analyzer {
     // below the high one. That is empty exactly when the range is reversed,
     // so the Report's rule for {m .. n} with m > n needs no branch of its
     // own, and no endpoint comparison is generated. The shift counts are
-    // `low` and `31 - high`, both already checked to lie in 0 .. 31, so
-    // neither can reach the word width.
+    // `low` and `63 - high`, both already checked to lie in 0 .. 63, so
+    // neither can reach the register width.
     fn set_range(&mut self, low: ir::Value, high: ir::Value) -> ir::Value {
         if let (ir::Value::Int(low), ir::Value::Int(high)) = (&low, &high) {
             return ir::Value::Set(set_range_bits(*low, *high));
@@ -1648,7 +1649,7 @@ impl Analyzer {
 
     // The one domain rule, shared by constructors, ranges, IN, INCL, and
     // EXCL. A constant is diagnosed here rather than deferred to run time,
-    // and folding is what makes `{16 + 16}` as wrong as `{32}`.
+    // and folding is what makes `{16 + 16}` as wrong as `{64}`.
     fn check_set_element(&mut self, expr: &ast::Expr, value: ir::Value) -> Option<ir::Value> {
         match self.try_eval_const(expr) {
             Ok(Some(ConstValue::Int(n))) => {
@@ -1665,8 +1666,8 @@ impl Analyzer {
                 return None;
             }
         }
-        // QBE reduces a shift count modulo the word width, so an unchecked
-        // 32 would quietly behave like 0.
+        // QBE reduces a shift count modulo the register width, so an unchecked
+        // 64 would quietly behave like 0.
         let low = self.bin(ir::BinOp::Lt, ir::Ty::Int, value.clone(), ir::Value::Int(0));
         let high = self.bin(
             ir::BinOp::Gt,
@@ -2035,7 +2036,7 @@ impl Analyzer {
             }
             _ => unreachable!("only a relation reaches lower_relation"),
         };
-        // A CHAR operand is zero-extended in its word, so the signed word
+        // A CHAR operand is zero-extended in its register, so the signed
         // comparison the emitter picks for it gives the unsigned ordering.
         let value = self.bin(relation_ir(op), operand_ty.ir(), lhs_value, rhs_value);
         Some((value, Type::Boolean))
@@ -2052,7 +2053,7 @@ impl Analyzer {
                 (place.addr, place.shape[0].clone())
             }
             Source::Str(bytes) => {
-                let len = i32::try_from(bytes.len() + 1).expect("a literal fits the source file");
+                let len = i64::try_from(bytes.len() + 1).expect("a literal fits the source file");
                 (self.literal(&bytes), ir::Value::Int(len))
             }
             Source::Value(..) => unreachable!("the operand was checked to be characters"),
@@ -2194,7 +2195,7 @@ impl Analyzer {
                     && let Some(bytes) = self.string_expr(actual)
                 {
                     if !var && open_string_formal(&expected) {
-                        let len = i32::try_from(bytes.len() + 1)
+                        let len = i64::try_from(bytes.len() + 1)
                             .expect("a string literal fits the source file");
                         args.push(ir::Arg::Ref(self.literal(&bytes)));
                         args.push(ir::Arg::Val(ir::Ty::Int, ir::Value::Int(len)));
@@ -2364,7 +2365,7 @@ impl Analyzer {
                 self.call_runtime("oberon_floor", floor_args, ir::Ty::Int)
             }
             // The one conversion between machine classes. It rounds to the
-            // nearest binary32 value, so an INTEGER near the top of the range
+            // nearest binary64 value, so an INTEGER above 2^53 in magnitude of the range
             // does not survive the trip.
             Builtin::Flt => {
                 let dst = self.temp();
@@ -2374,7 +2375,7 @@ impl Analyzer {
                 });
                 ir::Value::Temp(dst)
             }
-            // BOOLEAN is already 0 or 1 in a word, a SET is already its own
+            // BOOLEAN is already 0 or 1 in a register, a SET is already its own
             // bit pattern, and a CHAR is already its ordinal, so the value
             // passes through with only its type changed. cf. Project Oberon,
             // where ORD lowers to nothing.
@@ -2596,7 +2597,7 @@ impl Analyzer {
             ir::BinOp::Eq,
             ir::Ty::Int,
             arg.clone(),
-            ir::Value::Int(i32::MIN),
+            ir::Value::Int(i64::MIN),
         );
         let bad = self.label("abs.bad");
         let ok = self.label("abs.ok");
@@ -2645,7 +2646,7 @@ impl Analyzer {
     }
 
     // The Report does not constrain the count, and QBE reduces it modulo the
-    // result width, which would silently turn LSL(x, 32) into x. Diagnose a
+    // result width, which would silently turn LSL(x, 64) into x. Diagnose a
     // count the lowering already knows and check the rest at run time, which
     // is the rule Slice 8 commits to for dynamic array indices.
     fn lower_shift(
@@ -2657,7 +2658,7 @@ impl Analyzer {
     ) -> Option<ir::Value> {
         match &count {
             ir::Value::Int(n) => {
-                if !(0..=31).contains(n) {
+                if !(0..=63).contains(n) {
                     self.diags.push(shift_range_error(count_expr.pos(), *n));
                     return None;
                 }
@@ -2668,7 +2669,7 @@ impl Analyzer {
                     ir::BinOp::Gt,
                     ir::Ty::Int,
                     count.clone(),
-                    ir::Value::Int(31),
+                    ir::Value::Int(63),
                 );
                 let bad = self.bin(ir::BinOp::BitOr, ir::Ty::Bool, low, high);
                 let trap = self.label("shift.bad");
@@ -2688,15 +2689,15 @@ impl Analyzer {
             Builtin::Asr => self.bin(ir::BinOp::Sar, ir::Ty::Int, value, count),
             // A logical right shift merged with the bits that fall off the
             // bottom. The mask makes a rotation by zero the identity instead
-            // of a shift by the word width.
+            // of a shift by the register width.
             Builtin::Ror => {
                 let right = self.bin(ir::BinOp::Shr, ir::Ty::Int, value.clone(), count.clone());
-                let complement = self.bin(ir::BinOp::Sub, ir::Ty::Int, ir::Value::Int(32), count);
+                let complement = self.bin(ir::BinOp::Sub, ir::Ty::Int, ir::Value::Int(64), count);
                 let left_count = self.bin(
                     ir::BinOp::BitAnd,
                     ir::Ty::Int,
                     complement,
-                    ir::Value::Int(31),
+                    ir::Value::Int(63),
                 );
                 let left = self.bin(ir::BinOp::Shl, ir::Ty::Int, value, left_count);
                 self.bin(ir::BinOp::BitOr, ir::Ty::Int, right, left)
@@ -3687,7 +3688,7 @@ impl Analyzer {
 
     // Report 6.2: a length is a constant expression, and Report 5 leaves it an
     // INTEGER. Zero is an ordinary length; a negative one has no meaning.
-    fn array_length(&mut self, expr: &ast::Expr) -> Option<i32> {
+    fn array_length(&mut self, expr: &ast::Expr) -> Option<i64> {
         self.check_const_expr(expr)?;
         match self.eval_const(expr) {
             Ok(ConstValue::Int(len)) if len >= 0 => Some(len),
@@ -3715,8 +3716,8 @@ impl Analyzer {
     // One ARRAY constructor, and therefore one new type identity. The size is
     // computed and checked here so nothing downstream has to wonder whether an
     // array's bytes fit in the arithmetic it uses.
-    fn new_array(&mut self, len: i32, elem: Type, pos: Pos) -> Option<Type> {
-        let size = i64::from(len)
+    fn new_array(&mut self, len: i64, elem: Type, pos: Pos) -> Option<Type> {
+        let size = len
             .checked_mul(elem.size())
             .filter(|size| *size <= ir::MAX_OBJECT_SIZE);
         let Some(size) = size else {
@@ -3969,7 +3970,7 @@ impl Analyzer {
     }
 
     // `ty` is the operand type, which is what the emitter needs to choose
-    // between a word and a single-precision instruction.
+    // between an integer and a double-precision instruction.
     fn bin(&mut self, op: ir::BinOp, ty: ir::Ty, lhs: ir::Value, rhs: ir::Value) -> ir::Value {
         let dst = self.temp();
         self.emit(ir::Inst::Bin {
@@ -4208,21 +4209,21 @@ fn distinct_types_hint(target: &Type, found: &Type) -> &'static str {
     }
 }
 
-fn index_range_error(pos: Pos, index: i32, len: i32) -> Diagnostic {
+fn index_range_error(pos: Pos, index: i64, len: i64) -> Diagnostic {
     Diagnostic::new(
         pos,
         format!("index {index} is out of bounds: the array has length {len}"),
     )
 }
 
-fn shift_range_error(pos: Pos, count: i32) -> Diagnostic {
+fn shift_range_error(pos: Pos, count: i64) -> Diagnostic {
     Diagnostic::new(
         pos,
-        format!("shift count {count} is out of range: must be between 0 and 31"),
+        format!("shift count {count} is out of range: must be between 0 and 63"),
     )
 }
 
-fn set_element_range_error(pos: Pos, element: i32) -> Diagnostic {
+fn set_element_range_error(pos: Pos, element: i64) -> Diagnostic {
     Diagnostic::new(
         pos,
         format!("set element {element} is out of range: must be between 0 and {SET_MAX}"),
@@ -4231,11 +4232,11 @@ fn set_element_range_error(pos: Pos, element: i32) -> Diagnostic {
 
 // The bits of {low .. high}, which is empty when the range is reversed. The
 // runtime form in Analyzer::set_range computes the same intersection.
-fn set_range_bits(low: i32, high: i32) -> u32 {
+fn set_range_bits(low: i64, high: i64) -> u64 {
     (SET_FULL << low) & (SET_FULL >> (SET_MAX - high))
 }
 
-fn label_text(low: i32, high: i32) -> String {
+fn label_text(low: i64, high: i64) -> String {
     if low == high {
         format!("case label {low}")
     } else {

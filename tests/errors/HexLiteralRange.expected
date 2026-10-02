@@ -1,0 +1,2 @@
+tests/errors/HexLiteralRange.Mod:8:8: hex literal '10000000000000000H' too large
+Error: 1 error(s)

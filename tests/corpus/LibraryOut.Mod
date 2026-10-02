@@ -14,10 +14,10 @@ BEGIN
   full[0] := "b"; full[1] := "o"; full[2] := "u"; full[3] := "n";
   Out.String(full); Out.Ln;
   Out.Int(7, 0); Out.Char("|"); Out.Int(7, -3); Out.Char("|");
-  Out.Int(-2147483647 - 1, 13); Out.Char("|"); Out.Int(2147483647, 0); Out.Ln;
+  Out.Int(-9223372036854775807 - 1, 22); Out.Char("|"); Out.Int(9223372036854775807, 0); Out.Ln;
   Out.Hex(-1); Out.Hex(12345678H); Out.Ln;
   Out.Real(1.5, 0); Out.Ln;
-  Out.Real(-0.0, 14); Out.Ln;
+  Out.Real(-0.0, 23); Out.Ln;
   inf := 1.0 / 0.0; nan := 0.0 / 0.0;
   (* A NaN's sign bit is whatever the target's invalid operation produced, and
      no Oberon operation can read or set it. ABS clears it, so the spelling

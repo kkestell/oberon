@@ -3,6 +3,6 @@ MODULE SetInRange;
   IMPORT Out;
   VAR n: INTEGER; s: SET;
 BEGIN
-  s := {0}; n := 32;
+  s := {0}; n := 64;
   Out.Int(ORD(n IN s), 4)
 END SetInRange.

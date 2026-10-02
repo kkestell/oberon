@@ -1,5 +1,5 @@
-tests/errors/SetInConstBad.Mod:5:42: set element 32 is out of range: must be between 0 and 31
-tests/errors/SetInConstBad.Mod:8:8: set element -1 is out of range: must be between 0 and 31
-tests/errors/SetInConstBad.Mod:9:8: set element 32 is out of range: must be between 0 and 31
-tests/errors/SetInConstBad.Mod:10:12: set element 32 is out of range: must be between 0 and 31
+tests/errors/SetInConstBad.Mod:5:42: set element 64 is out of range: must be between 0 and 63
+tests/errors/SetInConstBad.Mod:8:8: set element -1 is out of range: must be between 0 and 63
+tests/errors/SetInConstBad.Mod:9:8: set element 64 is out of range: must be between 0 and 63
+tests/errors/SetInConstBad.Mod:10:12: set element 64 is out of range: must be between 0 and 63
 Error: 4 error(s)

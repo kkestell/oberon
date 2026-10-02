@@ -227,13 +227,13 @@ pub struct LabelRange {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int {
-        value: i64,
+        value: i128,
         pos: Pos,
     },
-    // Already rounded to binary32 by the lexer, so nothing downstream rounds
+    // Already rounded to binary64 by the lexer, so nothing downstream rounds
     // a second time.
     Real {
-        value: f32,
+        value: f64,
         pos: Pos,
     },
     Bool {

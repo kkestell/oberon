@@ -16,9 +16,9 @@ PROCEDURE Ln;
 
 `Open` does nothing. `Char` writes one byte. `String` writes bytes until the first null or the actual array bound, so a full unterminated array is safe and is written in full. `Ln` writes one line-feed byte.
 
-`Int` writes decimal without a leading plus and pads on the left with spaces to the positive minimum width `n`; zero and negative widths add no padding. Every 32-bit `INTEGER`, including `MIN(INTEGER)`, is supported. `Hex` writes one space and eight uppercase hexadecimal digits containing the integer's 32-bit pattern.
+`Int` writes decimal without a leading plus and pads on the left with spaces to the positive minimum width `n`; zero and negative widths add no padding. Every 64-bit `INTEGER`, including `MIN(INTEGER)`, is supported. `Hex` writes one space and sixteen uppercase hexadecimal digits containing the integer's 64-bit pattern.
 
-`Real` writes a binary32 value in uppercase exponential notation with six fractional digits and a signed exponent of at least two digits. The mantissa has no leading plus. A positive `n` is a minimum width padded on the left with spaces; zero and negative widths add no padding. On the supported C target, infinities and NaNs use the target's uppercase `INF` and `NAN` spellings and negative zero retains its sign. A NaN is written with a leading minus when its sign bit is set. Which NaN an invalid operation such as `0.0 / 0.0` produces is a property of the target, and no Oberon operation other than `ABS` fixes that sign bit, so a program that needs one spelling should print `ABS(x)`.
+`Real` writes a binary64 value in uppercase exponential notation with fifteen fractional digits and a signed exponent of at least two digits. The mantissa has no leading plus. A positive `n` is a minimum width padded on the left with spaces; zero and negative widths add no padding. On the supported C target, infinities and NaNs use the target's uppercase `INF` and `NAN` spellings and negative zero retains its sign. A NaN is written with a leading minus when its sign bit is set. Which NaN an invalid operation such as `0.0 / 0.0` produces is a property of the target, and no Oberon operation other than `ABS` fixes that sign bit, so a program that needs one spelling should print `ABS(x)`.
 
 ## `In`
 
@@ -37,7 +37,7 @@ Clients may read `Done` but cannot assign it. Every public operation sets it. `O
 
 `Int`, `Real`, `String`, and `Name` skip ASCII space, tab, line feed, carriage return, form feed, and vertical tab. Their classifications do not depend on the process locale. A scalar destination changes only after a complete valid token has been read. A malformed or overflowing token is consumed through its token boundary. `Int`, `Real`, and `String` leave terminating whitespace current; `Name` consumes the byte that ends its graphical sequence.
 
-`Int` accepts an optional minus sign followed by decimal digits, or one through eight uppercase hexadecimal digits followed by `H`. An eight-digit hexadecimal token supplies the corresponding 32-bit pattern. `Real` accepts an optional sign, one or more decimal digits, a decimal point, zero or more decimal digits, and an optional `E` exponent with an optional sign and one or more digits. Conversion rounds once to binary32; malformed tokens and non-finite results fail.
+`Int` accepts an optional minus sign followed by decimal digits, or one through sixteen uppercase hexadecimal digits followed by `H`. A decimal token must lie in the 64-bit `INTEGER` range, and a sixteen-digit hexadecimal token supplies the corresponding 64-bit pattern. `Real` accepts an optional sign, one or more decimal digits, a decimal point, zero or more decimal digits, and an optional `E` exponent with an optional sign and one or more digits. Conversion rounds once to binary64; malformed tokens and non-finite results fail.
 
 `String` accepts bytes between double quotes, including spaces but not a line feed, or a hexadecimal ordinal from 0 through 255 followed by `X`. `Name` accepts one nonempty sequence of graphical non-whitespace bytes. A successful array read always appends a null byte. A zero-length destination is untouched and fails. A one-byte destination can hold only the empty quoted string. When a nonempty `String` or `Name` result does not fit, the destination becomes an empty terminated string and `Done` is false.
 
@@ -68,7 +68,7 @@ PROCEDURE arccosh(x: REAL): REAL;
 PROCEDURE arctanh(x: REAL): REAL;
 ```
 
-The constants are source constants rounded to binary32 by the lexer. Each function calls the corresponding `float` libm operation. `log(x, base)` is `ln(x) / ln(base)`. `round(x)` is binary32 `floor(x + 0.5)`, so halfway cases round toward positive infinity. Domain errors yield NaNs and overflow yields infinities under the compiler's ordinary IEEE `REAL` rules.
+The constants are fifteen-digit source constants rounded to binary64 by the lexer. Each function calls the corresponding `double` libm operation. `log(x, base)` is `ln(x) / ln(base)`. `round(x)` is binary64 `floor(x + 0.5)`, so halfway cases round toward positive infinity. Domain errors yield NaNs and overflow yields infinities under the compiler's ordinary IEEE `REAL` rules.
 
 ## `Strings`
 
@@ -120,7 +120,7 @@ PROCEDURE GetError(VAR msg: ARRAY OF CHAR);
 
 Each transfer begins at the rider's stored position and advances it by the bytes actually transferred. A complete read clears `eof`; a read stopped by end of file sets it. Writes do not change `eof`. Complete transfers set `res` to zero. Fixed-width and bulk operations put the missing byte count in `res`; malformed encoded values use one. Scalar read destinations change only after the complete encoding arrives. `ReadBytes` may change the prefix received and transfers at most the smaller of `n` and the actual buffer length. `WriteBytes` requires `0 <= n <= LEN(buf)`.
 
-`INTEGER`, `REAL`, and `SET` use their complete four-byte target representations: little-endian signed 32-bit, little-endian IEEE binary32, and little-endian 32-bit bit set. Booleans use one byte, zero or one. Compact integers use signed base-128 with continuation bytes carrying seven low bits and the terminating byte carrying six value bits and one sign bit. Strings include their terminating null byte. An undersized `ReadString` destination becomes empty after the stored value is consumed; a missing stored terminator consumes through end of file and also returns an empty destination.
+`INTEGER`, `REAL`, and `SET` use their complete eight-byte target representations: little-endian signed 64-bit, little-endian IEEE binary64, and little-endian 64-bit bit set. Booleans use one byte, zero or one. Compact integers use signed base-128 with continuation bytes carrying seven low bits and the terminating byte carrying six value bits and one sign bit; an encoding longer than nine continuation bytes, or one whose value does not fit a 64-bit `INTEGER`, is malformed. Strings include their terminating null byte. An undersized `ReadString` destination becomes empty after the stored value is consumed; a missing stored terminator consumes through end of file and also returns an empty destination.
 
 `GetDate` encodes `hour * 4096 + minute * 64 + second` in `t` and `year * 512 + month * 32 + day` in `d`, using local time. An operating-system failure leaves both destinations unchanged.
 
@@ -142,4 +142,4 @@ Clients may read `count` but cannot assign it. It is the number of command-line 
 
 ## Target dependence
 
-The source interfaces are portable, but raw file encodings and exact libm results are pinned to the supported `amd64_sysv` target. That target has little-endian 32-bit `INTEGER`, `SET`, and IEEE binary32 `REAL`. The exact last bit of a math result and the C spelling of non-finite output are target-library properties.
+The source interfaces are portable, but raw file encodings and exact libm results are pinned to the supported `amd64_sysv` target. That target has little-endian 64-bit `INTEGER` and `SET` and IEEE binary64 `REAL`, and its C `long` is 64 bits, so file lengths and positions cover the full `INTEGER` range. The exact last bit of a math result and the C spelling of non-finite output are target-library properties.

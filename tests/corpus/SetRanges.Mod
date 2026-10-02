@@ -20,7 +20,7 @@ MODULE SetRanges;
 
   PROCEDURE Report;
   BEGIN
-    Out.Int(ORD(s), 14); Out.Int(calls, 4); Out.Int(order, 6); Out.Ln;
+    Out.Int(ORD(s), 22); Out.Int(calls, 4); Out.Int(order, 6); Out.Ln;
     calls := 0; order := 0
   END Report;
 
@@ -28,5 +28,5 @@ BEGIN
   calls := 0; order := 0;
   s := {Low(2) .. High(5)}; Report;
   s := {Low(5) .. High(2)}; Report;
-  s := {Low(0), Low(3) .. High(4), High(31)}; Report
+  s := {Low(0), Low(3) .. High(4), High(63)}; Report
 END SetRanges.

@@ -22,10 +22,8 @@ documented.
 
 ## Scope
 
-Support the current QBE target and native C toolchain. Optional `SYSTEM`
-requires an address representation that accounts for 32-bit integers and
-64-bit addresses. Interactive input and graphics are outside the portable
-library profile.
+Support the current QBE target and native C toolchain. Interactive input and
+graphics are outside the portable library profile.
 
 Additional targets, interface caching, incremental compilation, self-hosting,
 a JIT, and advanced optimization remain non-goals unless project goals change.
@@ -40,9 +38,7 @@ repository. They follow conformance.
 - **Host access.** No `SYSTEM` module or binding mechanism exists, so programs
   reach the operating system only through the bundled modules. Define `SYSTEM`
   or another way to bind C functions.
-- **Numeric width.** `INTEGER` is 32-bit and `REAL` is binary32. Array lengths,
-  indices, and file positions share the 32-bit limit, and `INTEGER` overflow
-  wraps without a trap.
+- **Integer overflow.** `INTEGER` overflow wraps without a trap.
 - **Check cost.** Every index, nil, and range check is a runtime call. Inline
   the passing comparison and call the runtime only on failure.
 - **Emitted IL.** `--emit-il` is unimplemented.

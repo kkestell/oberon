@@ -4,6 +4,6 @@ MODULE AbsOverflow;
   IMPORT Out;
   VAR n: INTEGER;
 BEGIN
-  n := -2147483648;
+  n := -9223372036854775808;
   Out.Int(ABS(n), 4)
 END AbsOverflow.

@@ -41,7 +41,7 @@ The [driver](src/driver.rs) compiles one reachable module graph into one QBE uni
 
 ### Representation
 
-`INTEGER` is signed 32-bit, `REAL` is IEEE binary32, `SET` is a 32-bit vector, and `CHAR` and `BYTE` are one byte. `SYSTEM` is not implemented.
+`INTEGER` is signed 64-bit and wide enough to hold a host address, `REAL` is IEEE binary64, `SET` is a 64-bit vector holding elements 0 through 63, `BOOLEAN` is four bytes, and `CHAR` and `BYTE` are one byte. `SYSTEM` is not implemented.
 
 Structured parameters are passed by address. The Report requires copies only for basic value parameters (10.1) and forbids modifying structured ones (9.1), so no copy is needed; aliasing through a `VAR` parameter stays observable. Open arrays carry their lengths, and record `VAR` parameters carry their dynamic type.
 

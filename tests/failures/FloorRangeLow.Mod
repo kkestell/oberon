@@ -3,6 +3,6 @@ MODULE FloorRangeLow;
   IMPORT Out;
   VAR x: REAL;
 BEGIN
-  x := -3.0E9;
+  x := -1.0E19;
   Out.Int(FLOOR(x), 4)
 END FloorRangeLow.

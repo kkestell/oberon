@@ -337,7 +337,7 @@ pub enum Type {
 
 #[derive(Debug)]
 pub struct ArrayType {
-    pub(super) len: i32,
+    pub(super) len: i64,
     pub(super) elem: Type,
     // Checked against ir::MAX_OBJECT_SIZE when the descriptor was built, so
     // every later layout sum can stay ordinary i64 arithmetic.

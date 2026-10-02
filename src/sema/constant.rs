@@ -27,7 +27,7 @@ fn eval_const_binary(
     {
         return Ok(ConstValue::Bool(relation_holds(op, str_const_cmp(&a, &b))));
     }
-    // Every source operator rounds at binary32, so a folded expression takes
+    // Every source operator rounds at binary64, so a folded expression takes
     // the same rounding steps as the same expression computed at run time.
     // IEEE behaviour is the whole answer here: overflow yields an infinity,
     // division by zero yields an infinity or a NaN, and neither is a
@@ -116,14 +116,14 @@ fn eval_const_binary(
     }
 }
 
-pub(super) fn floor_const(value: f32, pos: Pos) -> Result<i32, Diagnostic> {
+pub(super) fn floor_const(value: f64, pos: Pos) -> Result<i64, Diagnostic> {
     if !value.is_finite() || !(FLOOR_MIN..FLOOR_LIMIT).contains(&value) {
         Err(Diagnostic::new(
             pos,
             "constant FLOOR result is outside INTEGER range",
         ))
     } else {
-        Ok(value.floor() as i32)
+        Ok(value.floor() as i64)
     }
 }
 
@@ -174,7 +174,7 @@ fn text_bytes(value: &ConstValue) -> Option<Vec<u8>> {
 impl Analyzer {
     pub(super) fn check_const_expr(&mut self, expr: &ast::Expr) -> Option<Type> {
         match expr {
-            ast::Expr::Int { value, pos } => match i32::try_from(*value) {
+            ast::Expr::Int { value, pos } => match i64::try_from(*value) {
                 Ok(_) => Some(Type::Integer),
                 Err(_) => {
                     self.diags
@@ -633,28 +633,28 @@ impl Analyzer {
                 .map(ConstValue::Int)
                 .ok_or_else(|| Diagnostic::new(pos, "constant expression overflows")),
             // Clears the sign of a negative zero, leaves an infinity alone,
-            // and returns a NaN for a NaN, exactly as fabsf does at run time.
+            // and returns a NaN for a NaN, exactly as fabs does at run time.
             (Builtin::Abs, [ConstValue::Real(value)]) => Ok(ConstValue::Real(value.abs())),
             (Builtin::Odd, [ConstValue::Int(value)]) => Ok(ConstValue::Bool(value % 2 != 0)),
-            // The rounding is what makes FLT(MAX(INTEGER)) equal 2147483648.0
+            // The rounding is what makes FLT(MAX(INTEGER)) equal 9223372036854775808.0
             // and therefore outside the FLOOR domain below.
-            (Builtin::Flt, [ConstValue::Int(value)]) => Ok(ConstValue::Real(*value as f32)),
+            (Builtin::Flt, [ConstValue::Int(value)]) => Ok(ConstValue::Real(*value as f64)),
             (Builtin::Floor, [ConstValue::Real(value)]) => {
                 floor_const(*value, actuals[0].pos()).map(ConstValue::Int)
             }
-            (Builtin::Ord, [ConstValue::Bool(value)]) => Ok(ConstValue::Int(i32::from(*value))),
+            (Builtin::Ord, [ConstValue::Bool(value)]) => Ok(ConstValue::Int(i64::from(*value))),
             // Report 10.2 calls this the ordinal number of a SET but does not
-            // say how 32 elements map onto a signed INTEGER. Reinterpreting
+            // say how 64 elements map onto a signed INTEGER. Reinterpreting
             // the bit pattern keeps the folded and runtime forms identical
             // and matches Project Oberon, where ORD emits nothing at all.
-            (Builtin::Ord, [ConstValue::Set(bits)]) => Ok(ConstValue::Int(*bits as i32)),
-            (Builtin::Ord, [ConstValue::Char(c)]) => Ok(ConstValue::Int(i32::from(*c))),
+            (Builtin::Ord, [ConstValue::Set(bits)]) => Ok(ConstValue::Int(*bits as i64)),
+            (Builtin::Ord, [ConstValue::Char(c)]) => Ok(ConstValue::Int(i64::from(*c))),
             // The single-character rule again: ORD("A") is the ordinal of
             // that one character. A longer string keeps a diagnostic rather
             // than an internal invariant, because an unchecked constant walk
             // can reach here through a folded LEN index.
             (Builtin::Ord, [ConstValue::Str(bytes)]) if bytes.len() == 1 => {
-                Ok(ConstValue::Int(i32::from(bytes[0])))
+                Ok(ConstValue::Int(i64::from(bytes[0])))
             }
             (Builtin::Ord, [ConstValue::Str(bytes)]) => Err(Diagnostic::new(
                 actuals[0].pos(),
@@ -679,15 +679,15 @@ impl Analyzer {
             ) => {
                 let count = u32::try_from(*n)
                     .ok()
-                    .filter(|n| *n < 32)
+                    .filter(|n| *n < 64)
                     .ok_or_else(|| shift_range_error(actuals[1].pos(), *n))?;
                 Ok(ConstValue::Int(match builtin {
                     // A logical shift: bits past the top are discarded, so
-                    // LSL(1, 31) is MIN(INTEGER) and not an overflow, even
+                    // LSL(1, 63) is MIN(INTEGER) and not an overflow, even
                     // though the Report's gloss reads "x * 2^n".
-                    Builtin::Lsl => ((*x as u32) << count) as i32,
+                    Builtin::Lsl => ((*x as u64) << count) as i64,
                     Builtin::Asr => x >> count,
-                    Builtin::Ror => (*x as u32).rotate_right(count) as i32,
+                    Builtin::Ror => (*x as u64).rotate_right(count) as i64,
                     _ => unreachable!("not a shift"),
                 }))
             }
@@ -697,7 +697,7 @@ impl Analyzer {
 
     pub(super) fn eval_const(&self, expr: &ast::Expr) -> Result<ConstValue, Diagnostic> {
         match expr {
-            ast::Expr::Int { value, pos } => i32::try_from(*value)
+            ast::Expr::Int { value, pos } => i64::try_from(*value)
                 .map(ConstValue::Int)
                 .map_err(|_| Diagnostic::new(*pos, "integer literal out of range")),
             ast::Expr::Real { value, .. } => Ok(ConstValue::Real(*value)),
@@ -710,7 +710,7 @@ impl Analyzer {
                     let low = self.const_set_element(&element.low)?;
                     bits |= match &element.high {
                         // Both endpoints are checked before the reversed-range
-                        // rule applies, so {32 .. 0} is an error and not empty.
+                        // rule applies, so {64 .. 0} is an error and not empty.
                         Some(high) => set_range_bits(low, self.const_set_element(high)?),
                         None => 1 << low,
                     };
@@ -769,7 +769,7 @@ impl Analyzer {
                         .checked_neg()
                         .map(ConstValue::Int)
                         .ok_or_else(|| Diagnostic::new(*pos, "constant expression overflows")),
-                    // Flipping the binary32 sign, so -0.0 is a value the
+                    // Flipping the binary64 sign, so -0.0 is a value the
                     // source can write and the emitted immediate preserves.
                     (ast::UnOp::Neg, ConstValue::Real(value)) => Ok(ConstValue::Real(-value)),
                     (ast::UnOp::Neg, ConstValue::Set(bits)) => Ok(ConstValue::Set(bits ^ SET_FULL)),
@@ -1234,7 +1234,7 @@ impl Analyzer {
 
     // The static half of the one element-domain rule; Analyzer::
     // check_set_element is the runtime half, and the two must stay in step.
-    fn const_set_element(&self, expr: &ast::Expr) -> Result<i32, Diagnostic> {
+    fn const_set_element(&self, expr: &ast::Expr) -> Result<i64, Diagnostic> {
         let ConstValue::Int(element) = self.eval_const(expr)? else {
             unreachable!("constant expression was type-checked");
         };

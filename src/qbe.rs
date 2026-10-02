@@ -190,9 +190,9 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
                 .unwrap();
             }
             // QBE has no logical negation, so ~b is b = 0. The operand is
-            // always BOOLEAN, which is already 0 or 1 in a word.
+            // always BOOLEAN, which is already 0 or 1 in a long.
             ir::UnOp::Not => {
-                writeln!(out, "\t{} =w ceqw {}, 0", temp(*dst), value(arg, names)).unwrap();
+                writeln!(out, "\t{} =l ceql {}, 0", temp(*dst), value(arg, names)).unwrap();
             }
         },
         ir::Inst::Bin {
@@ -202,7 +202,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             lhs,
             rhs,
         } => {
-            let result = if op.is_comparison() { "w" } else { class(*ty) };
+            let result = if op.is_comparison() { "l" } else { class(*ty) };
             writeln!(
                 out,
                 "\t{} ={result} {} {}, {}",
@@ -214,7 +214,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             .unwrap();
         }
         ir::Inst::IntToReal { dst, arg } => {
-            writeln!(out, "\t{} =s swtof {}", temp(*dst), value(arg, names)).unwrap();
+            writeln!(out, "\t{} =d sltof {}", temp(*dst), value(arg, names)).unwrap();
         }
         ir::Inst::CheckNil { pointer, site } => {
             writeln!(
@@ -269,7 +269,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         } => {
             writeln!(
                 out,
-                "\t{} =w call $oberon_type_test_pointer(l {}, l ${})",
+                "\t{} =l call $oberon_type_test_pointer(l {}, l ${})",
                 temp(*dst),
                 value(pointer, names),
                 names.symbol(target)
@@ -283,7 +283,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         } => {
             writeln!(
                 out,
-                "\t{} =w call $oberon_type_test_descriptor(l {}, l ${})",
+                "\t{} =l call $oberon_type_test_descriptor(l {}, l ${})",
                 temp(*dst),
                 value(descriptor, names),
                 names.symbol(target)
@@ -292,9 +292,10 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         }
         // The check is a call, so it is textually and dynamically ahead of
         // every part of the address calculation: nothing scales or adds an
-        // index the runtime has not accepted. The two intermediate temporaries
+        // index the runtime has not accepted. The intermediate temporaries
         // are named from the destination number, so they cannot collide with
-        // the value temporaries, which are all `%.t<n>`.
+        // the value temporaries, which are all `%.t<n>`. Every operand is
+        // already a long, so the scaling needs no extension.
         ir::Inst::Index {
             dst,
             base,
@@ -306,15 +307,14 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         } => {
             writeln!(
                 out,
-                "\t%.i{dst} =w call $oberon_check_index(w {}, w {}, {})",
+                "\t%.i{dst} =l call $oberon_check_index(l {}, l {}, {})",
                 value(index, names),
                 value(len, names),
                 args(&site.args(), names, slots)
             )
             .unwrap();
-            writeln!(out, "\t%.x{dst} =l extsw %.i{dst}").unwrap();
             if dynamic_stride.is_empty() {
-                writeln!(out, "\t%.s{dst} =l mul %.x{dst}, {stride}").unwrap();
+                writeln!(out, "\t%.s{dst} =l mul %.i{dst}, {stride}").unwrap();
                 writeln!(
                     out,
                     "\t{} =l add {}, %.s{dst}",
@@ -323,13 +323,13 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
                 )
                 .unwrap();
             } else {
-                writeln!(out, "\t%.s{dst}.0 =l mul %.x{dst}, {stride}").unwrap();
+                writeln!(out, "\t%.s{dst}.0 =l mul %.i{dst}, {stride}").unwrap();
                 for (i, factor) in dynamic_stride.iter().enumerate() {
-                    writeln!(out, "\t%.f{dst}.{i} =l extsw {}", value(factor, names)).unwrap();
                     writeln!(
                         out,
-                        "\t%.s{dst}.{} =l mul %.s{dst}.{i}, %.f{dst}.{i}",
-                        i + 1
+                        "\t%.s{dst}.{} =l mul %.s{dst}.{i}, {}",
+                        i + 1,
+                        value(factor, names)
                     )
                     .unwrap();
                 }
@@ -370,7 +370,7 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
         } => {
             writeln!(
                 out,
-                "\tcall $oberon_check_array_copy(w {}, w {}, {})",
+                "\tcall $oberon_check_array_copy(l {}, l {}, {})",
                 value(source_len, names),
                 value(destination_len, names),
                 args(&site.args(), names, slots)
@@ -384,8 +384,12 @@ fn emit_inst(out: &mut String, inst: &ir::Inst, names: &Names, slots: &HashMap<&
             count,
             stride,
         } => {
-            writeln!(out, "\t%.c{copy_temp} =l extsw {}", value(count, names)).unwrap();
-            writeln!(out, "\t%.b{copy_temp} =l mul %.c{copy_temp}, {stride}").unwrap();
+            writeln!(
+                out,
+                "\t%.b{copy_temp} =l mul {}, {stride}",
+                value(count, names)
+            )
+            .unwrap();
             writeln!(
                 out,
                 "\tcall $oberon_copy(l {}, l {}, l %.b{copy_temp})",
@@ -452,41 +456,48 @@ fn arg(arg: &ir::Arg, names: &Names, slots: &HashMap<&str, String>) -> String {
     }
 }
 
-// QBE passes an `s` in the platform's floating-point class and a `w` in its
-// integer class, which is the native C float and int32_t ABI. A byte is a
-// word in every calling position; only its memory traffic is byte-wide.
+// QBE passes a `d` in the platform's floating-point class and an `l` in its
+// integer class, which is the native C double and int64_t ABI. Every
+// integer-like value is a long in every calling position; only the memory
+// traffic of a BOOLEAN and a byte is narrower.
 fn class(ty: ir::Ty) -> &'static str {
     match ty {
-        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set | ir::Ty::Byte => "w",
-        ir::Ty::Real => "s",
-        ir::Ty::Pointer | ir::Ty::Procedure => "l",
+        ir::Ty::Real => "d",
+        ir::Ty::Int
+        | ir::Ty::Bool
+        | ir::Ty::Set
+        | ir::Ty::Byte
+        | ir::Ty::Pointer
+        | ir::Ty::Procedure => "l",
     }
 }
 
 // The memory mnemonics come from the type, not from its register class: a
-// byte loads zero-extended into a word and stores its low byte back.
+// BOOLEAN and a byte load zero-extended into a long, and a store keeps only
+// the low four bytes or the low byte. An `l` may stand where a `w` operand
+// is expected, so the narrow stores need no truncation.
 fn load_op(ty: ir::Ty) -> &'static str {
     match ty {
-        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "loadw",
-        ir::Ty::Real => "loads",
+        ir::Ty::Int | ir::Ty::Set | ir::Ty::Pointer | ir::Ty::Procedure => "loadl",
+        ir::Ty::Bool => "loaduw",
+        ir::Ty::Real => "loadd",
         ir::Ty::Byte => "loadub",
-        ir::Ty::Pointer | ir::Ty::Procedure => "loadl",
     }
 }
 
 fn store_op(ty: ir::Ty) -> &'static str {
     match ty {
-        ir::Ty::Int | ir::Ty::Bool | ir::Ty::Set => "storew",
-        ir::Ty::Real => "stores",
+        ir::Ty::Int | ir::Ty::Set | ir::Ty::Pointer | ir::Ty::Procedure => "storel",
+        ir::Ty::Bool => "storew",
+        ir::Ty::Real => "stored",
         ir::Ty::Byte => "storeb",
-        ir::Ty::Pointer | ir::Ty::Procedure => "storel",
     }
 }
 
 // QBE names the alignment in the instruction rather than taking it as an
 // operand, and alloc4 is its smallest form; the caller rounds a smaller
-// alignment up. The other two forms are here so the day a record changes
-// that, the slot is wrong loudly rather than quietly.
+// alignment up. An eight-byte scalar takes alloc8, and alloc16 is here so
+// the day a record needs it, the slot is wrong loudly rather than quietly.
 fn alloc(align: i64) -> &'static str {
     match align {
         4 => "alloc4",
@@ -504,15 +515,15 @@ fn value(value: &ir::Value, names: &Names) -> String {
     match value {
         ir::Value::Int(value) => value.to_string(),
         ir::Value::Bool(value) => usize::from(*value).to_string(),
-        // QBE parses a word immediate as a signed 32-bit number, so a set
-        // with bit 31 in it has to be spelled negative. The bits are the same.
-        ir::Value::Set(bits) => (*bits as i32).to_string(),
-        // A QBE constant is an untyped bit string, so in an `s` context the
-        // signed spelling of the binary32 pattern reproduces the value
+        // QBE parses an immediate as a signed 64-bit number, so a set with
+        // bit 63 in it has to be spelled negative. The bits are the same.
+        ir::Value::Set(bits) => (*bits as i64).to_string(),
+        // A QBE constant is an untyped bit string, so in a `d` context the
+        // signed spelling of the binary64 pattern reproduces the value
         // exactly. That covers negative zero and the infinities and NaNs
         // constant arithmetic can produce, none of which a decimal spelling
         // states directly.
-        ir::Value::Real(v) => (v.to_bits() as i32).to_string(),
+        ir::Value::Real(v) => (v.to_bits() as i64).to_string(),
         ir::Value::Byte(v) => v.to_string(),
         ir::Value::Pointer(v) => v.to_string(),
         ir::Value::Symbol(symbol) => format!("${}", names.symbol(symbol)),
@@ -560,33 +571,30 @@ impl Names {
     }
 }
 
-// The arithmetic mnemonics are shared: `div` on two singles is already the
+// The arithmetic mnemonics are shared: `div` on two doubles is already the
 // floating quotient. Only comparisons differ, because QBE names the operand
 // class in the instruction and gives a signedness to the integer forms only.
-// The remaining operations are word-only and never see a REAL operand.
+// The remaining operations are integer-only and never see a REAL operand.
 fn bin_op(op: ir::BinOp, ty: ir::Ty) -> &'static str {
     let real = ty == ir::Ty::Real;
-    let long = matches!(ty, ir::Ty::Pointer | ir::Ty::Procedure);
     match op {
         ir::BinOp::Add => "add",
         ir::BinOp::Sub => "sub",
         ir::BinOp::Mul => "mul",
         ir::BinOp::Div => "div",
         ir::BinOp::Rem => "rem",
-        ir::BinOp::Eq if real => "ceqs",
-        ir::BinOp::Ne if real => "cnes",
-        ir::BinOp::Lt if real => "clts",
-        ir::BinOp::Le if real => "cles",
-        ir::BinOp::Gt if real => "cgts",
-        ir::BinOp::Ge if real => "cges",
-        ir::BinOp::Eq if long => "ceql",
-        ir::BinOp::Ne if long => "cnel",
-        ir::BinOp::Eq => "ceqw",
-        ir::BinOp::Ne => "cnew",
-        ir::BinOp::Lt => "csltw",
-        ir::BinOp::Le => "cslew",
-        ir::BinOp::Gt => "csgtw",
-        ir::BinOp::Ge => "csgew",
+        ir::BinOp::Eq if real => "ceqd",
+        ir::BinOp::Ne if real => "cned",
+        ir::BinOp::Lt if real => "cltd",
+        ir::BinOp::Le if real => "cled",
+        ir::BinOp::Gt if real => "cgtd",
+        ir::BinOp::Ge if real => "cged",
+        ir::BinOp::Eq => "ceql",
+        ir::BinOp::Ne => "cnel",
+        ir::BinOp::Lt => "csltl",
+        ir::BinOp::Le => "cslel",
+        ir::BinOp::Gt => "csgtl",
+        ir::BinOp::Ge => "csgel",
         ir::BinOp::Shl => "shl",
         ir::BinOp::Shr => "shr",
         ir::BinOp::Sar => "sar",

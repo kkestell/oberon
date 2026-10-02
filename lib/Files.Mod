@@ -137,7 +137,7 @@ BEGIN
   status := OberonRuntime.FileReadInt(r.base.id, r.pos, i, moved);
   r.pos := r.pos + moved;
   r.eof := status = 1;
-  r.res := 4 - moved
+  r.res := 8 - moved
 END ReadInt;
 
 PROCEDURE ReadReal*(VAR r: Rider; VAR x: REAL);
@@ -147,7 +147,7 @@ BEGIN
   status := OberonRuntime.FileReadReal(r.base.id, r.pos, x, moved);
   r.pos := r.pos + moved;
   r.eof := status = 1;
-  r.res := 4 - moved
+  r.res := 8 - moved
 END ReadReal;
 
 PROCEDURE ReadNum*(VAR r: Rider; VAR i: INTEGER);
@@ -178,7 +178,7 @@ BEGIN
   status := OberonRuntime.FileReadSet(r.base.id, r.pos, s, moved);
   r.pos := r.pos + moved;
   r.eof := status = 1;
-  r.res := 4 - moved
+  r.res := 8 - moved
 END ReadSet;
 
 PROCEDURE ReadBool*(VAR r: Rider; VAR b: BOOLEAN);
@@ -217,7 +217,7 @@ BEGIN
   Bound(r);
   status := OberonRuntime.FileWriteInt(r.base.id, r.pos, i, moved);
   r.pos := r.pos + moved;
-  r.res := 4 - moved
+  r.res := 8 - moved
 END WriteInt;
 
 PROCEDURE WriteReal*(VAR r: Rider; x: REAL);
@@ -226,7 +226,7 @@ BEGIN
   Bound(r);
   status := OberonRuntime.FileWriteReal(r.base.id, r.pos, x, moved);
   r.pos := r.pos + moved;
-  r.res := 4 - moved
+  r.res := 8 - moved
 END WriteReal;
 
 PROCEDURE WriteNum*(VAR r: Rider; i: INTEGER);
@@ -254,7 +254,7 @@ BEGIN
   Bound(r);
   status := OberonRuntime.FileWriteSet(r.base.id, r.pos, s, moved);
   r.pos := r.pos + moved;
-  r.res := 4 - moved
+  r.res := 8 - moved
 END WriteSet;
 
 PROCEDURE WriteBool*(VAR r: Rider; b: BOOLEAN);

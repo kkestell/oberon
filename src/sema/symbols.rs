@@ -19,15 +19,15 @@ pub(super) type Scope = HashMap<String, Symbol>;
 // constant however many modules import it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
-    Int(i32),
-    // Folded at binary32 precision at every source operator, so a constant
+    Int(i64),
+    // Folded at binary64 precision at every source operator, so a constant
     // expression and the same expression computed at run time round the same
     // way at the same points.
-    Real(f32),
+    Real(f64),
     Bool(bool),
-    // Unsigned so complement covers exactly the 32 supported elements and no
+    // Unsigned so complement covers exactly the 64 supported elements and no
     // set operation can overflow a signed INTEGER.
-    Set(u32),
+    Set(u64),
     // The ordinal of one character. Only ORD and CHR fold to this; a
     // single-character string stays a string, because a named constant must
     // behave exactly like the literal it was declared from.

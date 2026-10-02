@@ -4,6 +4,6 @@ MODULE SetRangeLow;
   IMPORT Out;
   VAR low, high: INTEGER; s: SET;
 BEGIN
-  low := 32; high := 0; s := {low .. high};
+  low := 64; high := 0; s := {low .. high};
   Out.Int(ORD(s), 4)
 END SetRangeLow.
