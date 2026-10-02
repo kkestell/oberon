@@ -10,6 +10,7 @@ use crate::{ast, ir, lexer, parser, qbe, sema};
 
 const QBE: &str = "qbe";
 const CC: &str = "cc";
+const HOMEBREW: &str = "/opt/homebrew";
 const RUNTIME_C: &str = "runtime/oberon.c";
 const STANDARD_C: &str = "runtime/standard.c";
 const BUILD_DIR: &str = "build";
@@ -59,9 +60,15 @@ pub fn build(source: &Path) -> Result<()> {
     fs::write(&ssa, &il).context("writing QBE IL")?;
 
     run(Command::new(QBE).arg("-o").arg(&asm).arg(&ssa), QBE)?;
+    let mut cc = Command::new(CC);
+    // Apple's toolchain does not search the Apple Silicon Homebrew prefix,
+    // where bdw-gc installs gc.h and libgc.
+    if cfg!(target_os = "macos") {
+        cc.arg(format!("-I{HOMEBREW}/include"))
+            .arg(format!("-L{HOMEBREW}/lib"));
+    }
     run(
-        Command::new(CC)
-            .arg(&asm)
+        cc.arg(&asm)
             .arg(RUNTIME_C)
             .arg(STANDARD_C)
             .arg("-lgc")
